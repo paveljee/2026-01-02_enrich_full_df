@@ -605,6 +605,7 @@ def _session_metadata(
             CODEX_TIMESTAMP_KEY: response_timestamp,
         })
     except ValidationError as exc:
+        logger.warning(Locale.PYDANTIC_VALIDATION_DETAILS_LOG, pydantic_diagnostic_json(exc))
         raise _PushValidationError(Locale.SESSION_META_FIELDS_INCOMPLETE) from exc
     return _SessionMetadata(
         session_id=session_id,
@@ -830,6 +831,10 @@ def build_rollout_index(
             try:
                 result = _CodexTextResult.model_validate(matching_results[0])
             except ValidationError as exc:
+                logger.warning(
+                    Locale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                    pydantic_diagnostic_json(exc),
+                )
                 raise _PushValidationError(
                     Locale.CITATION_RESULT_METADATA_UNSUPPORTED_TEMPLATE.format(
                         ref_id=section.ref_id
@@ -1378,6 +1383,8 @@ def _derive_retry_obligations(
                 raise _ValidationPreparationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED)
         return obligations
     except (IndexError, KeyError, ValidationError) as exc:
+        if isinstance(exc, ValidationError):
+            logger.error(Locale.PYDANTIC_VALIDATION_DETAILS_LOG, pydantic_diagnostic_json(exc))
         raise _ValidationPreparationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED) from exc
 
 
@@ -2068,6 +2075,8 @@ def evaluate_commit(
                 assert cas_codex_rollout_record is None
                 raise error
         except (OSError, ValueError) as exc:
+            if isinstance(exc, ValidationError):
+                logger.error(Locale.PYDANTIC_VALIDATION_DETAILS_LOG, pydantic_diagnostic_json(exc))
             raise _PushValidationError(str(exc)) from exc
         assert cas_codex_rollout_record is not None
         assert (

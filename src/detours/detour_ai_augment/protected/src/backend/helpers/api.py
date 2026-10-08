@@ -19,6 +19,7 @@ from uuid import UUID
 import duckdb
 import requests
 from fastapi import status
+from pydantic import ValidationError
 
 from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
@@ -211,6 +212,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     VALIDATION_REQUEST_RECORD_ID_COLUMN as VALIDATION_REQUEST_RECORD_ID_COLUMN,
 )
+from src.detours.detour_ai_augment.protected.src.shared import pydantic_diagnostic_json
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
     AiAugmentSingularOuterDict,
 )
@@ -267,6 +269,8 @@ async def lifespan() -> AsyncGenerator[None, None]:
                 if failures:
                     raise BaseExceptionGroup(Locale.BACKEND_BACKGROUND_WORK_FAILED, failures)
     except Exception as exc:
+        if isinstance(exc, ValidationError):
+            logger.error(Locale.PYDANTIC_VALIDATION_DETAILS_LOG, pydantic_diagnostic_json(exc))
         logger.error(Locale.API_LIFESPAN_FAILED_LOG, exc)
         raise
 

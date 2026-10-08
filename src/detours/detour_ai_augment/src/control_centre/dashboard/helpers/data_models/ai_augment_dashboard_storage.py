@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Sequence
 from uuid import UUID
 
 from nicegui import app
 from pydantic import ValidationError
 
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import (
+    Locale as BackendLocale,
+)
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
 )
+from src.detours.detour_ai_augment.protected.src.shared import pydantic_diagnostic_json
 
 from .dashboard_query_snapshot import DashboardQuerySnapshot
 from .run_event import Run, RunEvent
@@ -18,6 +23,7 @@ QUEUE_STORAGE_KEY = "detour_ai_augment_queue"
 RUN_EVENTS_STORAGE_KEY = "detour_ai_augment_run_events"
 RUNS_STORAGE_KEY = "detour_ai_augment_runs"
 BACKEND_DATABASE_STORAGE_KEY = "detour_ai_augment_backend_database"
+logger = logging.getLogger(__name__)
 
 
 class AiAugmentDashboardStorage:
@@ -30,6 +36,11 @@ class AiAugmentDashboardStorage:
         try:
             return DashboardQuerySnapshot.from_serialized_json(json.dumps(raw))
         except (TypeError, ValueError) as exc:
+            if isinstance(exc, ValidationError):
+                logger.error(
+                    BackendLocale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                    pydantic_diagnostic_json(exc),
+                )
             raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
 
     def replace_query_snapshot(self, snapshot: DashboardQuerySnapshot) -> DashboardQuerySnapshot:
@@ -43,6 +54,10 @@ class AiAugmentDashboardStorage:
         try:
             return [RunEvent.model_validate(value) for value in raw]
         except ValidationError as exc:
+            logger.error(
+                BackendLocale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                pydantic_diagnostic_json(exc),
+            )
             raise RuntimeError(Locale.JOURNAL_STORAGE_INVALID) from exc
 
     def save_run_events(self, events: Sequence[RunEvent]) -> None:
@@ -56,6 +71,10 @@ class AiAugmentDashboardStorage:
         try:
             runs = tuple(Run.model_validate_json(json.dumps(value)) for value in raw)
         except ValidationError as exc:
+            logger.error(
+                BackendLocale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                pydantic_diagnostic_json(exc),
+            )
             raise RuntimeError(Locale.JOURNAL_STORAGE_INVALID) from exc
         if len({run.run_id for run in runs}) != len(runs):
             raise RuntimeError(Locale.JOURNAL_DUPLICATE_RUN_ID)

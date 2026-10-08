@@ -7,12 +7,13 @@ from concurrent.futures import Future
 from enum import StrEnum
 from typing import Annotated, NoReturn, Self
 
-from pydantic import PrivateAttr
+from pydantic import PrivateAttr, ValidationError
 
 from src.detours.detour_ai_augment.protected.src.architecture import (
     BackendComponent,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
+from src.detours.detour_ai_augment.protected.src.shared import pydantic_diagnostic_json
 from src.helpers.architecture import FrozenStrictModel, implements
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,11 @@ class ResponseRecordPromise[R: BackendComponent.ResponseRecordProperty](FrozenSt
             try:
                 return await asyncio.to_thread(work), None
             except Exception as error:
+                if isinstance(error, ValidationError):
+                    logger.error(
+                        Locale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                        pydantic_diagnostic_json(error),
+                    )
                 logger.exception(Locale.STORE_RESPONSE_PROCESSING_FAILED_LOG)
                 return None, BackendStoreException._from_exception(error)
 

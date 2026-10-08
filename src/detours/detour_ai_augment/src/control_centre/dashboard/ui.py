@@ -35,6 +35,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EXPORT_OPENALEX_API_KEY,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import (
+    Locale as BackendLocale,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMN_PREFIX,
     AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
@@ -119,6 +122,7 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
 from src.detours.detour_ai_augment.protected.src.shared import (
     AppendwatchReportError,
     parse_appendwatch_report_bytes,
+    pydantic_diagnostic_json,
     source_key_from_header_value,
 )
 from src.helpers.architecture import FrozenStrictModel
@@ -985,6 +989,10 @@ class _BackendDatabaseClient:
                 self._request(method=HTTP_GET_METHOD, target=DASHBOARD_QUERY_PATH)
             )
         except ValidationError as exc:
+            logger.error(
+                BackendLocale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                pydantic_diagnostic_json(exc),
+            )
             raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
 
     def record_run_outcome(
@@ -1023,6 +1031,10 @@ class _BackendDatabaseClient:
             try:
                 outcome_body = RunOutcomeResponseRecord._parse_response_body(body)
             except ValidationError as exc:
+                logger.error(
+                    BackendLocale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                    pydantic_diagnostic_json(exc),
+                )
                 raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
             if (
                 response.status == HTTPStatus.OK
@@ -1250,6 +1262,11 @@ class _BackendSupervisor:
             await self.wait_until_ready()
             self._process = self._process.model_copy(update={"startup_succeeded": True})
         except BaseException as exc:
+            if isinstance(exc, ValidationError):
+                logger.error(
+                    BackendLocale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                    pydantic_diagnostic_json(exc),
+                )
             emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
                      Locale.BACKEND_START_FAILED_LOG_TEMPLATE.format(error=exc))
             try:
@@ -2312,6 +2329,11 @@ class _ControlCentreController:
                 )
             raise
         except Exception as exc:
+            if isinstance(exc, ValidationError):
+                logger.error(
+                    BackendLocale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                    pydantic_diagnostic_json(exc),
+                )
             cancelled = (
                 latest_run_event(run, RunLifecycle.CANCEL_REQUESTED) is not None
                 and latest_run_event(run, RunLifecycle.FAILED) is None
@@ -3255,6 +3277,11 @@ class _ControlCentrePage:
         try:
             card = await self._controller.researcher_card(namekey=namekey)
         except Exception as exc:
+            if isinstance(exc, ValidationError):
+                logger.error(
+                    BackendLocale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                    pydantic_diagnostic_json(exc),
+                )
             emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
                      f"Researcher card failed: {namekey}; {exc!r}")
             raise
@@ -3806,6 +3833,11 @@ async def publish_and_shutdown() -> None:
             spreadsheet_completed(services)
     except Exception as exc:
         APPLICATION_EXIT_CODE = 1
+        if isinstance(exc, ValidationError):
+            logger.error(
+                BackendLocale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                pydantic_diagnostic_json(exc),
+            )
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Publishing failed: {exc!r}")
         logger.exception(Locale.PUBLISH_FAILED_LOG)
     finally:
@@ -3843,6 +3875,11 @@ async def application_startup() -> None:
             await publish_and_shutdown()
     except Exception as exc:
         APPLICATION_EXIT_CODE = 1
+        if isinstance(exc, ValidationError):
+            logger.error(
+                BackendLocale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                pydantic_diagnostic_json(exc),
+            )
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Dashboard startup failed: {exc!r}")
         logger.exception(Locale.DASHBOARD_STARTUP_FAILED_LOG)
         app.shutdown()
@@ -3856,6 +3893,11 @@ async def application_shutdown() -> None:
             await SERVICES.controller.shutdown()
         except Exception as exc:
             APPLICATION_EXIT_CODE = 1
+            if isinstance(exc, ValidationError):
+                logger.error(
+                    BackendLocale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                    pydantic_diagnostic_json(exc),
+                )
             emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Dashboard shutdown failed: {exc!r}")
             raise
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, Locale.STOPPED_LOG)

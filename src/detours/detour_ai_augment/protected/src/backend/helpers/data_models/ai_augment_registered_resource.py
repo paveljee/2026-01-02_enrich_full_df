@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Self
 
-from pydantic import AnyUrl
+from pydantic import AnyUrl, ValidationError
 
+from src.detours.detour_ai_augment.protected.src.shared import pydantic_diagnostic_json
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models import FragmentType, RegisteredResource, ResourceGroup
 
@@ -14,6 +16,7 @@ from ..locale import Locale
 RESOURCE_PATH_KEY = "path"
 RESOURCE_DESCRIPTION_KEY = "desc"
 RESOURCE_SHA256_KEY = "sha256"
+logger = logging.getLogger(__name__)
 
 
 class AiAugmentRegisteredResource(RegisteredResource, FrozenStrictModel):
@@ -50,6 +53,8 @@ class AiAugmentRegisteredResource(RegisteredResource, FrozenStrictModel):
                 verify_hash_on_init=verify_hash_on_init,
             )
         except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            if isinstance(exc, ValidationError):
+                logger.error(Locale.PYDANTIC_VALIDATION_DETAILS_LOG, pydantic_diagnostic_json(exc))
             raise ValueError(
                 Locale.CONFIGURED_RESOURCE_INVALID_TEMPLATE.format(
                     resource_key=resource_key

@@ -19,6 +19,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers import api
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (
     store as store_models,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AUTHORITATIVE_RECORDS_TABLE,
     COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE,
@@ -426,6 +427,7 @@ def test_pull_ack_means_only_request_fsync_and_result_reports_processing_error(
 )
 def test_query_only_capability_returns_nak_snapshot_and_never_changes_log_or_db(
     runtime: AiAugmentBackendContext,
+    caplog: pytest.LogCaptureFixture,
     request_record_type: type[RequestRecord],
     received_at_unix_usec: int | None,
     ready_to_respond_at_unix_usec: int | None,
@@ -491,6 +493,23 @@ def test_query_only_capability_returns_nak_snapshot_and_never_changes_log_or_db(
                     "none_required",
                 ),
                 (("received_at_unix_usec",), "int_type")
+            ]
+            diagnostics = [
+                entry for entry in caplog.records
+                if entry.msg == Locale.PYDANTIC_VALIDATION_DETAILS_LOG
+            ]
+            assert len(diagnostics) == 1
+            assert isinstance(diagnostics[0].args, tuple)
+            assert isinstance(diagnostics[0].args[0], str)
+            assert [
+                (tuple(item["loc"]), item["type"])
+                for item in json.loads(diagnostics[0].args[0])
+            ] == [
+                (
+                    (nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec),),
+                    "none_required",
+                ),
+                (("received_at_unix_usec",), "int_type"),
             ]
         else:
             assert error is None and response is not None

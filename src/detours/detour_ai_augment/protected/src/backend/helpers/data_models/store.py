@@ -134,6 +134,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
 from src.detours.detour_ai_augment.protected.src.shared import (
     name_key_from_header_value,
     name_key_header_value,
+    pydantic_diagnostic_json,
     source_key_from_header_value,
     source_key_header_value,
 )
@@ -492,6 +493,11 @@ class AiAugmentBackendStore(FrozenStrictModel):
                             )
                             self._remember_reconstructed_record(reconstructed)
                         except Exception as exc:
+                            if isinstance(exc, ValidationError):
+                                logger.error(
+                                    Locale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                                    pydantic_diagnostic_json(exc),
+                                )
                             logger.exception(Locale.REPLAY_RECORD_FAILED_DETAIL_LOG, ordinal, exc)
                             raise
                     with self._transaction():
@@ -733,6 +739,11 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 return reconstructed
             except BaseException as exc:
                 self._failure = exc
+                if isinstance(exc, ValidationError):
+                    logger.error(
+                        Locale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                        pydantic_diagnostic_json(exc),
+                    )
                 raise
 
     def promise_pull_response_record(
@@ -1027,6 +1038,11 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 (query_response_record, None),
             )
         except Exception as exc:
+            if isinstance(exc, ValidationError):
+                logger.error(
+                    Locale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                    pydantic_diagnostic_json(exc),
+                )
             return ResponseRecordPromise[QueryResponseRecord]._resolved(
                 BackendStoreAcknowledgment.NAK,
                 (None, BackendStoreException._from_exception(exc)),
@@ -1380,6 +1396,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 HttpRequestLogRecord.model_validate_json(str(row[1]))
             )
         except ValidationError as exc:
+            logger.error(Locale.PYDANTIC_VALIDATION_DETAILS_LOG, pydantic_diagnostic_json(exc))
             raise _ReplayCommitLinkMissingError from exc
 
     def _insert_projected_http_record(
@@ -1710,6 +1727,11 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     http_request_log_record=validated,
                 )
             except ValueError as exc:
+                if isinstance(exc, ValidationError):
+                    logger.error(
+                        Locale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                        pydantic_diagnostic_json(exc),
+                    )
                 raise _ReplayRecordContourInvalidError(
                     Locale.REPLAY_INIT_RECORD_DETAIL_TEMPLATE.format(error=exc)
                 ) from exc
@@ -1718,8 +1740,12 @@ class AiAugmentBackendStore(FrozenStrictModel):
             try:
                 RunOutcomeResponseRecord.from_http_request_log_record(validated)
             except ValueError as exc:
+                detail = (
+                    pydantic_diagnostic_json(exc)
+                    if isinstance(exc, ValidationError) else str(exc)
+                )
                 raise _ReplayRecordContourInvalidError(
-                    Locale.REPLAY_RUN_OUTCOME_RECORD_DETAIL_TEMPLATE.format(error=exc)
+                    Locale.REPLAY_RUN_OUTCOME_RECORD_DETAIL_TEMPLATE.format(error=detail)
                 ) from exc
             return validated
 
@@ -1809,6 +1835,8 @@ class AiAugmentBackendStore(FrozenStrictModel):
         try:
             CommitRequestBody.validate_serialized_json(validated.request_body)
         except (ValidationError, ValueError) as exc:
+            if isinstance(exc, ValidationError):
+                logger.error(Locale.PYDANTIC_VALIDATION_DETAILS_LOG, pydantic_diagnostic_json(exc))
             error = (
                 ", ".join(
                     Locale.REPLAY_VALIDATION_ERROR_DETAIL_TEMPLATE.format(
@@ -1846,6 +1874,11 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 _ReplayCommitInvalidError,
                 _ReplayRecordContourInvalidError,
             ) as exc:
+                if isinstance(exc, ValidationError):
+                    logger.error(
+                        Locale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                        pydantic_diagnostic_json(exc),
+                    )
                 detail = (
                     ", ".join(
                         Locale.REPLAY_VALIDATION_ERROR_DETAIL_TEMPLATE.format(
@@ -1948,6 +1981,8 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 KTP_LAST_NAME_COL: identity[KTP_LAST_NAME_COL],
             })
         except (StopIteration, TypeError, ValueError, json.JSONDecodeError) as exc:
+            if isinstance(exc, ValidationError):
+                logger.error(Locale.PYDANTIC_VALIDATION_DETAILS_LOG, pydantic_diagnostic_json(exc))
             raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
                 message=Locale.REPLAY_COMMIT_PULL_INVALID,
                 detail=Locale.REPLAY_COMMIT_PULL_PARSE_DETAIL_TEMPLATE.format(error=exc),
@@ -3254,6 +3289,11 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 _ReplayCommitInvalidError,
                 _ReplayRecordContourInvalidError,
             ) as exc:
+                if isinstance(exc, ValidationError):
+                    logger.error(
+                        Locale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                        pydantic_diagnostic_json(exc),
+                    )
                 raise _ReplayProjectionConflictError from exc
         return tuple(codex_innerdicts)
 

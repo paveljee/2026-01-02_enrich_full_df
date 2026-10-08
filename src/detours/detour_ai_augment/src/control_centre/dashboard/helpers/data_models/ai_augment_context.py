@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from functools import cached_property
 from pathlib import PurePosixPath
@@ -17,6 +18,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EXPORT_OPENALEX_API_KEY,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import (
+    Locale as BackendLocale,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     APPENDWATCH_REPORT_ENV_NAME,
     FORBIDDEN_NORMALIZED_PATH_PARTS,
@@ -31,9 +35,11 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     LIMA_CONFIG_PATH,
     TEXT_ENCODING,
 )
+from src.detours.detour_ai_augment.protected.src.shared import pydantic_diagnostic_json
 from src.helpers.architecture import FrozenStrictModel, implements
 
 LIMA_APPENDWATCH_REPORT_PARAM: Final = APPENDWATCH_REPORT_ENV_NAME
+logger = logging.getLogger(__name__)
 
 
 @implements[ControlCentreComponent.ContextProperty]()
@@ -92,5 +98,10 @@ class AiAugmentControlCentreContext(FrozenStrictModel):
             ValidationError,
             yaml.YAMLError,
         ) as exc:
+            if isinstance(exc, ValidationError):
+                logger.error(
+                    BackendLocale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                    pydantic_diagnostic_json(exc),
+                )
             raise RuntimeError(Locale.LIMA_CONFIG_INVALID) from exc
         return configuration

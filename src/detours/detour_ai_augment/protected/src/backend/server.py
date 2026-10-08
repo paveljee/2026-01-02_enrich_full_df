@@ -321,6 +321,11 @@ async def pull(request: Request) -> Response:
         try:
             reply = api._pull_response(store)
         except Exception as exc:
+            if isinstance(exc, ValidationError):
+                logger.error(
+                    Locale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                    pydantic_diagnostic_json(exc),
+                )
             logger.error(Locale.PULL_FAILED_LOG, exc)
             reply = api._error_response(HTTPStatus.INTERNAL_SERVER_ERROR)
         ready = time.time_ns() // NANOSECONDS_PER_MICROSECOND
@@ -632,7 +637,12 @@ def create_dashboard_query_app(
                 len(response_record.ai_augment_singular_outerdicts),
             )
             return response_from_adapter(response_record.to_response())
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, ValidationError):
+                app.logger.error(
+                    Locale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                    pydantic_diagnostic_json(exc),
+                )
             app.logger.exception(Locale.IPC_QUERY_FATAL_LOG)
             fatal_exit(1)
 
@@ -957,6 +967,8 @@ def configure_runtime(
             verify_hash_on_init=verify_hash_on_init,
         )
     except (OSError, ValueError) as exc:
+        if isinstance(exc, ValidationError):
+            logger.error(Locale.PYDANTIC_VALIDATION_DETAILS_LOG, pydantic_diagnostic_json(exc))
         raise RuntimeError(
             Locale.CONFIG_INVALID_TEMPLATE.format(config_path=config_path)
         ) from exc
@@ -976,6 +988,8 @@ def configure_runtime(
     try:
         context = AiAugmentBackendContext(pipeline_config=pipeline)
     except ValueError as exc:
+        if isinstance(exc, ValidationError):
+            logger.error(Locale.PYDANTIC_VALIDATION_DETAILS_LOG, pydantic_diagnostic_json(exc))
         raise RuntimeError(str(exc)) from exc
     logger.info(
         Locale.BACKEND_CONFIG_VALIDATED_LOG,
@@ -1049,13 +1063,23 @@ def main(argv: list[str] | None = None) -> None:
             try:
                 startup_namekey = NameKey.from_json_key(raw_namekey)
             except (TypeError, ValueError) as exc:
+                if isinstance(exc, ValidationError):
+                    logger.error(
+                        Locale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                        pydantic_diagnostic_json(exc),
+                    )
                 raise ValueError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
             context = configure_runtime(
                 args.config,
                 verify_hash_on_init=verify_hash_on_init,
             )
             context.blueprint_for_namekey(startup_namekey)
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, ValidationError):
+                logger.error(
+                    Locale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                    pydantic_diagnostic_json(exc),
+                )
             logger.exception(Locale.BACKEND_FAILED_LOG)
             raise
         confirmed = confirm_startup(args)
@@ -1103,7 +1127,9 @@ def main(argv: list[str] | None = None) -> None:
                 host=SERVER_HOST,
                 port=SERVER_PORT,
             )
-    except BaseException:
+    except BaseException as exc:
+        if isinstance(exc, ValidationError):
+            logger.error(Locale.PYDANTIC_VALIDATION_DETAILS_LOG, pydantic_diagnostic_json(exc))
         logger.exception(Locale.BACKEND_FAILED_LOG)
         raise
     finally:

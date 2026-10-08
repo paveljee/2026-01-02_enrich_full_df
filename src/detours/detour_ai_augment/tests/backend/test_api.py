@@ -4993,6 +4993,38 @@ def test_replay_line_reports_missing_timing_endpoint() -> None:
     ]
 
 
+def test_replay_line_logs_full_pydantic_rejected_input(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    record = persisted_http_record(
+        record_id=UUID("019d0000-0000-7000-8000-000000000021"),
+        method=HTTP_GET_METHOD,
+        path=PULL_PATH,
+        response_code=HTTPStatus.OK,
+    )
+    rejected_value = "x" * 10_000
+    invalid = {
+        **record.model_dump(mode="json"),
+        nameof(lambda: HttpRequestLogRecord.response_code): rejected_value,
+    }
+    with pytest.raises(_ReplayLogLineInvalidError):
+        AiAugmentBackendStore._authoritative_log_records(
+            (json.dumps(invalid) + "\n").encode(TEXT_ENCODING),
+        )
+    diagnostics = [
+        entry for entry in caplog.records
+        if entry.msg == Locale.PYDANTIC_VALIDATION_DETAILS_LOG
+    ]
+    assert len(diagnostics) == 1
+    assert isinstance(diagnostics[0].args, tuple)
+    diagnostic_json = diagnostics[0].args[0]
+    assert isinstance(diagnostic_json, str)
+    assert any(
+        error["input"] == rejected_value
+        for error in json.loads(diagnostic_json)
+    )
+
+
 def test_replay_line_reports_invalid_public_response_timing() -> None:
     record = persisted_http_record(
         record_id=UUID("019d0000-0000-7000-8000-000000000021"),

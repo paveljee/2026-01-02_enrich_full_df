@@ -10,7 +10,7 @@ from random import Random
 from typing import Any
 
 import duckdb
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.detours.detour_ai_augment.protected.src.architecture import (
     BackendComponent,
@@ -42,6 +42,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
 )
+from src.detours.detour_ai_augment.protected.src.shared import pydantic_diagnostic_json
 from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models import InnerDict, MatchingProcedure, NameKey
 from src.helpers.duckdb_utils import duckdb_quote_identifier
@@ -222,6 +223,8 @@ def _source_innerdicts_by_namekey(
         try:
             namekey = NameKey.from_json_key(raw_namekey)
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            if isinstance(exc, ValidationError):
+                logger.error(Locale.PYDANTIC_VALIDATION_DETAILS_LOG, pydantic_diagnostic_json(exc))
             raise ValueError(
                 Locale.TABLE_NAMEKEY_INVALID_TEMPLATE.format(table_name=table_name)
             ) from exc
