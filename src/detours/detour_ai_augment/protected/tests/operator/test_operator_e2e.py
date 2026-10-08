@@ -675,11 +675,11 @@ def target_namekey(
             '{"ktp.first_name":"Gaoquan ","ktp.last_name":"Shi"}',
         )
         _operator_log(
-            f"added {namekey.last_name} to workflow candidates: "
+            f"added to workflow candidates: "
             f"{namekey.model_dump_json(by_alias=True)}"
         )
         namekey = Random().choice((namekey, *(item.namekey for item in first_five)))
-    _operator_log(f"selected workflow target {namekey}")
+    _operator_log(f"randomly selected workflow target {namekey}")
     return namekey
 
 
