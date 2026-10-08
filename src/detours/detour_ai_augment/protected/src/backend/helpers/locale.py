@@ -675,6 +675,10 @@ class Locale:
     REPLAY_VALIDATION_EVALUATION_DETAIL: Final = (
         "recomputed post-commit validation differs from recorded validation"
     )
+    REPLAY_VALIDATION_DIFFERENCE_PATH_TEMPLATE: Final = "first difference at {path}"
+    REPLAY_VALIDATION_DIFFERENCE_VALUES_TEMPLATE: Final = (
+        "first difference at {path}: recorded={recorded}, recomputed={recomputed}"
+    )
     REPLAY_VALIDATION_HTTP_IDS_DETAIL: Final = (
         "replayed provider HTTP record IDs differ from recorded inputs"
     )

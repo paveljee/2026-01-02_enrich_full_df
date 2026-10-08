@@ -2260,9 +2260,53 @@ class AiAugmentBackendStore(FrozenStrictModel):
         assert projection.commit_request_record is commit_ref
         observed = body.post_commit_validation
         if evaluated != observed:
+            # Report one leaf, not the potentially large submission and its evidence.
+            recorded_value: object = observed.model_dump(mode="json")
+            recomputed_value: object = evaluated.model_dump(mode="json")
+            missing = object()
+            path = ""
+            while recorded_value != recomputed_value:
+                if isinstance(recorded_value, dict) and isinstance(recomputed_value, dict):
+                    key = next(
+                        key for key in sorted(recorded_value.keys() | recomputed_value.keys())
+                        if recorded_value.get(key, missing) != recomputed_value.get(key, missing)
+                    )
+                    path = f"{path}.{key}" if path else key
+                    recorded_value = recorded_value.get(key, missing)
+                    recomputed_value = recomputed_value.get(key, missing)
+                elif isinstance(recorded_value, list) and isinstance(recomputed_value, list):
+                    index = next(
+                        (index for index in range(min(len(recorded_value), len(recomputed_value)))
+                         if recorded_value[index] != recomputed_value[index]),
+                        min(len(recorded_value), len(recomputed_value)),
+                    )
+                    path += f"[{index}]"
+                    recorded_value = (
+                        recorded_value[index] if index < len(recorded_value) else missing
+                    )
+                    recomputed_value = (
+                        recomputed_value[index] if index < len(recomputed_value) else missing
+                    )
+                else:
+                    break
+            detail = Locale.REPLAY_VALIDATION_EVALUATION_DETAIL
+            if path:
+                difference = (
+                    Locale.REPLAY_VALIDATION_DIFFERENCE_VALUES_TEMPLATE.format(
+                        path=path, recorded=repr(recorded_value),
+                        recomputed=repr(recomputed_value),
+                    )
+                    if recorded_value is not missing and recomputed_value is not missing
+                    and not isinstance(recorded_value, (dict, list))
+                    and not isinstance(recomputed_value, (dict, list))
+                    else Locale.REPLAY_VALIDATION_DIFFERENCE_PATH_TEMPLATE.format(path=path)
+                )
+                detail = Locale.REPLAY_DETAIL_TEMPLATE.format(
+                    message=detail, detail=difference,
+                )
             raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
                 message=Locale.VALIDATION_REPLAY_MISMATCH,
-                detail=Locale.REPLAY_VALIDATION_EVALUATION_DETAIL,
+                detail=detail,
             ))
         if http.record_ids != tuple(item.record_id for item in body.openalex_ror_records):
             raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(

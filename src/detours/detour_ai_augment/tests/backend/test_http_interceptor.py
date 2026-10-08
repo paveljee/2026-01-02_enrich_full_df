@@ -18,7 +18,7 @@ import httpx
 import pytest
 import requests
 from fastapi import FastAPI
-from pydantic import ValidationError
+from pydantic import AnyUrl, ValidationError
 from starlette.types import Message, Scope
 
 from src.detours.detour_ai_augment.protected.src.backend import server
@@ -28,6 +28,12 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.cod
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
     PostCommitValidation,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
+    GenderSubmission,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.replay_log import (  # noqa: E501
+    ReplayLogRegisteredResource,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store import (  # noqa: E501
     AiAugmentBackendStore,
@@ -56,8 +62,11 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
     KTP_AI_AUGMENT_EDUCATION_COL,
+    KTP_AI_AUGMENT_GENDER_COL,
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     NANOSECONDS_PER_MICROSECOND,
+    NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+    NOT_REPORTED_VALUE,
     POST_COMMIT_VALIDATION_ACCEPTED_COL,
     POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE,
     POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE,
@@ -880,6 +889,68 @@ def test_live_repeat_resume_and_explicit_replay_never_publish(
     assert list(output.iterdir()) == [old_archive]
     assert old_archive.read_bytes() == b"leave existing archives alone"
     assert old_archive.stat().st_mtime_ns == before
+
+
+def test_replay_validation_mismatch_reports_first_nested_value(
+    backend_store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(requests.Session, "send", no_network)
+    payload = valid_submission_body()
+    with backend_store._writable(runtime):
+        result = backend_store._validate_commit(commit(backend_store, payload, payload))
+        assert (
+            result.validation_request_body.post_commit_validation.result
+            is BackendLifecycle.ACCEPTED
+        )
+
+    log = Path(runtime.pipeline_config.replay_log)
+    lines = log.read_bytes().splitlines(keepends=True)
+    last = json.loads(lines[-1])
+    request_body_key = nameof(lambda: HttpRequestLogRecord.request_body)
+    body = json.loads(last[request_body_key])
+    recorded = body[nameof(lambda: ValidationRequestBody.post_commit_validation)]
+    submission = recorded[nameof(lambda: PostCommitValidation.submission)]
+    standardized_key = nameof(lambda: GenderSubmission.standardized_value)
+    gender = submission[KTP_AI_AUGMENT_GENDER_COL]
+    assert gender[standardized_key] == NOT_AVAILABLE_OR_APPLICABLE_VALUE
+    gender[standardized_key] = NOT_REPORTED_VALUE
+    last[request_body_key] = json.dumps(body, separators=(",", ":"))
+    lines[-1] = (json.dumps(last, separators=(",", ":")) + "\n").encode(TEXT_ENCODING)
+    altered_log = log.with_name("altered-authoritative.jsonl")
+    altered_log.write_bytes(b"".join(lines))
+
+    replay = backend_store_for_test(runtime)
+    replay._replay_log = replay._replay_log.model_copy(update={
+        nameof(lambda: ReplayLogRegisteredResource.name): altered_log.name,
+        nameof(lambda: ReplayLogRegisteredResource.url): AnyUrl(altered_log.resolve().as_uri()),
+    })
+    with pytest.raises(ReplayInputMissing) as exc_info:
+        rebuild_for_test(replay, runtime)
+    assert str(exc_info.value) == Locale.REPLAY_DETAIL_TEMPLATE.format(
+        message=Locale.VALIDATION_REPLAY_MISMATCH,
+        detail=Locale.REPLAY_DETAIL_TEMPLATE.format(
+            message=Locale.REPLAY_VALIDATION_EVALUATION_DETAIL,
+            detail=Locale.REPLAY_VALIDATION_DIFFERENCE_VALUES_TEMPLATE.format(
+                path=(
+                    f"{nameof(lambda: PostCommitValidation.submission)}."
+                    f"{KTP_AI_AUGMENT_GENDER_COL}.{standardized_key}"
+                ),
+                recorded=repr(NOT_REPORTED_VALUE),
+                recomputed=repr(NOT_AVAILABLE_OR_APPLICABLE_VALUE),
+            ),
+        ),
+    )
+    failures = [
+        entry for entry in caplog.records
+        if entry.msg == Locale.REPLAY_RECORD_FAILED_DETAIL_LOG
+    ]
+    assert len(failures) == 1
+    assert failures[0].getMessage() == Locale.REPLAY_RECORD_FAILED_DETAIL_LOG % (
+        len(lines), str(exc_info.value),
+    )
 
 
 def outcome_for_commit(
