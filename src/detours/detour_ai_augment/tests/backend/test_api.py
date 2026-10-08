@@ -4964,6 +4964,35 @@ def test_replay_log_rejects_incomplete_tail_without_repair(
     assert replay_log.read_bytes() == value
 
 
+def test_replay_line_reports_missing_timing_endpoint() -> None:
+    record = persisted_http_record(
+        record_id=UUID("019d0000-0000-7000-8000-000000000021"),
+        method=HTTP_GET_METHOD,
+        path=PULL_PATH,
+        response_code=HTTPStatus.OK,
+    )
+    invalid = {
+        **record.model_dump(mode="json"),
+        nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec): None,
+    }
+    with pytest.raises(_ReplayLogLineInvalidError) as exc_info:
+        AiAugmentBackendStore._authoritative_log_records(
+            (json.dumps(invalid) + "\n").encode(TEXT_ENCODING),
+            start_line_number=4,
+        )
+    assert str(exc_info.value) == Locale.REPLAY_DETAIL_TEMPLATE.format(
+        message=Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=4),
+        detail=Locale.REPLAY_VALIDATION_ERROR_DETAIL_TEMPLATE.format(
+            location="", error_type="value_error",
+        ),
+    )
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ValidationError)
+    assert [(error["loc"], error["type"]) for error in cause.errors()] == [
+        ((), "value_error"),
+    ]
+
+
 def test_replay_line_reports_invalid_public_response_timing() -> None:
     record = persisted_http_record(
         record_id=UUID("019d0000-0000-7000-8000-000000000021"),
@@ -4973,7 +5002,7 @@ def test_replay_line_reports_invalid_public_response_timing() -> None:
     )
     invalid = HttpRequestLogRecord.model_validate({
         **record.model_dump(),
-        "ready_to_respond_at_unix_usec": None,
+        nameof(lambda: HttpRequestLogRecord.received_at_unix_usec): 1,
     })
     with pytest.raises(_ReplayLogLineInvalidError) as exc_info:
         AiAugmentBackendStore._authoritative_log_records(
@@ -4984,7 +5013,7 @@ def test_replay_line_reports_invalid_public_response_timing() -> None:
         message=Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=4),
         detail=Locale.REPLAY_DETAIL_TEMPLATE.format(
             message=Locale.REPLAY_RECORD_CONTOUR_INVALID,
-            detail=Locale.REPLAY_READY_AT_MISSING_DETAIL,
+            detail=Locale.REPLAY_RECEIVED_AT_ABSENT_DETAIL,
         ),
     )
 
