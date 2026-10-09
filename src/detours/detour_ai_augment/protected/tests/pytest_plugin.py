@@ -938,11 +938,11 @@ def completed_query_fixture_process() -> None:
         # Plain initial submission needs no provider requests.
         submission_json = validated.validation_request_body.post_commit_validation.submission
         assert submission_json is not None
-        from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
-            StandardizedSubmission,
+        from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E501
+            Submission,
         )
 
-        submission = StandardizedSubmission.model_validate(submission_json)
+        submission = Submission.model_validate(submission_json)
         lines = [api.json_line(submission.normalized_values())]
         ground_truth_innerdict = store.ai_augment_singular_outerdicts()[0].ground_truth_innerdict()
         if ground_truth_innerdict is not None:

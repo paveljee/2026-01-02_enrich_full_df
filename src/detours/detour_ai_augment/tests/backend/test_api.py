@@ -197,6 +197,8 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     SESSION_ID_HEADER,
     SOURCE_KEY_HEADER,
     SSH_EXECUTABLE,
+    STANDARDIZED_SUBMISSION_TYPE,
+    SUBMISSION_TYPE,
     SYNTHETIC_COMMIT_HOST,
     SYNTHETIC_COMMIT_SCHEME,
     TEXT_ENCODING,
@@ -6620,6 +6622,10 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
             )
     else:
         assert validation.submission is not None
+        assert validation.submission_type == SUBMISSION_TYPE
+        assert validation.submission == Submission.model_validate(
+            submission_body
+        ).model_dump(mode="json", by_alias=True)
         rows = [json.loads(line) for line in response.text.splitlines()]
         assert isinstance(rows[0], dict)
         education = validation.submission[KTP_AI_AUGMENT_EDUCATION_COL]
@@ -6686,6 +6692,11 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
                     outcome = validation.validation_request_body.post_commit_validation
                     assert outcome.stage is expected_stage
                     assert outcome.result is expected_result
+                    if expected_result is BackendLifecycle.ACCEPTED:
+                        assert outcome.submission_type == STANDARDIZED_SUBMISSION_TYPE
+                        assert outcome.submission == StandardizedSubmission.model_validate(
+                            standardized
+                        ).model_dump(mode="json", by_alias=True)
                     pull = await client.get(PULL_PATH)
                     assert pull.status_code == expected_pull_status
                     if submission is rejected_evidence:

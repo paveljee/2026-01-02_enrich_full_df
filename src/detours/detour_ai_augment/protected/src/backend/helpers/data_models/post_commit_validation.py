@@ -1886,7 +1886,6 @@ def _evaluate_submission_for_commit(
                 raise _ValidationPreparationError(Locale.CONFIGURED_NAMEKEY_NOT_FOUND)
 
             stage = BackendLifecycle.INNERDICT_AND_CARD
-            submission_payload = accepted_submission
             output_row = _accepted_output_row(
                 submission=accepted_submission,
                 evidence=evidence_assessment.validated,

@@ -46,7 +46,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     HTTP_CONTENT_LENGTH_HEADER,
     HTTP_CONTENT_TYPE_HEADER,
     KTP_AI_AUGMENT_COMMENTS_COL,
-    STANDARDIZED_SUBMISSION_TYPE,
     TEXT_ENCODING,
     ContentType,
 )
@@ -457,7 +456,6 @@ def _pull_response(
             )
         if (
             validation.result is not BackendLifecycle.ACCEPTED
-            or validation.submission_type != STANDARDIZED_SUBMISSION_TYPE
             or validation.submission is None
         ):
             raise BackendStoreException(Locale.PULL_COMPLETED_RESULT_INVALID)

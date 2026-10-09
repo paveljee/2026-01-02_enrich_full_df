@@ -30,7 +30,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pos
     PostCommitValidation,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
-    GenderSubmission,
+    FieldSubmission,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.replay_log import (  # noqa: E501
     ReplayLogRegisteredResource,
@@ -40,6 +40,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.sto
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
     AI_AUGMENT_STANDARDIZED_COLUMNS,
     ASGI_BODY_KEY,
     ASGI_HEADERS_KEY,
@@ -905,6 +906,16 @@ def test_replay_validation_mismatch_reports_first_nested_value(
             result.validation_request_body.post_commit_validation.result
             is BackendLifecycle.ACCEPTED
         )
+        standardized_column = dict(AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS)[
+            KTP_AI_AUGMENT_GENDER_COL
+        ]
+        assert backend_store._execute(
+            f'SELECT "{standardized_column}" FROM {CODEX_OUTPUT_ROWS_TABLE}'
+        ).fetchone() == (
+            codex_parse.render_standardized_submission_value(
+                json.dumps(NOT_AVAILABLE_OR_APPLICABLE_VALUE)
+            ),
+        )
 
     log = Path(runtime.pipeline_config.replay_log)
     lines = log.read_bytes().splitlines(keepends=True)
@@ -913,10 +924,12 @@ def test_replay_validation_mismatch_reports_first_nested_value(
     body = json.loads(last[request_body_key])
     recorded = body[nameof(lambda: ValidationRequestBody.post_commit_validation)]
     submission = recorded[nameof(lambda: PostCommitValidation.submission)]
-    standardized_key = nameof(lambda: GenderSubmission.standardized_value)
+    value_key = nameof(lambda: FieldSubmission.value)
     gender = submission[KTP_AI_AUGMENT_GENDER_COL]
-    assert gender[standardized_key] == NOT_AVAILABLE_OR_APPLICABLE_VALUE
-    gender[standardized_key] = NOT_REPORTED_VALUE
+    original_value = gender[value_key]
+    assert isinstance(original_value, str)
+    assert original_value != NOT_REPORTED_VALUE
+    gender[value_key] = NOT_REPORTED_VALUE
     last[request_body_key] = json.dumps(body, separators=(",", ":"))
     lines[-1] = (json.dumps(last, separators=(",", ":")) + "\n").encode(TEXT_ENCODING)
     altered_log = log.with_name("altered-authoritative.jsonl")
@@ -936,10 +949,10 @@ def test_replay_validation_mismatch_reports_first_nested_value(
             detail=Locale.REPLAY_VALIDATION_DIFFERENCE_VALUES_TEMPLATE.format(
                 path=(
                     f"{nameof(lambda: PostCommitValidation.submission)}."
-                    f"{KTP_AI_AUGMENT_GENDER_COL}.{standardized_key}"
+                    f"{KTP_AI_AUGMENT_GENDER_COL}.{value_key}"
                 ),
                 recorded=repr(NOT_REPORTED_VALUE),
-                recomputed=repr(NOT_AVAILABLE_OR_APPLICABLE_VALUE),
+                recomputed=repr(original_value),
             ),
         ),
     )
