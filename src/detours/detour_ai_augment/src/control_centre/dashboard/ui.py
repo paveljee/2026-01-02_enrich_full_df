@@ -3807,11 +3807,7 @@ def spreadsheet_completed(services: _ApplicationServices, *, martin: bool = Fals
         for researcher, outcome in completed_rows:
             assert outcome.codex_innerdict is not None
             values = dict(outcome.codex_innerdict.innerdict.data)
-            ground_truth = (
-                researcher.ground_truth_innerdict()
-                if researcher.ai_augment_cohort is AiAugmentCohort.GROUND_TRUTH
-                else None
-            )
+            ground_truth = researcher.ground_truth_innerdict()
             for ai_column, table_1_column in ground_truth_by_ai.items():
                 values[table_1_column] = (
                     None if ground_truth is None

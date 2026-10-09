@@ -47,11 +47,14 @@ class DashboardQuerySnapshot(FrozenStrictModel):
     def ground_truth_by_namekey(self) -> Mapping[str, InnerDict]:
         result: dict[str, InnerDict] = {}
         for researcher in self.ai_augment_singular_outerdicts:
-            if researcher.ai_augment_cohort is AiAugmentCohort.GROUND_TRUTH:
-                innerdict = researcher.ground_truth_innerdict()
-                if innerdict is None:
+            if researcher.ai_augment_cohort is AiAugmentCohort.INELIGIBLE:
+                continue
+            innerdict = researcher.ground_truth_innerdict()
+            if innerdict is None:
+                if researcher.ai_augment_cohort is AiAugmentCohort.GROUND_TRUTH:
                     raise ValueError(Locale.GROUND_TRUTH_MISSING)
-                result[researcher.namekey.to_json_key()] = innerdict
+                continue
+            result[researcher.namekey.to_json_key()] = innerdict
         return MappingProxyType(result)
 
     @model_validator(mode="after")

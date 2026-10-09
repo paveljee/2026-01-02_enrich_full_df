@@ -3723,6 +3723,33 @@ async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pair
         if source.ai_augment_cohort is AiAugmentCohort.NO_GROUND_TRUTH
     )
     assert len(no_ground_truth_sources) >= 2
+    partial_docx_values: dict[str, str | None] = {
+        column: None for column in DOCX_COLUMNS
+    }
+    present_column, missing_column = DOCX_COLUMNS[:2]
+    partial_docx_values[present_column] = "Partial DOCX value"
+    no_ground_truth_source = no_ground_truth_sources[0]
+    partial_docx_innerdict = InnerDict.from_mapping(
+        {
+            KTP_NAMEKEY_COL: no_ground_truth_source.namekey.to_json_key(),
+            KTP_FIRST_NAME_COL: no_ground_truth_source.namekey.first_name,
+            KTP_LAST_NAME_COL: no_ground_truth_source.namekey.last_name,
+            DRAW_LABEL: no_ground_truth_source.draw_numbers[0],
+            **partial_docx_values,
+        },
+        DocxMatchProcedure(),
+    )
+    no_ground_truth_source = AiAugmentSingularOuterDict(
+        namekey=no_ground_truth_source.namekey,
+        ai_augment_rnd=no_ground_truth_source.ai_augment_rnd,
+        ai_augment_cohort=no_ground_truth_source.ai_augment_cohort,
+        ai_augment_ineligibility_category=(
+            no_ground_truth_source.ai_augment_ineligibility_category
+        ),
+        xlsx_innerdicts=no_ground_truth_source.xlsx_innerdicts,
+        ssn_innerdicts=no_ground_truth_source.ssn_innerdicts,
+        docx_innerdicts=(partial_docx_innerdict,),
+    )
     docx_values = {
         column: f"Ground truth {index}"
         for index, column in enumerate(DOCX_COLUMNS)
@@ -3769,7 +3796,7 @@ async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pair
         ),
     })
     completed_no_ground_truth, no_ground_truth_run = completed_query_researcher(
-        no_ground_truth_sources[0],
+        no_ground_truth_source,
     )
     queued_later = queued_run(namekey=completed_ground_truth.namekey)
     store_query_response_and_runs(
@@ -3845,8 +3872,13 @@ async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pair
             for _, card, _ in ordered_ground_truth_runs
         )
         assert no_ground_truth_row[KTP_FIRST_NAME_COL] == (
-            no_ground_truth_sources[0].namekey.first_name
+            no_ground_truth_source.namekey.first_name
         )
+        snapshot_docx = application.controller._snapshot.ground_truth_by_namekey[
+            no_ground_truth_source.namekey.to_json_key()
+        ]
+        assert snapshot_docx.data[present_column] == partial_docx_values[present_column]
+        assert snapshot_docx.data[missing_column] is None
         no_ground_truth_card = completed_no_ground_truth.codex_innerdicts[0].innerdict.data
         for row, (_, card, expected_ai_values) in zip(
             ground_truth_rows, ordered_ground_truth_runs, strict=True,
@@ -3865,7 +3897,10 @@ async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pair
                 else str(no_ground_truth_card[column])
             )
         for table_1_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS:
-            assert no_ground_truth_row[table_1_column] == ""
+            value = partial_docx_values[table_1_column]
+            assert no_ground_truth_row[table_1_column] == (
+                "" if value is None else value
+            )
         assert app.storage.general == before
 
         converted = Mock(side_effect=lambda cell: f"martin::{cell}")

@@ -134,7 +134,7 @@ class AiAugmentSingularOuterDict(FrozenStrictModel):
 
     def ground_truth_innerdict(self) -> InnerDict | None:
         if self.ai_augment_cohort is AiAugmentCohort.NO_GROUND_TRUTH:
-            return None
+            return self.docx_innerdicts[0] if self.docx_innerdicts else None
         required_columns = tuple(
             column
             for column in DOCX_COLUMNS
