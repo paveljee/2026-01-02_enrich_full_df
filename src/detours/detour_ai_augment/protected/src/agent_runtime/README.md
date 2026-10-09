@@ -54,3 +54,22 @@ for most workflows.
 Downloaded from
 <https://raw.githubusercontent.com/openai/codex/2ca20d522451adf0340403fc15cd54d4926f14b0/codex-rs/codex-api/src/search.rs>
 on 2026-09-18 UTC-4.
+
+## Codex base instructions
+Taken out from one of the rollouts’
+`"session_meta"` event,
+`"base_instructions"` node
+(payload excerpts:
+`"timestamp": "2026-10-08T18:57:39.433Z"`,
+`"originator": "codex_exec"`,
+`"cli_version": "0.146.0-alpha.3.1"`)
+for review, available here:
+`src/detours/detour_ai_augment/protected/src/agent_runtime/docs/base_instructions.md`.
+
+These are then followed
+by a developer instruction
+in the rollout –
+these may be reviewed, for example, here:
+`src/detours/detour_ai_augment/protected/src/llm_inference_api/sample_rollouts/`.
+Note that the base instructions
+appear to be different there.
