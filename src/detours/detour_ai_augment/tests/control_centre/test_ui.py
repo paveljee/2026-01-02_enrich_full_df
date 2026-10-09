@@ -830,6 +830,10 @@ class FakeCodex:
         self.order.append("codex-cancel")
         cast(Any, handle).process.returncode = -15
 
+    async def archive_session(self, session_id: UUID) -> None:
+        assert session_id == SESSION_ID
+        self.order.append("codex-archive")
+
     async def terminate_abandoned_run(self, _run: run_event_models.Run) -> None:
         return None
 
@@ -1899,13 +1903,109 @@ async def test_worker_stops_backend_before_starting_next_queued_run(
         "codex-wait",
         f"run-outcome:{run_outcome_models.COMPLETED_PATH}",
         "backend-stop",
+        "codex-archive",
         "backend-start",
         "codex-start",
         "backend-session",
         "codex-wait",
         f"run-outcome:{run_outcome_models.COMPLETED_PATH}",
         "backend-stop",
+        "codex-archive",
     ]
+
+
+@pytest.mark.anyio
+async def test_archive_failure_does_not_change_completed_run_outcome(
+    inline_controller_io: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+
+    class ArchiveFailingCodex(FakeCodex):
+        async def archive_session(self, session_id: UUID) -> None:
+            await super().archive_session(session_id)
+            raise OSError("archive unavailable")
+
+    subject = controller(
+        backend=FakeBackend(order),
+        backend_database=FakeBackendDatabase(order),
+        codex=ArchiveFailingCodex(order),
+    )
+
+    async def complete_run(
+        _subject: control_ui._ControlCentreController,
+        *,
+        run: run_event_models.Run,
+    ) -> tuple[RunLifecycle, UUID | None]:
+        assert run.run_id in subject._runs
+        return RunLifecycle.COMPLETED, SESSION_ID
+
+    monkeypatch.setattr(control_ui._ControlCentreController, "_finalize_run", complete_run)
+    run_id = await subject.queue(namekey=NAMEKEY)
+    await subject._process_queued_run(await subject._queue.get())
+
+    assert subject._runs[run_id].lifecycle is RunLifecycle.COMPLETED
+    assert order[-3:] == [
+        f"run-outcome:{run_outcome_models.COMPLETED_PATH}",
+        "backend-stop",
+        "codex-archive",
+    ]
+    assert subject.drain_notifications() == (
+        Locale.CODEX_ARCHIVE_FAILED_TEMPLATE.format(
+            run_id=run_id, session_id=SESSION_ID,
+            error=OSError("archive unavailable"),
+        ),
+    )
+
+
+@pytest.mark.anyio
+async def test_partial_run_outcome_still_archives_guest_session(
+    inline_controller_io: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+
+    class PartialBackendDatabase(FakeBackendDatabase):
+        def record_run_outcome(
+            self,
+            *,
+            run_outcome: RunLifecycle,
+            namekey: NameKey,
+            session_id: UUID | None,
+            validation_record_id: UUID | None,
+        ) -> HTTPStatus:
+            self.order.append(f"run-outcome:{run_outcome.to_run_outcome_path()}")
+            return HTTPStatus.INTERNAL_SERVER_ERROR
+
+    subject = controller(
+        backend=FakeBackend(order),
+        backend_database=PartialBackendDatabase(order),
+        codex=FakeCodex(order),
+    )
+
+    async def complete_run(
+        _subject: control_ui._ControlCentreController,
+        *,
+        run: run_event_models.Run,
+    ) -> tuple[RunLifecycle, UUID | None]:
+        assert run.run_id in subject._runs
+        return RunLifecycle.COMPLETED, SESSION_ID
+
+    monkeypatch.setattr(control_ui._ControlCentreController, "_finalize_run", complete_run)
+    run_id = await subject.queue(namekey=NAMEKEY)
+    await subject._process_queued_run(await subject._queue.get())
+
+    assert subject._runs[run_id].lifecycle is RunLifecycle.COMPLETED
+    assert order[-3:] == [
+        f"run-outcome:{run_outcome_models.COMPLETED_PATH}",
+        "backend-stop",
+        "codex-archive",
+    ]
+    assert subject.drain_notifications() == (
+        Locale.RUN_OUTCOME_SNAPSHOT_PARTIAL_TEMPLATE.format(
+            run_id=run_id, outcome=RunLifecycle.COMPLETED.value,
+        ),
+    )
 
 
 @pytest.mark.anyio
@@ -2018,9 +2118,10 @@ async def test_failed_finalization_stops_backend_after_run_outcome_event(
         RunLifecycle.CODEX_EXITED,
         RunLifecycle.FAILED,
     ]
-    assert order[-2:] == [
+    assert order[-3:] == [
         f"run-outcome:{run_outcome_models.FAILED_PATH}",
         "backend-stop",
+        "codex-archive",
     ]
 
 
@@ -2069,10 +2170,11 @@ async def test_active_cancellation_stops_codex_then_backend(
     assert backend_stopped.is_set()
     assert subject._runs[run_id].is_finished()
     assert subject._runs[run_id].lifecycle is RunLifecycle.CANCELLED
-    assert order[-3:] == [
+    assert order[-4:] == [
         f"run-outcome:{run_outcome_models.CANCELLED_PATH}",
         "codex-cancel",
         "backend-stop",
+        "codex-archive",
     ]
 
 
@@ -2142,7 +2244,7 @@ async def test_dashboard_shutdown_stops_inflight_codex_and_backend(
         "codex-cancel"
     )
     assert order.index("codex-cancel") < order.index("backend-stop")
-    assert order[-1] == "backend-stop"
+    assert order[-3:] == ["backend-stop", "codex-archive", "backend-stop"]
     assert backend.status is control_ui._BackendStatus.STOPPED
 
 
@@ -2614,6 +2716,23 @@ async def test_codex_runner_starts_fresh_exec_process_and_sends_only_openapi_url
 
 
 @pytest.mark.anyio
+async def test_codex_runner_archives_recorded_session_with_guest_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+    runner = control_ui._CodexRunner(timezone=ZoneInfo("UTC"))
+
+    async def remote_command(command: str) -> bytes:
+        commands.append(command)
+        return b""
+
+    monkeypatch.setattr(runner, "_remote_command", remote_command)
+    await runner.archive_session(SESSION_ID)
+
+    assert commands == [f"{CODEX_CLI_BIN_PATH} archive {SESSION_ID}"]
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("remote_output", "expected"),
     ((b"busy", True), (b"", False)),
@@ -2724,7 +2843,7 @@ async def test_final_pull_is_single_and_after_persisted_codex_exit(
     await subject._process_queued_run(await subject._queue.get())
     assert order.count("backend-pull") == 1
     assert database.query_calls == 0
-    assert order[-1] == "backend-stop"
+    assert order[-2:] == ["backend-stop", "codex-archive"]
     assert app.storage.general[storage_models.BACKEND_DATABASE_STORAGE_KEY] == before
     assert all(event.lifecycle is not RunLifecycle.PUSH_ACCEPTED for event in subject._events)
 

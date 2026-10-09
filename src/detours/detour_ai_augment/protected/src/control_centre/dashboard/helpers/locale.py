@@ -239,6 +239,13 @@ class Locale:
         "local Codex SSH process stopped: run_id={run_id} pid={pid} "
         "return_code={return_code}"
     )
+    CODEX_ARCHIVED_LOG_TEMPLATE: Final = (
+        "Codex session archived: run_id={run_id} session_id={session_id}"
+    )
+    CODEX_ARCHIVE_FAILED_TEMPLATE: Final = (
+        "Codex session archive failed: run_id={run_id} "
+        "session_id={session_id} error={error!r}"
+    )
     STOPPING_LOG: Final = "stopping"
     STOPPED_LOG: Final = "stopped"
     CODEX_EXIT_DETAIL_TEMPLATE: Final = "Codex exited with code {exit_code}"

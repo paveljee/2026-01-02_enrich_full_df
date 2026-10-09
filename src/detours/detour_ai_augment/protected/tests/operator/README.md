@@ -241,7 +241,22 @@ and should be reviewed in Backend logs.
 
 ## 7. Wind down gracefully
 
-After this request, stop Backend with `Ctrl+C`.
+After this request and after Codex/SSH has exited, stop Backend with `Ctrl+C`.
+This manual contour bypasses Control Centre's automatic session archival, so
+archive the finished guest session from terminal 3, where `SESSION_ID` is set:
+
+```bash
+pixi run -e detour-ai-augment limactl shell --workdir=/ aivm \
+  sudo --user ai --set-home \
+  /home/ai/.local/bin/codex archive "$SESSION_ID"
+```
+
+Do this regardless of whether the run-outcome request returned `200` or `500`:
+archival keeps the finished JSONL out of the live `sessions` tree monitored by
+appendwatch. If the archive command fails, it does not change the recorded run
+outcome; the JSONL may remain live and continue to appear in appendwatch. If
+Codex cancellation or Backend shutdown failed, first establish that those
+processes have actually exited before attempting archival.
 
 To mirror the operator test, leave AIVM running. Otherwise stop it explicitly:
 

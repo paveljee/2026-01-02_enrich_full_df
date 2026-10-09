@@ -81,6 +81,8 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     PULL_PATH,
     PUSH_PATH,
     REPLAY_LOG_KEY,
+    ROLLOUT_FILENAME_PREFIX,
+    ROLLOUT_FILENAME_SUFFIX,
     SOURCE_KEY_HEADER,
     SSH_EXECUTABLE,
     SSH_TIMEOUT_SECONDS,
@@ -93,10 +95,14 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     Locale,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.vars import (
+    AIVM_SSH_CONNECTION_COMMAND,
+    AIVM_SSH_TARGET,
     BACKEND_MODULE,
     BACKEND_PORT,
     BACKEND_READY_TIMEOUT_SECONDS,
     CODEX_EXEC_COMMAND,
+    CODEX_REMOTE_FIND_ROLLOUT_COMMAND_TEMPLATE,
+    CODEX_SESSIONS_ROOT,
     CONTROL_CENTRE_BASE_URL,
     CONTROL_CENTRE_HOST,
     CONTROL_CENTRE_PORT,
@@ -105,7 +111,10 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.vars import (
     PROCESS_STOP_TIMEOUT_SECONDS as CONTROL_PROCESS_STOP_TIMEOUT_SECONDS,
 )
-from src.detours.detour_ai_augment.protected.src.shared import parse_appendwatch_report_bytes
+from src.detours.detour_ai_augment.protected.src.shared import (
+    AppendwatchReportError,
+    parse_appendwatch_report_bytes,
+)
 from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
     ORIGINAL_NICEGUI_STORAGE_PATH,
     nicegui_test_environment,
@@ -183,6 +192,7 @@ PROCESS_STOP_TIMEOUT_SECONDS = 30
 PROCESS_POLL_SECONDS = 0.1
 FULL_WORKFLOW_TIMEOUT_SECONDS = 1_800
 OPERATOR_HEARTBEAT_SECONDS = 10
+APPENDWATCH_ARCHIVE_WAIT_SECONDS = 120
 BROWSER_ASSERTION_TIMEOUT_MILLISECONDS = 30_000
 BROWSER_VIEWPORT: ViewportSize = {"width": 1_600, "height": 1_000}
 BROWSER_CHANNEL = "chrome"
@@ -1057,7 +1067,7 @@ def _record_ordinal(
 
 def _assert_deployed_appendwatch_topology(
     operator_runtime: OperatorRuntime,
-) -> None:
+) -> bytes:
     _operator_log("loading the deployed appendwatch topology")
     identity_file = AIVM_IDENTITY_FILE
     assert identity_file is not None
@@ -1097,6 +1107,7 @@ def _assert_deployed_appendwatch_topology(
     )
     assert completed.stdout
     _operator_log("deployed appendwatch topology is readable")
+    return completed.stdout
 
 
 @pytest.mark.excluded_from_suites
@@ -1105,6 +1116,174 @@ def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
 ) -> None:
     _operator_log("preparing isolated topology-test runtime")
     _assert_deployed_appendwatch_topology(operator_runtime)
+
+
+def _guest_rollouts(root: PurePosixPath, filename: str) -> tuple[str, ...]:
+    completed = subprocess.run(
+        [
+            *AIVM_SSH_CONNECTION_COMMAND,
+            AIVM_SSH_TARGET,
+            CODEX_REMOTE_FIND_ROLLOUT_COMMAND_TEMPLATE.format(
+                sessions_root=shlex.quote(str(root)),
+                rollout_name=shlex.quote(filename),
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding=TEXT_ENCODING,
+        timeout=SSH_TIMEOUT_SECONDS,
+    )
+    return tuple(completed.stdout.splitlines())
+
+
+def wait_for_saved_session(
+    operator_runtime: OperatorRuntime, dashboard: DashboardProcess,
+) -> tuple[UUID, UUID]:
+    storage_path = operator_runtime.config_path.parent / "nicegui" / "storage-general.json"
+    deadline = time.monotonic() + PROCESS_START_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        raise_for_dashboard_failure(dashboard)
+        if storage_path.exists():
+            try:
+                stored = json.loads(storage_path.read_text(encoding=TEXT_ENCODING))
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass  # NiceGUI may be replacing the saved snapshot while we read it.
+            else:
+                runs = stored.get(RUNS_STORAGE_KEY, ())
+                if len(runs) == 1:
+                    run = runs[0]
+                    saved_session_id = run.get(nameof(lambda: Run.session_id))
+                    if saved_session_id is not None:
+                        session_id = UUID(saved_session_id)
+                        acknowledgement = (
+                            BackendLocale.SESSION_ID_STDIN_ACCEPTED_LOG % session_id
+                        )
+                        if acknowledgement in "".join(dashboard.output):
+                            return UUID(run[nameof(lambda: Run.run_id)]), session_id
+        time.sleep(PROCESS_POLL_SECONDS)
+    raise TimeoutError("operator Backend did not acknowledge the saved Codex session")
+
+
+def wait_for_guest_rollout(session_id: UUID) -> str:
+    pattern = f"{ROLLOUT_FILENAME_PREFIX}*{session_id}{ROLLOUT_FILENAME_SUFFIX}"
+    paths = _guest_rollouts(CODEX_SESSIONS_ROOT, pattern)
+    assert len(paths) == 1, (session_id, paths)
+    return PurePosixPath(paths[0]).name
+
+
+def _wait_for_appendwatch(
+    operator_runtime: OperatorRuntime, filename: str, *, present: bool,
+) -> None:
+    missing = BackendLocale.ROLLOUT_STATUS_INVALID_TEMPLATE.format(
+        reason=BackendLocale.ROLLOUT_STATUS_MISSING,
+    )
+    deadline = time.monotonic() + APPENDWATCH_ARCHIVE_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            parse_appendwatch_report_bytes(
+                _assert_deployed_appendwatch_topology(operator_runtime),
+                PurePosixPath(filename),
+            )
+        except AppendwatchReportError as exc:
+            if str(exc) != missing and not (
+                not present and str(exc) == BackendLocale.ROLLOUT_REMOVED_OR_REPLACED
+            ):
+                raise
+            observed_present = False
+        else:
+            observed_present = True
+        if observed_present is present:
+            return
+        time.sleep(1.0)
+    raise AssertionError(
+        f"appendwatch did not report present={present} for {filename}"
+    )
+
+
+def assert_cancelled_outcome_persisted(
+    operator_runtime: OperatorRuntime, *, run_id: UUID, session_id: UUID,
+) -> None:
+    deadline = time.monotonic() + PROCESS_STOP_TIMEOUT_SECONDS
+    storage_path = operator_runtime.config_path.parent / "nicegui" / "storage-general.json"
+    while time.monotonic() < deadline:
+        raw_log = operator_runtime.replay_log_path.read_bytes()
+        if raw_log.endswith(b"\n"):
+            outcomes = tuple(
+                record for record in authoritative_records(operator_runtime.replay_log_path)
+                if (record.method, record.path) == (
+                    HTTP_POST_METHOD, run_outcome_models.CANCELLED_PATH,
+                )
+            )
+            if outcomes:
+                assert len(outcomes) == 1
+                outcome = RunOutcomeResponseRecord.from_http_request_log_record(
+                    outcomes[0]
+                )
+                assert outcome.response_code == status.HTTP_200_OK
+                assert outcome.run_outcome_request_record.session_id == session_id
+                try:
+                    stored = json.loads(storage_path.read_text(encoding=TEXT_ENCODING))
+                except (FileNotFoundError, json.JSONDecodeError):
+                    pass  # Wait for NiceGUI's in-progress storage write.
+                else:
+                    runs = stored[RUNS_STORAGE_KEY]
+                    assert len(runs) == 1
+                    assert UUID(runs[0][nameof(lambda: Run.run_id)]) == run_id
+                    if runs[0][nameof(lambda: Run.lifecycle)] == RunLifecycle.CANCELLED.value:
+                        return
+        time.sleep(PROCESS_POLL_SECONDS)
+    raise TimeoutError("cancelled run outcome was not persisted and finalized")
+
+
+def _assert_guest_session_archived(
+    operator_runtime: OperatorRuntime, session_id: UUID, filename: str,
+) -> None:
+    assert filename.endswith(f"{session_id}{ROLLOUT_FILENAME_SUFFIX}")
+    _wait_for_appendwatch(operator_runtime, filename, present=False)
+    assert _guest_rollouts(CODEX_SESSIONS_ROOT, filename) == ()
+    archived = _guest_rollouts(
+        CODEX_SESSIONS_ROOT.parent / "archived_sessions", filename,
+    )
+    assert len(archived) == 1, archived
+
+
+@pytest.mark.requires_codex_auth
+@pytest.mark.excluded_from_suites
+def test_cancelled_guest_session_is_archived(
+    operator_runtime: OperatorRuntime,
+) -> None:
+    namekey = target_namekey(operator_runtime)
+
+    with running_dashboard(operator_runtime) as dashboard:
+        queue_in_browser(namekey, operator_runtime, dashboard)
+        run_id, session_id = wait_for_saved_session(operator_runtime, dashboard)
+        filename = wait_for_guest_rollout(session_id)
+        _wait_for_appendwatch(operator_runtime, filename, present=True)
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                channel=BROWSER_CHANNEL, headless=True,
+            )
+            try:
+                page = browser.new_page(viewport=BROWSER_VIEWPORT)
+                page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
+                page.get_by_label(Locale.SEARCH_FILTER).fill(namekey.to_json_key())
+                page.get_by_test_id(
+                    control_ui.RESEARCHER_GRID_TEST_ID
+                ).locator(GRID_ROW_SELECTOR).first.click()
+                cancel = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
+                expect(cancel).to_have_text(Locale.ACTION_CANCEL)
+                cancel.click()
+            finally:
+                browser.close()
+
+        assert_cancelled_outcome_persisted(
+            operator_runtime, run_id=run_id, session_id=session_id,
+        )
+        _assert_guest_session_archived(
+            operator_runtime, session_id, filename,
+        )
 
 
 def _validate_workflow_http_records(
@@ -1588,6 +1767,23 @@ def assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
             queued_at_monotonic=checkpoint.queued_at_monotonic,
         )
         emit_researcher_card(card_text)
+        completed_outcomes = tuple(
+            record for record in authoritative_records(operator_runtime.replay_log_path)
+            if (record.method, record.path, record.response_code) == (
+                HTTP_POST_METHOD, run_outcome_models.COMPLETED_PATH, status.HTTP_200_OK,
+            )
+        )
+        assert len(completed_outcomes) == 1
+        completed_outcome = RunOutcomeResponseRecord.from_http_request_log_record(
+            completed_outcomes[0]
+        )
+        session_id = completed_outcome.run_outcome_request_record.session_id
+        assert session_id is not None
+        source_key = backend_api._http_header_value(
+            completed_outcome.response_headers, SOURCE_KEY_HEADER,
+        )
+        filename, _ = AiAugmentBackendStore._parse_source_key_header(source_key)
+        _assert_guest_session_archived(operator_runtime, session_id, filename)
         elapsed_seconds = time.monotonic() - checkpoint.queued_at_monotonic
 
     assert_completed_workflow_artifacts(

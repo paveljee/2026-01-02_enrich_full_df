@@ -86,6 +86,7 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     BACKEND_READY_TIMEOUT_SECONDS,
     BACKEND_REBUILD_TIMEOUT_SECONDS,
     CHROME_DEVTOOLS_PATH,
+    CODEX_ARCHIVE_TIMEOUT_SECONDS,
     CODEX_CANCEL_TIMEOUT_SECONDS,
     CODEX_CLI_BIN_PATH,
     CODEX_DISCOVERY_POLL_SECONDS,
@@ -1564,6 +1565,14 @@ class _CodexRunner:
         output = await self._remote_command(CODEX_REMOTE_BUSY_COMMAND)
         return output.decode(TEXT_ENCODING) == CODEX_REMOTE_BUSY_MARKER
 
+    async def archive_session(self, session_id: UUID) -> None:
+        await asyncio.wait_for(
+            self._remote_command(
+                shlex.join((str(CODEX_CLI_BIN_PATH), "archive", str(session_id)))
+            ),
+            timeout=CODEX_ARCHIVE_TIMEOUT_SECONDS,
+        )
+
     async def start(
         self,
         *,
@@ -2366,11 +2375,16 @@ class _ControlCentreController:
                 # Run.lifecycle -> run_outcome
         finally:
             cleanup_error: Exception | None = None
+            cleanup_task = asyncio.create_task(self._wind_down_owned_run_processes())
             try:
-                await self._wind_down_owned_run_processes()
-            except Exception as exc:
-                cleanup_error = exc
-            try:
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    # Shutdown must wait for Backend closure and any session archive.
+                    await cleanup_task
+                    raise
+                except Exception as exc:
+                    cleanup_error = exc
                 if cleanup_error is not None:
                     await self._append_run_event(
                         RunEvent(
@@ -2413,6 +2427,25 @@ class _ControlCentreController:
             raise
         if codex_error is not None:
             raise codex_error
+        if active_codex is not None:
+            run_id = active_codex.run.run_id
+            session_id = self._runs[run_id].session_id
+            if session_id is not None:
+                try:
+                    await self._codex.archive_session(session_id)
+                except (OSError, RuntimeError, TimeoutError) as exc:
+                    message = Locale.CODEX_ARCHIVE_FAILED_TEMPLATE.format(
+                        run_id=run_id, session_id=session_id, error=exc,
+                    )
+                    self._notifications.append(message)
+                    emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, message)
+                else:
+                    emit_log(
+                        Locale.CONTROL_CENTRE_LOG_PREFIX,
+                        Locale.CODEX_ARCHIVED_LOG_TEMPLATE.format(
+                            run_id=run_id, session_id=session_id,
+                        ),
+                    )
 
     async def _wait_until_codex_idle(self, *, run: Run) -> bool:
         while True:
