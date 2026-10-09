@@ -324,7 +324,14 @@ This specific set-up has been tested, to a degree, for the feasibility of reprod
 Caveat: Provisioning a separate web search / web page retrieval service (e.g., Serper or Jina, respectively) would be necessary, and some of the intended Codex tooling would not work (or would not work as expected).
 This caveat was an important reason behind the decision to go with OpenAI on this project despite the vendor lock and token-for-token irreproducibility in the long run as older models get deprecated by the provider – coupled with the expected overall better performance of a frontier LLM such as GPT-5.6-Sol over a smaller self-hosted model, and considering the generous Codex usage allowance coming with ChatGPT Plus pricing (e.g., CA$28.24/month inclusive of applicable taxes as of August 2026).
 
-To smoke-test the feasibility of this, on August 6^th^, 2026, UTC-4, a Human Operator completed the following steps:
+Another caveat:
+
+> [!NOTE]
+> `base_instructions` Codex CLI exposes
+> may be completely different
+> when run with GPT versus a custom provider. 
+
+To smoke-test the feasibility of using a self-hosted LLM Inference API in this detour, on August 6^th^, 2026, UTC-4, a Human Operator completed the following steps:
 
 * Deployed a virtual machine using `src/detours/detour_ai_augment/protected/src/agent_runtime/deploy.sh` under [Lima 2.2.0][lima220] under an arm64 macOS host as [specified above](#directory-contents-and-lockfile).
 * SSH’d into it  as `$AIVM_USER` and opened a session with GNU bash version 5.2.21(1).
