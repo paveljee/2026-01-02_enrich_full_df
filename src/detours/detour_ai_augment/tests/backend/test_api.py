@@ -98,6 +98,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import L
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
     AI_AUGMENT_EVIDENCE_COLUMNS,
+    AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
     AI_AUGMENT_STANDARDIZED_COLUMNS,
     AIVM_AUDIT_USER,
     AIVM_IDENTITY_FILE_ENV_NAME,
@@ -3285,33 +3286,37 @@ def test_submission_contract_has_nine_evidence_fields_and_optional_comments() ->
     ]
 
 
-def test_successful_initial_submission_converts_to_retry_model_with_placeholders() -> None:
+def test_initial_submission_renders_raw_values_without_standardized_values() -> None:
     initial = Submission.model_validate(api.EVIDENCE_SUBMISSION_EXAMPLE)
-
-    converted = post_commit_validation._standardized_initial_submission(initial)
-
-    assert isinstance(converted, StandardizedSubmission)
-    assert converted.normalized_values() == initial.normalized_values()
-    assert converted.comments == initial.comments
-    for (initial_column, initial_field), (converted_column, converted_field) in zip(
-        initial.evidence_items(),
-        converted.evidence_items(),
-        strict=True,
+    rendered = post_commit_validation.render_codex_values(
+        initial,
+        {column: [] for column in AI_AUGMENT_EVIDENCE_COLUMNS},
+        commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
+        argument_ref_urls={},
+    )
+    namekey = NameKey(first_name="A.", last_name="Sheikh")
+    codex_innerdict = InnerDict.from_mapping(
+        {KTP_NAMEKEY_COL: namekey.to_json_key(), **rendered},
+        _CodexInnerDictProcedure(),
+    )
+    cards = build_cards(
+        OuterDict(data={namekey.to_json_key(): [codex_innerdict]}),
+        total_draws=1,
+        intro="",
+        excluded_cols=CARD_EXCLUDED_COLUMNS,
+    )
+    assert len(cards) == 1
+    card = next(iter(cards.values()))
+    for (column, field_submission), (_, standardized_column) in zip(
+        initial.evidence_items(), AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS, strict=True,
     ):
-        assert converted_column == initial_column
-        assert converted_field.value == initial_field.value
-        assert converted_field.web_search_excerpts == initial_field.web_search_excerpts
-        assert (
-            getattr(converted_field, FIELD_STANDARDIZED_VALUE_FIELD)
-            == (post_commit_validation.INITIAL_STANDARDIZED_VALUES[initial_column])
+        expected_value = codex_parse.render_footnoted_submission_value(
+            field_submission.value, (),
         )
-        standardized_value = converted_field.model_dump(mode="json")[
-            FIELD_STANDARDIZED_VALUE_FIELD
-        ]
-        if isinstance(standardized_value, dict):
-            assert set(standardized_value.values()) == {NOT_AVAILABLE_OR_APPLICABLE_VALUE}
-        else:
-            assert standardized_value == NOT_AVAILABLE_OR_APPLICABLE_VALUE
+        assert rendered[column] == expected_value
+        assert f"**`{column}`**: {expected_value}" in card
+        assert rendered[standardized_column] is None
+        assert f"**`{standardized_column}`**:" not in card
 
 
 def test_openapi_example_is_a_complete_pydantic_valid_submission(

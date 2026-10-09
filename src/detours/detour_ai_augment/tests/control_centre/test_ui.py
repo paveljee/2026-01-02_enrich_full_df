@@ -11,7 +11,7 @@ import os
 import subprocess
 import sys
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import ExitStack, asynccontextmanager, nullcontext
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -575,7 +575,7 @@ def queued_run(
 def completed_query_researcher(
     source: AiAugmentSingularOuterDict,
     *,
-    ai_field_values: dict[str, str] | None = None,
+    ai_field_values: Mapping[str, str | None] | None = None,
 ) -> tuple[AiAugmentSingularOuterDict, run_event_models.Run]:
     session_id = uuid7()
     attempt = agent_runtime_attempt(session_id=session_id, namekey=source.namekey)
@@ -3797,6 +3797,10 @@ async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pair
     })
     completed_no_ground_truth, no_ground_truth_run = completed_query_researcher(
         no_ground_truth_source,
+        ai_field_values={
+            standardized_column: None
+            for _, standardized_column in AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS
+        },
     )
     queued_later = queued_run(namekey=completed_ground_truth.namekey)
     store_query_response_and_runs(
@@ -3880,6 +3884,9 @@ async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pair
         assert snapshot_docx.data[present_column] == partial_docx_values[present_column]
         assert snapshot_docx.data[missing_column] is None
         no_ground_truth_card = completed_no_ground_truth.codex_innerdicts[0].innerdict.data
+        for _, standardized_column in AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS:
+            assert no_ground_truth_card[standardized_column] is None
+            assert no_ground_truth_row[standardized_column] == ""
         for row, (_, card, expected_ai_values) in zip(
             ground_truth_rows, ordered_ground_truth_runs, strict=True,
         ):
@@ -3902,6 +3909,12 @@ async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pair
                 "" if value is None else value
             )
         assert app.storage.general == before
+
+        control_ui.spreadsheet_completed(application, martin=True)
+        with destination.open(newline="", encoding=TEXT_ENCODING_WITH_BOM) as file:
+            actual_martin_rows = list(csv.DictReader(file))
+        for _, standardized_column in AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS:
+            assert actual_martin_rows[2][standardized_column] == ""
 
         converted = Mock(side_effect=lambda cell: f"martin::{cell}")
         monkeypatch.setattr(control_ui, "martin_serialize_standardized_cell", converted)

@@ -22,7 +22,7 @@ from pydantic import AnyUrl, ValidationError
 from starlette.types import Message, Scope
 
 from src.detours.detour_ai_augment.protected.src.backend import server
-from src.detours.detour_ai_augment.protected.src.backend.helpers import api, codex_parse
+from src.detours.detour_ai_augment.protected.src.backend.helpers import api
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.codex_rollout_record import (  # noqa: E501
     CodexRolloutRecord,
 )
@@ -66,7 +66,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_GENDER_COL,
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     NANOSECONDS_PER_MICROSECOND,
-    NOT_AVAILABLE_OR_APPLICABLE_VALUE,
     NOT_REPORTED_VALUE,
     POST_COMMIT_VALIDATION_ACCEPTED_COL,
     POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE,
@@ -911,11 +910,7 @@ def test_replay_validation_mismatch_reports_first_nested_value(
         ]
         assert backend_store._execute(
             f'SELECT "{standardized_column}" FROM {CODEX_OUTPUT_ROWS_TABLE}'
-        ).fetchone() == (
-            codex_parse.render_standardized_submission_value(
-                json.dumps(NOT_AVAILABLE_OR_APPLICABLE_VALUE)
-            ),
-        )
+        ).fetchone() == (None,)
 
     log = Path(runtime.pipeline_config.replay_log)
     lines = log.read_bytes().splitlines(keepends=True)
@@ -1189,9 +1184,7 @@ def test_outcome_materializes_persisted_ids_identically_live_and_replay(
             (innerdict,) = singular_outerdict.codex_innerdicts
             data = innerdict.innerdict.data
             for column in AI_AUGMENT_STANDARDIZED_COLUMNS:
-                assert data[column].startswith(
-                    f"{codex_parse.AI_GENERATED_TEXT_PREFIX} "
-                )
+                assert data[column] is None
             assert (
                 api.selected_card_outer_dict(singular_outerdict).get_inner_by_key(
                     singular_outerdict.namekey.to_json_key()

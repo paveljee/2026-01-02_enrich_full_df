@@ -345,7 +345,7 @@ CODEX_OUTPUT_SCHEMA = (
         for plain_column, standardized_column in AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS
         for definition in (
             (plain_column, "VARCHAR NOT NULL"),
-            (standardized_column, "VARCHAR NOT NULL"),
+            (standardized_column, "VARCHAR"),
         )
     ),
     (KTP_AI_AUGMENT_COMMENTS_COL, "VARCHAR"),

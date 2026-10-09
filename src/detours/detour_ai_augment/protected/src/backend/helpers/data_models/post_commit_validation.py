@@ -31,24 +31,11 @@ from pydantic import (
 from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
 from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
-    AcademicPositionsSubmission,
-    AgeFirstPublicationSubmission,
-    EducationSubmission,
     EvidenceSubmission,
     EvidenceWithdrawal,
     FieldSubmission,
-    GenderSubmission,
-    PlaceOfResidenceStandardized,
-    PlaceOfResidenceSubmission,
-    RaceEthnicityLanguageCultureStandardized,
-    RaceEthnicityLanguageCultureSubmission,
-    ResearcherAuthorStandardized,
-    ResearcherAuthorSubmission,
-    ResearcherLinksSubmission,
-    SocialCapitalSubmission,
     StandardizedFieldSubmission,
     StandardizedSubmission,
-    StandardizedValue,
     WebSearchExcerpt,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_fixture import (  # noqa: E501
@@ -76,22 +63,12 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     HAS_CONTROL_CHARACTER,
     ISO_8601_UTC_OFFSET,
     ISO_8601_UTC_SUFFIX,
-    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
-    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
     KTP_AI_AUGMENT_COMMENTS_COL,
-    KTP_AI_AUGMENT_EDUCATION_COL,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
-    KTP_AI_AUGMENT_GENDER_COL,
-    KTP_AI_AUGMENT_LINKS_COL,
-    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
-    KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
-    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
-    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
     MILLISECONDS_PER_SECOND,
-    NOT_AVAILABLE_OR_APPLICABLE_VALUE,
     ROLLOUT_FILENAME_PREFIX,
     ROLLOUT_FILENAME_SUFFIX,
     SOURCE_KEY_HEADER,
@@ -277,37 +254,6 @@ STANDARDIZED_VALUE_FIELD = next(
     for field in StandardizedFieldSubmission.model_fields
     if field not in FieldSubmission.model_fields
 )
-INITIAL_RESEARCHER_AUTHOR_STANDARDIZED = ResearcherAuthorStandardized(
-    first_name=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-    last_name=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-    orcid=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-    openalex_id=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-)
-INITIAL_PLACE_OF_RESIDENCE_STANDARDIZED = PlaceOfResidenceStandardized(
-    place=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-    location=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-)
-INITIAL_RACE_ETHNICITY_LANGUAGE_CULTURE_STANDARDIZED = (
-    RaceEthnicityLanguageCultureStandardized(
-        race=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-        ethnicity=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-        language=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-        culture=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-    )
-)
-INITIAL_STANDARDIZED_VALUES: Mapping[str, StandardizedValue] = {
-    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL: INITIAL_RESEARCHER_AUTHOR_STANDARDIZED,
-    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL: INITIAL_PLACE_OF_RESIDENCE_STANDARDIZED,
-    KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL: (
-        INITIAL_RACE_ETHNICITY_LANGUAGE_CULTURE_STANDARDIZED
-    ),
-    KTP_AI_AUGMENT_GENDER_COL: NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL: NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-    KTP_AI_AUGMENT_EDUCATION_COL: NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL: NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL: NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-    KTP_AI_AUGMENT_LINKS_COL: NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-}
 DRAW_NUMBER_COLUMN = DRAW_LABEL
 FRAGMENT_TYPE_COLUMN = KTP_FRAGMENT_TYPE_COL
 DOCX_ROW_FRAGMENT_TYPE = FragmentType.DOCX_ROW.value
@@ -1530,7 +1476,7 @@ def _failed_post_commit_validation(
 
 
 def render_codex_values(
-    submission: StandardizedSubmission,
+    submission: Submission | StandardizedSubmission,
     evidence: ValidatedEvidence,
     *,
     commit_request_timestamp: datetime,
@@ -1546,14 +1492,22 @@ def render_codex_values(
             field_submission.value,
             tuple(match.evidence_number for match in matches),
         )
-        standardized_value = field_submission.model_dump(mode="json")[STANDARDIZED_VALUE_FIELD]
-        rendered[standardized_columns[column]] = codex_parse.render_standardized_submission_value(
-            json.dumps(
-                standardized_value,
-                ensure_ascii=False,
-                separators=COMPACT_JSON_SEPARATORS,
+        standardized_column = standardized_columns[column]
+        if isinstance(field_submission, StandardizedFieldSubmission):
+            standardized_value = field_submission.model_dump(mode="json")[
+                STANDARDIZED_VALUE_FIELD
+            ]
+            rendered[standardized_column] = (
+                codex_parse.render_standardized_submission_value(
+                    json.dumps(
+                        standardized_value,
+                        ensure_ascii=False,
+                        separators=COMPACT_JSON_SEPARATORS,
+                    )
+                )
             )
-        )
+        else:
+            rendered[standardized_column] = None
     rendered[KTP_AI_AUGMENT_FOOTNOTES_COL] = "\n".join(
         codex_parse.render_footnote(
             number=match.evidence_number,
@@ -1589,68 +1543,9 @@ def render_codex_values(
     return rendered
 
 
-def _standardized_initial_submission(
-    submission: Submission,
-) -> StandardizedSubmission:
-    return StandardizedSubmission.model_validate({
-        KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL: ResearcherAuthorSubmission(
-            value=submission.researcher_author.value,
-            web_search_excerpts=submission.researcher_author.web_search_excerpts,
-            standardized_value=INITIAL_RESEARCHER_AUTHOR_STANDARDIZED,
-        ),
-        KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL: PlaceOfResidenceSubmission(
-            value=submission.place_of_residence.value,
-            web_search_excerpts=submission.place_of_residence.web_search_excerpts,
-            standardized_value=INITIAL_PLACE_OF_RESIDENCE_STANDARDIZED,
-        ),
-        KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL: (
-            RaceEthnicityLanguageCultureSubmission(
-                value=submission.race_ethnicity_language_culture.value,
-                web_search_excerpts=(
-                    submission.race_ethnicity_language_culture.web_search_excerpts
-                ),
-                standardized_value=(
-                    INITIAL_RACE_ETHNICITY_LANGUAGE_CULTURE_STANDARDIZED
-                ),
-            )
-        ),
-        KTP_AI_AUGMENT_GENDER_COL: GenderSubmission(
-            value=submission.gender.value,
-            web_search_excerpts=submission.gender.web_search_excerpts,
-            standardized_value=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-        ),
-        KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL: AgeFirstPublicationSubmission(
-            value=submission.age_first_publication.value,
-            web_search_excerpts=submission.age_first_publication.web_search_excerpts,
-            standardized_value=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-        ),
-        KTP_AI_AUGMENT_EDUCATION_COL: EducationSubmission(
-            value=submission.education.value,
-            web_search_excerpts=submission.education.web_search_excerpts,
-            standardized_value=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-        ),
-        KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL: AcademicPositionsSubmission(
-            value=submission.academic_positions.value,
-            web_search_excerpts=submission.academic_positions.web_search_excerpts,
-            standardized_value=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-        ),
-        KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL: SocialCapitalSubmission(
-            value=submission.social_capital.value,
-            web_search_excerpts=submission.social_capital.web_search_excerpts,
-            standardized_value=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-        ),
-        KTP_AI_AUGMENT_LINKS_COL: ResearcherLinksSubmission(
-            value=submission.links.value,
-            web_search_excerpts=submission.links.web_search_excerpts,
-            standardized_value=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-        ),
-        KTP_AI_AUGMENT_COMMENTS_COL: submission.comments,
-    })
-
-
 def _accepted_output_row(
     *,
-    submission: StandardizedSubmission,
+    submission: Submission | StandardizedSubmission,
     evidence: ValidatedEvidence,
     namekey: NameKey,
     draw_number: str,
@@ -1871,12 +1766,6 @@ def _evaluate_submission_for_commit(
                         include_retry_contract=True,
                     ),
                 )
-            accepted_submission = (
-                submission_payload
-                if isinstance(submission_payload, StandardizedSubmission)
-                else _standardized_initial_submission(submission_payload)
-            )
-
             stage = BackendLifecycle.RESEARCHER_RESOLUTION
             draw_number, error = inputs.draw_number()
             if error is not None:
@@ -1887,7 +1776,7 @@ def _evaluate_submission_for_commit(
 
             stage = BackendLifecycle.INNERDICT_AND_CARD
             output_row = _accepted_output_row(
-                submission=accepted_submission,
+                submission=submission_payload,
                 evidence=evidence_assessment.validated,
                 namekey=inputs.namekey,
                 draw_number=draw_number,
