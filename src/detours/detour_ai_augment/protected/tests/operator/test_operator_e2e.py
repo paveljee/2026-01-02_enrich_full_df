@@ -1186,9 +1186,8 @@ def _wait_for_appendwatch(
                 PurePosixPath(filename),
             )
         except AppendwatchReportError as exc:
-            if str(exc) != missing and not (
-                not present and str(exc) == BackendLocale.ROLLOUT_REMOVED_OR_REPLACED
-            ):
+            # A removed/replaced entry still mentions the session; only missing is gone.
+            if str(exc) != missing:
                 raise
             observed_present = False
         else:
