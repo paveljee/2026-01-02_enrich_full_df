@@ -12,6 +12,10 @@
 
 Before adding any string literal, search existing globals in `vars` and wording in `Locale`; reuse the existing name by direct import from `vars`/`locale` when it represents the same thing. If none exists, say so plainly; do not invent a new global just to eliminate the literal without operator authorization. Do not duplicate Pydantic model field names as new globals: use the repo's `nameof` for those. Audit all new literals in the diff before finishing. Keep intentional literal expected output in tests only when it pins the exact public contract rather than mirroring its implementation.
 
+## 2026-10-13 completed spreadsheet leading columns
+
+- Operator requested `rnd`, `cohort`, and `ineligibility_category` as the first three completed-spreadsheet CSV columns, in that order. `dashboard/ui.py::spreadsheet_completed` uses the existing `GRID_*_FIELD` names and researcher metadata; ineligibility category is blank when absent. The existing spreadsheet test now pins order, total width, and row values; ordinary and `martin` exports share the same path. Targeted Pixi pytest passed (1), Pixi Ruff passed, detour mypy passed (66 files), and `git diff --check` passed. No staging/unstaging.
+
 ## 2026-10-09 active: official Codex session archival
 
 - Operator approved the revised **production-contour** proposal: keep `_CodexRunner`'s OpenAPI prompt and `start()` unchanged. After a successfully persisted HTTP-200 run outcome and clean Backend stop, Control Centre calls the guest's official `codex archive <session UUID>`. Archive errors are reported without rewriting the run's outcome; incomplete/failed snapshot captures leave the session in place.

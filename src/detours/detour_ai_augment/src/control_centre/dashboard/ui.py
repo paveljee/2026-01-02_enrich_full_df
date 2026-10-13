@@ -3817,7 +3817,7 @@ def spreadsheet_completed(services: _ApplicationServices, *, martin: bool = Fals
         standardized_column
         for _, standardized_column in AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS
     )
-    columns = []
+    columns = [GRID_RND_FIELD, GRID_COHORT_FIELD, GRID_INELIGIBILITY_FIELD]
     for column in codex_columns:
         columns.append(column)
         if column in ground_truth_by_ai:
@@ -3847,9 +3847,17 @@ def spreadsheet_completed(services: _ApplicationServices, *, martin: bool = Fals
                     else ground_truth.data[table_1_column]
                 )
             record = {
-                column: "" if values[column] is None else str(values[column])
-                for column in columns
+                GRID_RND_FIELD: str(researcher.ai_augment_rnd),
+                GRID_COHORT_FIELD: researcher.ai_augment_cohort.value,
+                GRID_INELIGIBILITY_FIELD: (
+                    "" if researcher.ai_augment_ineligibility_category is None
+                    else researcher.ai_augment_ineligibility_category.value
+                ),
             }
+            record.update({
+                column: "" if values[column] is None else str(values[column])
+                for column in columns[3:]
+            })
             if martin:
                 for column in standardized_columns:
                     record[column] = martin_serialize_standardized_cell(record[column])

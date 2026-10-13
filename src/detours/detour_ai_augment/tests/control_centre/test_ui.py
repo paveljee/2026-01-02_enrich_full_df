@@ -3956,7 +3956,12 @@ async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pair
                 if column not in CARD_EXCLUDED_COLUMNS
             ),
         )
-        assert len(columns) == len(codex_columns) + len(DOCX_TO_AI_AUGMENT_COLUMNS)
+        assert columns[:3] == [
+            control_ui.GRID_RND_FIELD,
+            control_ui.GRID_COHORT_FIELD,
+            control_ui.GRID_INELIGIBILITY_FIELD,
+        ]
+        assert len(columns) == 3 + len(codex_columns) + len(DOCX_TO_AI_AUGMENT_COLUMNS)
         assert tuple(column for column in columns if column in codex_columns) == (
             codex_columns
         )
@@ -3975,6 +3980,22 @@ async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pair
         assert f"[1/1] Written {destination}: {destination.stat().st_size} bytes" in output
         ground_truth_rows = rows[:2]
         no_ground_truth_row = rows[2]
+        assert all(
+            row[control_ui.GRID_RND_FIELD] == str(ground_truth_source.ai_augment_rnd)
+            for row in ground_truth_rows
+        )
+        assert no_ground_truth_row[control_ui.GRID_RND_FIELD] == str(
+            no_ground_truth_source.ai_augment_rnd
+        )
+        assert all(
+            row[control_ui.GRID_COHORT_FIELD] == ground_truth_source.ai_augment_cohort.value
+            and row[control_ui.GRID_INELIGIBILITY_FIELD] == ""
+            for row in ground_truth_rows
+        )
+        assert no_ground_truth_row[control_ui.GRID_COHORT_FIELD] == (
+            no_ground_truth_source.ai_augment_cohort.value
+        )
+        assert no_ground_truth_row[control_ui.GRID_INELIGIBILITY_FIELD] == ""
         assert all(
             row[KTP_FIRST_NAME_COL] == ground_truth_source.namekey.first_name
             for row in ground_truth_rows
