@@ -46,6 +46,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
     RESOURCE_PATH_KEY,
     RESOURCE_SHA256_KEY,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
+    PostCommitValidation,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store import (  # noqa: E501
     AiAugmentBackendStore,
     initialize_backend_store,
@@ -54,6 +57,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import (
     Locale as BackendLocale,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AI_AUGMENT_STANDARDIZED_COLUMNS,
     AIVM_AUDIT_USER,
     AIVM_IDENTITY_FILE,
     AIVM_INSTANCE,
@@ -72,6 +76,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
     INIT_PATH,
+    KTP_AI_AUGMENT_COMMENTS_COL,
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
     LIMA_SSH_CONFIG_PATH,
@@ -86,6 +91,8 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     SOURCE_KEY_HEADER,
     SSH_EXECUTABLE,
     SSH_TIMEOUT_SECONDS,
+    STANDARDIZED_SUBMISSION_TYPE,
+    SUBMISSION_TYPE,
     TEXT_ENCODING,
     VALIDATION_REQUEST_RECORD_ID_COLUMN,
     AiAugmentCohort,
@@ -1601,7 +1608,26 @@ def validate_workflow_artifacts(
             )
             assert len(output_rows) == 1
             output = output_rows[0]
-            assert all(value is not None for value in output.values())
+            post_commit_validation = validation_body["post_commit_validation"]
+            submission_type = post_commit_validation[
+                nameof(lambda: PostCommitValidation.submission_type)
+            ]
+            assert submission_type in (SUBMISSION_TYPE, STANDARDIZED_SUBMISSION_TYPE)
+            submission = post_commit_validation[
+                nameof(lambda: PostCommitValidation.submission)
+            ]
+            assert isinstance(submission, dict)
+
+            expected_null_columns = (
+                set(AI_AUGMENT_STANDARDIZED_COLUMNS)
+                if submission_type == SUBMISSION_TYPE else set()
+            )
+            if submission.get(KTP_AI_AUGMENT_COMMENTS_COL) is None:
+                expected_null_columns.add(KTP_AI_AUGMENT_COMMENTS_COL)
+
+            assert {
+                column for column, value in output.items() if value is None
+            } == expected_null_columns
             assert output == projected.innerdict.data
             _operator_log(f"completed output: {len(output)} populated fields")
             audits = backend_store._query_mappings(
