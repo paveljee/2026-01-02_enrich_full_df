@@ -88,6 +88,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     NAME_KEY_HEADER,
     NAMEKEY_ENV_NAME,
     NANOSECONDS_PER_MICROSECOND,
+    NOT_AVAILABLE_OR_APPLICABLE_VALUE,
     NOT_REPORTED_VALUE,
     PULL_PATH,
     PUSH_PATH,
@@ -185,6 +186,9 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_re
     ValidationRequestBody,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.aggrid import (
+    AgGrid,
+)
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
     ai_augment_context as context_models,
 )
@@ -903,6 +907,54 @@ def inline_controller_io(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_researcher_vars_cover_every_ai_augment_column() -> None:
     assert tuple(item.ai_column for item in control_ui.RESEARCHER_VARS) == (AI_AUGMENT_COLUMNS)
+    assert tuple(item.standardized_column for item in control_ui.RESEARCHER_VARS) == (
+        tuple(column for _, column in AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS)
+        + (None,)
+    )
+
+
+@pytest.mark.anyio
+async def test_main_grid_projects_completed_standardized_value_next_to_narrative(
+    tmp_path: Path,
+) -> None:
+    selected_standardized_column = AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS[1][1]
+    expected_standardized_value = render_standardized_submission_value(
+        json.dumps(NOT_AVAILABLE_OR_APPLICABLE_VALUE),
+    )
+    source, run = completed_query_researcher(
+        researcher(),
+        ai_field_values={selected_standardized_column: expected_standardized_value},
+    )
+    subject = controller()
+    set_researchers(subject, (source,))
+    subject._runs[run.run_id] = run
+    selected = control_ui.RESEARCHER_VARS[1]
+    snapshot = await subject.snapshot(selection=control_ui._UiSelection(
+        researcher_varname=selected.varname,
+    ))
+    page = control_ui._ControlCentrePage(
+        controller=subject, query_ipc=AsyncMock(), reference_docx=tmp_path / "ref",
+    )
+    columns = page.grid_column_definitions(researcher_var=selected)
+    fields = [column[AgGrid.COLUMN_FIELD] for column in columns]
+    narrative_index = fields.index(control_ui.GRID_AI_VALUE_FIELD)
+    assert fields[narrative_index + 1] == control_ui.GRID_STANDARDIZED_VALUE_FIELD
+    assert columns[narrative_index + 1][AgGrid.COLUMN_HEADER_NAME] == (
+        selected_standardized_column
+    )
+    assert page.grid_rows(snapshot=snapshot)[0][control_ui.GRID_STANDARDIZED_VALUE_FIELD] == (
+        expected_standardized_value
+    )
+    assert source.codex_innerdicts[0].text(
+        AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS[0][1]
+    ) != expected_standardized_value
+
+    comments_columns = page.grid_column_definitions(
+        researcher_var=control_ui.RESEARCHER_VARS[-1],
+    )
+    assert control_ui.GRID_STANDARDIZED_VALUE_FIELD not in {
+        column[AgGrid.COLUMN_FIELD] for column in comments_columns
+    }
 
 
 @pytest.mark.anyio

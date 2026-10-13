@@ -16,6 +16,10 @@ Before adding any string literal, search existing globals in `vars` and wording 
 
 - Operator requested `rnd`, `cohort`, and `ineligibility_category` as the first three completed-spreadsheet CSV columns, in that order. `dashboard/ui.py::spreadsheet_completed` uses the existing `GRID_*_FIELD` names and researcher metadata; ineligibility category is blank when absent. The existing spreadsheet test now pins order, total width, and row values; ordinary and `martin` exports share the same path. Targeted Pixi pytest passed (1), Pixi Ruff passed, detour mypy passed (66 files), and `git diff --check` passed. No staging/unstaging.
 
+## 2026-10-13 main-grid standardized value
+
+- Operator approved the read-only proposal to show the selected evidence field's standardized value immediately right of its narrative cell in the main AgGrid, omitting that column for comments (which has no standardized counterpart). UI-only implementation: `_ResearcherVar` holds its column pairing from `AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS`; the row projection reads the value from the same completed `CodexInnerDict` as narrative; the grid column and row data use a new `GRID_STANDARDIZED_VALUE_FIELD`. Initial/unmaterialized rows remain blank; history table, Backend, IPC, DB, replay and spreadsheet are untouched. Two direct E2E row constructors were updated and the browser contract now checks the rendered cell. A focused unit test checks a distinct second-field `NA` against the first field's `NR` and comments-column omission. Pixi targeted pytest passed (3), Ruff passed, and detour mypy passed (66 files). Browser E2E was not run in this environment; operator machine can run it. Agent did not stage/unstage files.
+
 ## 2026-10-09 active: official Codex session archival
 
 - Operator approved the revised **production-contour** proposal: keep `_CodexRunner`'s OpenAPI prompt and `start()` unchanged. After a successfully persisted HTTP-200 run outcome and clean Backend stop, Control Centre calls the guest's official `codex archive <session UUID>`. Archive errors are reported without rewriting the run's outcome; incomplete/failed snapshot captures leave the session in place.

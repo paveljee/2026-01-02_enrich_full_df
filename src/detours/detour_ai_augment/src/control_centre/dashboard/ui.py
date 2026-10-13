@@ -254,6 +254,7 @@ GRID_LAST_NAME_FIELD: Final = "last_name"
 GRID_COHORT_FIELD: Final = "cohort"
 GRID_INELIGIBILITY_FIELD: Final = "ineligibility_category"
 GRID_AI_VALUE_FIELD: Final = "ai_value"
+GRID_STANDARDIZED_VALUE_FIELD: Final = "standardized_value"
 GRID_TABLE_1_VALUE_FIELD: Final = "table_1_value"
 GRID_FOOTNOTES_FIELD: Final = "footnotes"
 GRID_FOOTNOTE_ARGUMENTS_FIELD: Final = "footnote_arguments"
@@ -370,7 +371,7 @@ def nicegui_table_column(
 
 
 class _ResearcherVar(FrozenStrictModel):
-    """A varname and paired AI/Table1 column names, not cell values.
+    """A varname and paired AI/standardized/Table1 column names, not cell values.
 
     The varname is the AI column name without AI_AUGMENT_COLUMN_PREFIX;
     it identifies the selected researcher var, not a researcher's NameKey.
@@ -378,13 +379,16 @@ class _ResearcherVar(FrozenStrictModel):
 
     varname: str
     ai_column: str
+    standardized_column: str | None
     table_1_column: str
 
 
+_STANDARDIZED_COLUMN_BY_AI: Final = dict(AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS)
 RESEARCHER_VARS: Final[tuple[_ResearcherVar, ...]] = tuple(
     _ResearcherVar(
         varname=ai_column.removeprefix(AI_AUGMENT_COLUMN_PREFIX),
         ai_column=ai_column,
+        standardized_column=_STANDARDIZED_COLUMN_BY_AI.get(ai_column),
         table_1_column=table_1_column,
     )
     for table_1_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS
@@ -588,6 +592,11 @@ class _RunAttemptView(FrozenStrictModel):
             ai_value=(
                 None if codex_innerdict is None
                 else codex_innerdict.text(researcher_var.ai_column)
+            ),
+            standardized_value=(
+                None
+                if codex_innerdict is None or researcher_var.standardized_column is None
+                else codex_innerdict.text(researcher_var.standardized_column)
             ),
             table_1_column=researcher_var.table_1_column,
             table_1_value=(
@@ -802,6 +811,7 @@ class _ResearcherVarRowView(FrozenStrictModel):
 
     ai_column: str
     ai_value: str | None
+    standardized_value: str | None
 
     table_1_column: str
     table_1_value: str | None
@@ -851,6 +861,7 @@ class _ResearcherVarRowView(FrozenStrictModel):
             last_name=researcher.namekey.last_name,
             ai_column=researcher_var.ai_column,
             ai_value=None,
+            standardized_value=None,
             table_1_column=researcher_var.table_1_column,
             table_1_value=(
                 None
@@ -2981,6 +2992,15 @@ class _ControlCentrePage:
                 width=GRID_CONTENT_COLUMN_WIDTH,
                 wrap_text=True,
             ),
+            *(
+                [AgGrid.column(
+                    field=GRID_STANDARDIZED_VALUE_FIELD,
+                    header=researcher_var.standardized_column,
+                    width=GRID_CONTENT_COLUMN_WIDTH,
+                    wrap_text=True,
+                )]
+                if researcher_var.standardized_column is not None else []
+            ),
             AgGrid.column(
                 field=GRID_TABLE_1_VALUE_FIELD,
                 header=researcher_var.table_1_column,
@@ -3107,6 +3127,7 @@ class _ControlCentrePage:
                     else researcher.ai_augment_ineligibility_category.value
                 ),
                 GRID_AI_VALUE_FIELD: latest.ai_value,
+                GRID_STANDARDIZED_VALUE_FIELD: latest.standardized_value,
                 GRID_TABLE_1_VALUE_FIELD: latest.table_1_value,
                 GRID_FOOTNOTES_FIELD: latest.footnotes,
                 GRID_FOOTNOTE_ARGUMENTS_FIELD: latest.footnote_arguments,

@@ -517,6 +517,7 @@ class BrowserController:
                 last_name=researcher.namekey.last_name,
                 ai_column=researcher_var.ai_column,
                 ai_value=None,
+                standardized_value=None,
                 table_1_column=researcher_var.table_1_column,
                 table_1_value=None,
                 footnotes=None,
@@ -566,6 +567,10 @@ class BrowserController:
             last_name=researcher.namekey.last_name,
             ai_column=researcher_var.ai_column,
             ai_value=f"ai-value-{ordinal}",
+            standardized_value=(
+                f"standardized-value-{ordinal}"
+                if researcher_var.standardized_column is not None else None
+            ),
             table_1_column=researcher_var.table_1_column,
             table_1_value=None,
             footnotes=f"footnote-{ordinal}",
@@ -1216,6 +1221,11 @@ def test_control_centre_browser_contract(
                     f'{GRID_CELL_SELECTOR}[col-id="{control_ui.GRID_AI_VALUE_FIELD}"]'
                 )
             ).to_have_text("ai-value-2")
+            expect(
+                eligible_row.locator(
+                    f'{GRID_CELL_SELECTOR}[col-id="{control_ui.GRID_STANDARDIZED_VALUE_FIELD}"]'
+                )
+            ).to_have_text("standardized-value-2")
             assert errors == [], Counter(errors)
             browser.close()
     finally:
