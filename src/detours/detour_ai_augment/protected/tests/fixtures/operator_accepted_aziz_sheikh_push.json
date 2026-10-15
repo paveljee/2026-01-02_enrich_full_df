@@ -36,7 +36,7 @@
     ],
     "standardized_value": {
       "place": "Oxford, England, United Kingdom",
-      "location": "GB"
+      "location": "GBR"
     }
   },
   "ktp.ai_augment_race_ethnicity_language_culture": {
@@ -157,7 +157,9 @@
           "organization_name": "University of Oxford",
           "openalex_id": "https://openalex.org/I40120149",
           "ror": "https://ror.org/052gg0110"
-        }
+        },
+        "start": "NR",
+        "end": "NA"
       },
       {
         "academic_position": "Head of the Nuffield Department of Primary Care Health Sciences",
@@ -165,7 +167,9 @@
           "organization_name": "University of Oxford",
           "openalex_id": "https://openalex.org/I40120149",
           "ror": "https://ror.org/052gg0110"
-        }
+        },
+        "start": "NR",
+        "end": "NA"
       },
       {
         "academic_position": "Nuffield Professor of Primary Care Health Sciences",
@@ -173,7 +177,9 @@
           "organization_name": "University of Oxford",
           "openalex_id": "https://openalex.org/I40120149",
           "ror": "https://ror.org/052gg0110"
-        }
+        },
+        "start": "NR",
+        "end": "NA"
       },
       {
         "academic_position": "Professorial Fellow, Harris Manchester College",
@@ -181,7 +187,9 @@
           "organization_name": "University of Oxford",
           "openalex_id": "https://openalex.org/I40120149",
           "ror": "https://ror.org/052gg0110"
-        }
+        },
+        "start": "NR",
+        "end": "NA"
       },
       {
         "academic_position": "Chair of Primary Care Research and Development",

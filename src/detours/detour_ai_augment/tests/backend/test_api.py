@@ -67,11 +67,11 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.cod
     CodexRolloutRecord,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
+    EducationRecord,
     EvidenceWithdrawal,
     FieldSubmission,
     GenderSubmission,
-    NotAvailableOrApplicable,
-    NotReported,
+    RaceEthnicityLanguageCultureStandardized,
     StandardizedFieldSubmission,
     StandardizedSubmission,
     WebSearchExcerpt,
@@ -5463,24 +5463,23 @@ def test_card_labels_stored_standardized_fields_without_mutating_source() -> Non
         expected_value = codex_parse.render_standardized_submission_value(canonical_json)
         assert codex_innerdict.data[column] == expected_value
         assert f"**`{column}`**: {expected_value}" in card
+    race_column = AI_AUGMENT_STANDARDIZED_COLUMNS[
+        AI_AUGMENT_EVIDENCE_COLUMNS.index(KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL)
+    ]
+    assert (
+        f'"{nameof(lambda: RaceEthnicityLanguageCultureStandardized.race)}":'
+        f'"{NOT_AVAILABLE_OR_APPLICABLE_VALUE}"'
+    ) in codex_innerdict.data[race_column]
+    assert f"**`{race_column}`**: {codex_innerdict.data[race_column]}" in card
     assert source_innerdict.data == original_source
 
 
-@pytest.mark.parametrize(
-    "placeholder",
-    (
-        NOT_REPORTED_VALUE,
-        NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-    ),
-)
-def test_card_preserves_standardized_placeholders(
-    placeholder: NotReported | NotAvailableOrApplicable,
-) -> None:
+def test_card_preserves_standardized_placeholder() -> None:
     submission = L_FEI_FEI_RETRY_FIXTURE.submission.model_copy(deep=True)
     submission.gender = GenderSubmission(
         value=submission.gender.value,
         web_search_excerpts=submission.gender.web_search_excerpts,
-        standardized_value=placeholder,
+        standardized_value=NOT_REPORTED_VALUE,
     )
     rendered = post_commit_validation.render_codex_values(
         submission,
@@ -5491,7 +5490,9 @@ def test_card_preserves_standardized_placeholders(
     column = AI_AUGMENT_STANDARDIZED_COLUMNS[
         AI_AUGMENT_EVIDENCE_COLUMNS.index(KTP_AI_AUGMENT_GENDER_COL)
     ]
-    expected_value = codex_parse.render_standardized_submission_value(json.dumps(placeholder))
+    expected_value = codex_parse.render_standardized_submission_value(
+        json.dumps(NOT_REPORTED_VALUE)
+    )
     assert rendered[column] == expected_value
     namekey = NameKey(first_name="A.", last_name="Sheikh")
     codex_innerdict = InnerDict.from_mapping(
@@ -6731,7 +6732,9 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
     standardized_changed = deepcopy(standardized)
     changed_field = standardized_changed[KTP_AI_AUGMENT_EDUCATION_COL]
     assert isinstance(changed_field, dict)
-    changed_field[FIELD_STANDARDIZED_VALUE_FIELD] = NOT_AVAILABLE_OR_APPLICABLE_VALUE
+    changed_field[FIELD_STANDARDIZED_VALUE_FIELD] = [
+        dict.fromkeys(EducationRecord.model_fields, NOT_REPORTED_VALUE)
+    ]
 
     assess_evidence = post_commit_validation.assess_submission_evidence
 

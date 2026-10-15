@@ -37,7 +37,7 @@ from pydantic import (
     StringConstraints,
     model_validator,
 )
-from pydantic_extra_types.country import CountryAlpha2
+from pydantic_extra_types.country import CountryAlpha3
 from pydantic_extra_types.language_code import ISO639_3
 
 # OpenAPI hint: patch this
@@ -121,24 +121,25 @@ SubmissionText: TypeAlias = Annotated[
 
 NotReported: TypeAlias = Literal["NR"]
 NotAvailableOrApplicable: TypeAlias = Literal["NA"]
-SubmissionValue: TypeAlias = T | NotReported | NotAvailableOrApplicable
+SubmissionValueRequired: TypeAlias = T | NotReported
+SubmissionValueOptional: TypeAlias = SubmissionValueRequired[T] | NotAvailableOrApplicable
 
 
 # KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL
 class ResearcherAuthorStandardized(StrictModel):
-    first_name: SubmissionValue[SubmissionText]
-    last_name: SubmissionValue[SubmissionText]
-    orcid: SubmissionValue[HttpUrl]
-    openalex_id: SubmissionValue[HttpUrl]
+    first_name: SubmissionValueOptional[SubmissionText]
+    last_name: SubmissionValueOptional[SubmissionText]
+    orcid: SubmissionValueOptional[HttpUrl]
+    openalex_id: SubmissionValueOptional[HttpUrl]
 
 
 # KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL
-Location: TypeAlias = CountryAlpha2
+Location: TypeAlias = CountryAlpha3
 
 
 class PlaceOfResidenceStandardized(StrictModel):
-    place: SubmissionValue[SubmissionText]
-    location: SubmissionValue[Location]
+    place: SubmissionValueRequired[SubmissionText]
+    location: SubmissionValueRequired[Location]
 
 
 # KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
@@ -176,7 +177,7 @@ TargetWebSearchQueryLanguage: TypeAlias = (
 class RaceEthnicityLanguageCultureStandardized(StrictModel):
     race: NotAvailableOrApplicable  # banned
     ethnicity: NotAvailableOrApplicable  # banned
-    language: SubmissionValue[
+    language: SubmissionValueRequired[
         list[TargetWebSearchQueryLanguage],
     ] = Field(
         min_length=MIN_TARGET_WEB_SEARCH_QUERY_LANGUAGES,
@@ -189,7 +190,7 @@ class RaceEthnicityLanguageCultureStandardized(StrictModel):
 
 
 # KTP_AI_AUGMENT_GENDER_COL
-GenderStandardized: TypeAlias = SubmissionValue[
+GenderStandardized: TypeAlias = SubmissionValueRequired[
     Literal["Man", "Woman", "Other"]
 ]
 
@@ -204,7 +205,7 @@ YearOfBirth: TypeAlias = Annotated[
 DateOfBirth: TypeAlias = date
 YearOfFirstPublication: TypeAlias = Year
 DateOfFirstPublication: TypeAlias = date
-AgeStandardized: TypeAlias = SubmissionValue[
+AgeStandardized: TypeAlias = SubmissionValueRequired[
     CurrentAge
     | YearOfBirth
     | DateOfBirth
@@ -215,9 +216,9 @@ AgeStandardized: TypeAlias = SubmissionValue[
 
 # KTP_AI_AUGMENT_EDUCATION_COL
 class AcademicInstitution(StrictModel):
-    organization_name: SubmissionValue[SubmissionText]
-    openalex_id: SubmissionValue[HttpUrl]
-    ror: SubmissionValue[HttpUrl]
+    organization_name: SubmissionValueRequired[SubmissionText]
+    openalex_id: SubmissionValueOptional[HttpUrl]
+    ror: SubmissionValueOptional[HttpUrl]
 
     @model_validator(mode="after")
     def validate_institution(self) -> Self:
@@ -323,13 +324,13 @@ class ISCEDTertiaryLevel(StrEnum):
 
 
 class EducationRecord(StrictModel):
-    degree_conferred: SubmissionValue[SubmissionText]
-    isced_level: SubmissionValue[ISCEDTertiaryLevel]
-    place_conferred: SubmissionValue[AcademicInstitution]
-    year_conferred: SubmissionValue[Year]
+    degree_conferred: SubmissionValueRequired[SubmissionText]
+    isced_level: SubmissionValueRequired[ISCEDTertiaryLevel]
+    place_conferred: SubmissionValueRequired[AcademicInstitution]
+    year_conferred: SubmissionValueRequired[Year]
 
 
-EducationStandardized: TypeAlias = SubmissionValue[Annotated[
+EducationStandardized: TypeAlias = SubmissionValueRequired[Annotated[
     list[EducationRecord],
     Field(min_length=MIN_EDUCATION_RECORDS),
 ]]
@@ -337,25 +338,27 @@ EducationStandardized: TypeAlias = SubmissionValue[Annotated[
 
 # KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL
 class FormerAcademicPosition(StrictModel):
-    academic_position: SubmissionValue[SubmissionText]
-    academic_institution: SubmissionValue[AcademicInstitution]
-    start: SubmissionValue[Year]
-    end: SubmissionValue[Year]
+    academic_position: SubmissionValueRequired[SubmissionText]
+    academic_institution: SubmissionValueRequired[AcademicInstitution]
+    start: SubmissionValueRequired[Year]
+    end: SubmissionValueRequired[Year]
 
 
 class CurrentAcademicPosition(StrictModel):
-    academic_position: SubmissionValue[SubmissionText]
-    academic_institution: SubmissionValue[AcademicInstitution]
+    academic_position: SubmissionValueRequired[SubmissionText]
+    academic_institution: SubmissionValueRequired[AcademicInstitution]
+    start: SubmissionValueRequired[Year]
+    end: NotAvailableOrApplicable
 
 
-AcademicPositionsStandardized: TypeAlias = SubmissionValue[Annotated[
+AcademicPositionsStandardized: TypeAlias = SubmissionValueRequired[Annotated[
     list[FormerAcademicPosition | CurrentAcademicPosition],
     Field(min_length=MIN_ACADEMIC_POSITIONS),
 ]]
 
 
 # KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL
-SocialCapitalStandardized: TypeAlias = SubmissionValue[Annotated[
+SocialCapitalStandardized: TypeAlias = SubmissionValueRequired[Annotated[
     list[SubmissionText],
     Field(min_length=MIN_SOCIAL_CAPITAL_ITEMS),
 ]]
@@ -363,11 +366,11 @@ SocialCapitalStandardized: TypeAlias = SubmissionValue[Annotated[
 
 # KTP_AI_AUGMENT_LINKS_COL
 class ResearcherLink(StrictModel):
-    url: SubmissionValue[HttpUrl]
-    verified_with_orcid: SubmissionValue[bool]
+    url: SubmissionValueRequired[HttpUrl]
+    verified_with_orcid: SubmissionValueRequired[bool]
 
 
-ResearcherLinksStandardized: TypeAlias = SubmissionValue[Annotated[
+ResearcherLinksStandardized: TypeAlias = SubmissionValueRequired[Annotated[
     list[ResearcherLink],
     Field(min_length=MIN_RESEARCHER_LINKS),
 ]]

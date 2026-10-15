@@ -21,6 +21,10 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models imp
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E402, E501
     Submission,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (  # noqa: E402
+    NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+    NOT_REPORTED_VALUE,
+)
 
 TEST_OPENALEX_API_KEY = "test-openalex-api-key"
 TEST_EXCERPT = "Exact cited text."
@@ -56,15 +60,15 @@ FIELD_MODEL_CASES = (
     ),
     (
         schema.PlaceOfResidenceSubmission,
-        {"place": "Stanford, California", "location": "US"},
+        {"place": "Stanford, California", "location": "USA"},
     ),
     (
         schema.RaceEthnicityLanguageCultureSubmission,
         {
-            "race": "NA",
-            "ethnicity": "NA",
+            "race": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+            "ethnicity": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
             "language": ["eng", "cmn"],
-            "culture": "NA",
+            "culture": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
         },
     ),
     (schema.GenderSubmission, "Woman"),
@@ -77,8 +81,8 @@ FIELD_MODEL_CASES = (
                 "isced_level": "8",
                 "place_conferred": {
                     "organization_name": "Caltech",
-                    "openalex_id": "NR",
-                    "ror": "NR",
+                    "openalex_id": NOT_REPORTED_VALUE,
+                    "ror": NOT_REPORTED_VALUE,
                 },
                 "year_conferred": 2005,
             }
@@ -91,9 +95,11 @@ FIELD_MODEL_CASES = (
                 "academic_position": "Professor",
                 "academic_institution": {
                     "organization_name": "Stanford University",
-                    "openalex_id": "NR",
-                    "ror": "NR",
+                    "openalex_id": NOT_REPORTED_VALUE,
+                    "ror": NOT_REPORTED_VALUE,
                 },
+                "start": NOT_REPORTED_VALUE,
+                "end": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
             }
         ],
     ),
@@ -108,26 +114,31 @@ FIELD_MODEL_UNAVAILABLE_CASES = (
     (
         schema.ResearcherAuthorSubmission,
         {
-            "first_name": "NR",
-            "last_name": "NA",
-            "orcid": "NR",
-            "openalex_id": "NA",
+            "first_name": NOT_REPORTED_VALUE,
+            "last_name": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+            "orcid": NOT_REPORTED_VALUE,
+            "openalex_id": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
         },
     ),
     (
         schema.PlaceOfResidenceSubmission,
-        {"place": "NR", "location": "NA"},
+        {"place": NOT_REPORTED_VALUE, "location": NOT_REPORTED_VALUE},
     ),
     (
         schema.RaceEthnicityLanguageCultureSubmission,
-        {"race": "NA", "ethnicity": "NA", "language": "NR", "culture": "NA"},
+        {
+            "race": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+            "ethnicity": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+            "language": NOT_REPORTED_VALUE,
+            "culture": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+        },
     ),
-    (schema.GenderSubmission, "NR"),
-    (schema.AgeFirstPublicationSubmission, "NA"),
-    (schema.EducationSubmission, "NR"),
-    (schema.AcademicPositionsSubmission, "NA"),
-    (schema.SocialCapitalSubmission, "NR"),
-    (schema.ResearcherLinksSubmission, "NA"),
+    (schema.GenderSubmission, NOT_REPORTED_VALUE),
+    (schema.AgeFirstPublicationSubmission, NOT_REPORTED_VALUE),
+    (schema.EducationSubmission, NOT_REPORTED_VALUE),
+    (schema.AcademicPositionsSubmission, NOT_REPORTED_VALUE),
+    (schema.SocialCapitalSubmission, NOT_REPORTED_VALUE),
+    (schema.ResearcherLinksSubmission, NOT_REPORTED_VALUE),
 )
 
 
@@ -168,12 +179,12 @@ def test_field_submission_models_round_trip(
     FIELD_MODEL_UNAVAILABLE_CASES,
     ids=lambda value: value.__name__ if isinstance(value, type) else None,
 )
-def test_field_submission_models_support_nr_and_na(
+def test_field_submission_models_support_allowed_placeholders(
     model: type[BaseModel],
     standardized_value: object,
 ) -> None:
     payload = {
-        FIELD_VALUE_FIELD: "NR or NA",
+        FIELD_VALUE_FIELD: "Plain-text research value.",
         FIELD_STANDARDIZED_VALUE_FIELD: standardized_value,
         FIELD_EVIDENCE_FIELD: TEST_EVIDENCE,
     }
@@ -185,6 +196,33 @@ def test_field_submission_models_support_nr_and_na(
     )
 
 
+@pytest.mark.parametrize(
+    ("model", "standardized_value"),
+    (
+        (schema.PlaceOfResidenceSubmission, {
+            "place": NOT_REPORTED_VALUE,
+            "location": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+        }),
+        (schema.GenderSubmission, NOT_AVAILABLE_OR_APPLICABLE_VALUE),
+        (schema.AgeFirstPublicationSubmission, NOT_AVAILABLE_OR_APPLICABLE_VALUE),
+        (schema.EducationSubmission, NOT_AVAILABLE_OR_APPLICABLE_VALUE),
+        (schema.AcademicPositionsSubmission, NOT_AVAILABLE_OR_APPLICABLE_VALUE),
+        (schema.SocialCapitalSubmission, NOT_AVAILABLE_OR_APPLICABLE_VALUE),
+        (schema.ResearcherLinksSubmission, NOT_AVAILABLE_OR_APPLICABLE_VALUE),
+    ),
+    ids=lambda value: value.__name__ if isinstance(value, type) else None,
+)
+def test_required_standardized_values_reject_na(
+    model: type[BaseModel], standardized_value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate({
+            FIELD_VALUE_FIELD: "Plain-text research value.",
+            FIELD_STANDARDIZED_VALUE_FIELD: standardized_value,
+            FIELD_EVIDENCE_FIELD: TEST_EVIDENCE,
+        })
+
+
 def test_comments_submission_is_optional_plain_text_without_evidence_or_standardization() -> None:
     assert schema.CommentsSubmission.model_validate({
         COMMENTS_VALUE_FIELD: "Identity caveat."
@@ -192,7 +230,7 @@ def test_comments_submission_is_optional_plain_text_without_evidence_or_standard
     with pytest.raises(ValidationError):
         schema.CommentsSubmission.model_validate({
             COMMENTS_VALUE_FIELD: "Identity caveat.",
-            FIELD_STANDARDIZED_VALUE_FIELD: "NA",
+            FIELD_STANDARDIZED_VALUE_FIELD: NOT_AVAILABLE_OR_APPLICABLE_VALUE,
         })
     with pytest.raises(ValidationError):
         schema.CommentsSubmission.model_validate({
@@ -205,14 +243,14 @@ def test_academic_institution_skips_external_validation_for_nr_identifiers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def unexpected_get(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("NR identifiers must not make external requests")
+        pytest.fail(f"{NOT_REPORTED_VALUE} identifiers must not make external requests")
 
     monkeypatch.setattr(requests, "get", unexpected_get)
 
     institution = schema.AcademicInstitution.model_validate({
         "organization_name": "Caltech",
-        "openalex_id": "NR",
-        "ror": "NR",
+        "openalex_id": NOT_REPORTED_VALUE,
+        "ror": NOT_REPORTED_VALUE,
     })
 
     assert institution.organization_name == "Caltech"

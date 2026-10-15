@@ -1,10 +1,14 @@
 # Test fixtures
 ## `operator_accepted_aziz_sheikh_push.json`
-This is the exact `POST /push` request body
+This fixture is adapted from the exact `POST /push` request body
 produced by Codex and accepted by the Backend
 during the 2026-09-03 Human Operator end-to-end run
 (`pixi run test-detour-ai-augment-operator`)
 for `'{"ktp.first_name":"A.","ktp.last_name":"Sheikh"}'`.
+The adaptation specifically entailed:
+for the current schema, the captured `GB` location is represented as `GBR`,
+and the four current academic positions specify `start: NR` and `end: NA`.
+The remaining content comes from the original capture.
 
 It anchors the regression covering Backend validation,
 synthetic commit linkage, projection, and

@@ -5,10 +5,11 @@ from copy import deepcopy
 from typing import Final, Generic, TypeVar
 
 from pydantic import BaseModel, HttpUrl
-from pydantic_extra_types.country import CountryAlpha2
+from pydantic_extra_types.country import CountryAlpha3
 from pydantic_extra_types.language_code import ISO639_3
 
 from ..locale import Locale
+from ..vars import NOT_AVAILABLE_OR_APPLICABLE_VALUE, NOT_REPORTED_VALUE
 from .pydantic_to_paste import (
     AcademicInstitution,
     AcademicPositionsSubmission,
@@ -258,7 +259,7 @@ L_FEI_FEI_RETRY_FIXTURE.submission.researcher_author.standardized_value = (
 L_FEI_FEI_RETRY_FIXTURE.submission.place_of_residence.standardized_value = (
     PlaceOfResidenceStandardized(
     place="Stanford campus, Stanford, California",
-    location=CountryAlpha2("US"),
+    location=CountryAlpha3("USA"),
     )
 )
 L_FEI_FEI_RETRY_FIXTURE.submission.race_ethnicity_language_culture.standardized_value = (
@@ -295,14 +296,20 @@ L_FEI_FEI_RETRY_FIXTURE.submission.academic_positions.standardized_value = [
     CurrentAcademicPosition.model_construct(
         academic_position="Sequoia Capital Professor of Computer Science",
         academic_institution=STANFORD,
+        start=NOT_REPORTED_VALUE,
+        end=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
     ),
     CurrentAcademicPosition.model_construct(
         academic_position="Senior Fellow at Stanford HAI",
         academic_institution=STANFORD,
+        start=NOT_REPORTED_VALUE,
+        end=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
     ),
     CurrentAcademicPosition.model_construct(
         academic_position="Professor by courtesy at the Graduate School of Business",
         academic_institution=STANFORD,
+        start=NOT_REPORTED_VALUE,
+        end=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
     ),
     FormerAcademicPosition.model_construct(
         academic_position="Director of the AI Lab",
@@ -319,6 +326,8 @@ L_FEI_FEI_RETRY_FIXTURE.submission.academic_positions.standardized_value = [
     CurrentAcademicPosition.model_construct(
         academic_position="Co-founder and CEO",
         academic_institution=WORLD_LABS,
+        start=NOT_REPORTED_VALUE,
+        end=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
     ),
 ]
 L_FEI_FEI_RETRY_FIXTURE.submission.social_capital.standardized_value = [
