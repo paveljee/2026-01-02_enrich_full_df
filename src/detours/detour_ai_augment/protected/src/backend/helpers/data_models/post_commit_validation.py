@@ -1438,6 +1438,41 @@ def _evaluate_retry_submission(
             assessment,
             obligations,
         )
+        # Pin durable JSON already produced by Pydantic and checked on replay.
+        # Rehydrating typed fields here would rerun OpenAlex/ROR validators.
+        pins: dict[str, JsonValue] = {}
+        prior = (
+            commit_request_record.commit_request_body.pull_response_record
+            .validation_request_record
+        )
+        # Follow each prior commit's pull back to its validation, newest first.
+        # Older values overwrite newer ones, leaving each field pinned to its
+        # first Pydantic-valid standardized value, even if that retry was unapplied.
+        while prior is not None:
+            validation = prior.validation_request_body.post_commit_validation
+            if validation.submission_type == STANDARDIZED_SUBMISSION_TYPE:
+                prior_submission = validation.submission
+                assert prior_submission is not None
+                for field in AI_AUGMENT_EVIDENCE_COLUMNS:
+                    prior_field = prior_submission[field]
+                    assert isinstance(prior_field, dict)
+                    pins[field] = prior_field[STANDARDIZED_VALUE_FIELD]
+            prior = (
+                prior.validation_request_body.commit_request_record.commit_request_body
+                .pull_response_record.validation_request_record
+            )
+        current_submission = submission_payload.model_dump(mode="json", by_alias=True)
+        pin_violations: list[str] = []
+        for field, pinned_value in pins.items():
+            current_field = current_submission[field]
+            assert isinstance(current_field, dict)
+            if current_field[STANDARDIZED_VALUE_FIELD] != pinned_value:
+                pin_violations.append(
+                    Locale.EVIDENCE_EXACT_IMMUTABLE_TEMPLATE.format(
+                        immutable=f"{field}.{STANDARDIZED_VALUE_FIELD}",
+                    )
+                )
+        violations = (*violations, *pin_violations)
 
     applied = not violations
     accepted = assessment.accepted and applied

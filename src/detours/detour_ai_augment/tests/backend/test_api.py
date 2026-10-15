@@ -6712,6 +6712,7 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
     api_store: AiAugmentBackendStore,
     api_push_capture: tuple[CodexRolloutRecord, aivm_audit._AivmAuditConfiguration],
     threaded_loop: asyncio.Runner,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert api_push_capture[0].line_count > 0
     rejected_evidence = valid_submission_body()
@@ -6721,10 +6722,39 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
     assert isinstance(excerpts, list)
     excerpt = excerpts[0]
     assert isinstance(excerpt, dict)
-    excerpt[nameof(lambda: WebSearchExcerpt.excerpt)] = "fabricated excerpt"
+    fabricated_excerpt = "fabricated excerpt"
+    excerpt[nameof(lambda: WebSearchExcerpt.excerpt)] = fabricated_excerpt
     invalid_submission = {"unexpected": True}
     plain = valid_submission_body()
     standardized = standardized_submission_body(plain)
+    standardized_rejected = standardized_submission_body(rejected_evidence)
+    standardized_changed = deepcopy(standardized)
+    changed_field = standardized_changed[KTP_AI_AUGMENT_EDUCATION_COL]
+    assert isinstance(changed_field, dict)
+    changed_field[FIELD_STANDARDIZED_VALUE_FIELD] = NOT_AVAILABLE_OR_APPLICABLE_VALUE
+
+    assess_evidence = post_commit_validation.assess_submission_evidence
+
+    def reject_before_evidence_audit(
+        rollout_index: post_commit_validation._RolloutIndex,
+        submission_payload: Submission | StandardizedSubmission,
+        *,
+        codex_match_version: int,
+    ) -> post_commit_validation._EvidenceAssessment:
+        if isinstance(submission_payload, StandardizedSubmission) and any(
+            isinstance(item, WebSearchExcerpt) and item.excerpt == fabricated_excerpt
+            for item in submission_payload.education.web_search_excerpts
+        ):
+            raise post_commit_validation._MultipleEvidenceMatches(fabricated_excerpt)
+        return assess_evidence(
+            rollout_index, submission_payload, codex_match_version=codex_match_version,
+        )
+
+    monkeypatch.setattr(
+        post_commit_validation,
+        nameof(lambda: post_commit_validation.assess_submission_evidence),
+        reject_before_evidence_audit,
+    )
 
     with api_store._writable(api_runtime):
         async def exercise() -> None:
@@ -6752,6 +6782,14 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
                         BackendLifecycle.REJECTED, HTTPStatus.OK,
                     ),
                     (
+                        standardized_rejected, BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
+                        BackendLifecycle.REJECTED, HTTPStatus.OK,
+                    ),
+                    (
+                        standardized_changed, BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
+                        BackendLifecycle.REJECTED, HTTPStatus.OK,
+                    ),
+                    (
                         standardized, BackendLifecycle.ACCEPTED,
                         BackendLifecycle.ACCEPTED, HTTPStatus.GONE,
                     ),
@@ -6769,6 +6807,14 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
                         assert outcome.submission == StandardizedSubmission.model_validate(
                             standardized
                         ).model_dump(mode="json", by_alias=True)
+                    elif submission is standardized_rejected:
+                        assert outcome.submission_type == STANDARDIZED_SUBMISSION_TYPE
+                        assert outcome.submission == StandardizedSubmission.model_validate(
+                            standardized_rejected
+                        ).model_dump(mode="json", by_alias=True)
+                        assert api_store._execute(
+                            f"SELECT count(*) FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}"
+                        ).fetchone() == (1,)
                     pull = await client.get(PULL_PATH)
                     assert pull.status_code == expected_pull_status
                     if submission is rejected_evidence:
@@ -6783,17 +6829,33 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
                             f"{KTP_AI_AUGMENT_EDUCATION_COL}.{FIELD_STANDARDIZED_VALUE_FIELD}"
                             in pull.text
                         )
+                    elif submission is standardized_changed:
+                        assert (
+                            Locale.EVIDENCE_EXACT_IMMUTABLE_TEMPLATE.format(
+                                immutable=(
+                                    f"{KTP_AI_AUGMENT_EDUCATION_COL}."
+                                    f"{FIELD_STANDARDIZED_VALUE_FIELD}"
+                                ),
+                            )
+                            in pull.text
+                        )
             baseline_rows = api_store._execute(
                 f"SELECT {POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL} "
                 f"FROM {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}"
             ).fetchall()
             audit_rows = api_store._execute(
-                f"SELECT {POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL} "
+                f"SELECT {POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL}, "
+                f"{POST_COMMIT_VALIDATION_APPLIED_COL}, "
+                f"{POST_COMMIT_VALIDATION_ACCEPTED_COL} "
                 f"FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE} "
                 f"ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}"
             ).fetchall()
             assert baseline_rows == [(str(original_pull.record_id),)]
-            assert audit_rows == [(str(original_pull.record_id),)] * 2
+            assert audit_rows == [
+                (str(original_pull.record_id), True, False),
+                (str(original_pull.record_id), False, False),
+                (str(original_pull.record_id), True, True),
+            ]
 
         threaded_loop.run(asyncio.wait_for(exercise(), timeout=60))
 
