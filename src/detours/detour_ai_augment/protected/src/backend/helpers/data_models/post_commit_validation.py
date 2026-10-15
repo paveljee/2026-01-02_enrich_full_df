@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from random import Random
 from typing import TYPE_CHECKING, Callable, Final, Literal, Self
+from unicodedata import normalize
+from urllib.parse import unquote
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -824,6 +826,25 @@ def _render_fco_timestamp(value: datetime) -> str:
     )
 
 
+def decoded_url(url: str) -> str:
+    return normalize("NFC", unquote(url, encoding="utf-8", errors="strict"))
+
+
+def evidence_urls_match(submitted: str, cited: str) -> bool:
+    """Match raw URLs first, then strict UTF-8-decoded, NFC-normalized URLs.
+
+    Exact assessment calls this after collecting verbatim excerpt hits, keeping
+    wrong-URL hits for diagnostics. Near assessment calls it during collection
+    because only same-URL normalized-text hits matter there.
+    """
+    if submitted == cited:
+        return True
+    try:
+        return decoded_url(submitted) == decoded_url(cited)
+    except UnicodeDecodeError:
+        return False
+
+
 def _normalized_evidence_tokens(excerpt: str) -> tuple[str, ...]:
     unaccented = unicodedata.normalize("NFKD", excerpt.lower())
     text = "".join(
@@ -881,7 +902,7 @@ def _near_evidence_candidates(
         return ()
 
     def position_for(row: _CodexTurnRefRow) -> int | None:
-        if row.url != url:
+        if not evidence_urls_match(url, row.url):
             return None
         tokens = _normalized_evidence_tokens(row.cite_text)
         width = len(submitted_tokens)
@@ -954,7 +975,8 @@ def assess_submission_evidence(
                 excerpt=evidence.excerpt,
             )
             exact_url_candidates = tuple(
-                candidate for candidate in exact_candidates if candidate.url == evidence.url
+                candidate for candidate in exact_candidates
+                if evidence_urls_match(evidence.url, candidate.url)
             )
             if exact_url_candidates:
                 if len(exact_url_candidates) > 1 and not ALLOW_MULTIPLE_EVIDENCE_MATCHES:
@@ -1086,25 +1108,46 @@ def _log_evidence_assessment(
         else:
             excerpt = None
             url = None
-        candidate_diagnostics = tuple(
-            (
-                candidate.ref_id,
-                candidate.call_id,
-                candidate.cite_text,
-                candidate.excerpt_position,
-                candidate.url,
-            )
-            for candidate in item.candidates
-        )
+        try:
+            decoded_submitted_url = decoded_url(url) if url is not None else None
+        except UnicodeDecodeError:
+            decoded_submitted_url = None
+        candidate_diagnostics = []
+        for candidate in item.candidates:
+            try:
+                decoded_cited_url = decoded_url(candidate.url)
+            except UnicodeDecodeError:
+                decoded_cited_url = None
+            candidate_diagnostics.append(Locale.EVIDENCE_CANDIDATE_ASSESSMENT_LOG.format(
+                ref_id=candidate.ref_id,
+                call_id=candidate.call_id,
+                cite_text=candidate.cite_text,
+                excerpt_position=candidate.excerpt_position,
+                raw_cited_url=candidate.url,
+                decoded_cited_url=decoded_cited_url,
+                raw_url_equal=url == candidate.url,
+                decoded_url_equal=(
+                    decoded_submitted_url is not None
+                    and decoded_cited_url is not None
+                    and decoded_submitted_url == decoded_cited_url
+                ),
+                selected=(
+                    item.match is not None
+                    and candidate.ref_id == item.match.ref_id
+                    and candidate.call_id == item.match.call_id
+                ),
+            ))
         logger.info(
-            Locale.EVIDENCE_ITEM_ASSESSMENT_LOG,
-            commit_request_record.record_id,
-            item.field,
-            item.index,
-            item.outcome,
-            excerpt,
-            url,
-            candidate_diagnostics,
+            Locale.EVIDENCE_ITEM_ASSESSMENT_LOG.format(
+                commit_record_id=commit_request_record.record_id,
+                field=item.field,
+                index=item.index,
+                outcome=item.outcome,
+                excerpt=excerpt,
+                raw_submitted_url=url,
+                decoded_submitted_url=decoded_submitted_url,
+                candidates="; ".join(candidate_diagnostics),
+            ),
         )
 
 

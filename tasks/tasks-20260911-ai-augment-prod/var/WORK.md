@@ -12,6 +12,13 @@
 
 Before adding any string literal, search existing globals in `vars` and wording in `Locale`; reuse the existing name by direct import from `vars`/`locale` when it represents the same thing. If none exists, say so plainly; do not invent a new global just to eliminate the literal without operator authorization. Do not duplicate Pydantic model field names as new globals: use the repo's `nameof` for those. Audit all new literals in the diff before finishing. Keep intentional literal expected output in tests only when it pins the exact public contract rather than mirroring its implementation.
 
+## 2026-10-15 evidence URL percent-encoding equivalence
+
+- Operator authorized exactly `decoded_url` (strict UTF-8 `unquote`, then NFC) and `evidence_urls_match` (raw equality first; decoded equality on mismatch; invalid UTF-8 returns false). Use at exact and near evidence URL comparisons. Keep submitted/cited URLs raw in all records and public behavior unchanged; no replay or legacy path.
+- Extend the existing per-item INFO log, Locale-owned, so each candidate shows raw/decoded submitted and cited URLs and how it matched. Keep this surgical, add focused regression coverage, and use Pixi checks. No Git index operations.
+- Implemented in `post_commit_validation.py` at the exact and near comparison sites. The existing per-item INFO log now includes `raw_submitted_url`/`decoded_submitted_url` and a labeled `key=value` entry per candidate (`raw_cited_url`, `decoded_cited_url`, raw/decoded equality, selected). No stored URLs, public copy, replay compatibility, or API shape changed. The focused encoded-URL/neighbor selection passed 10/10; focused Ruff, detour mypy (66 source files), and `git diff HEAD --check` passed. No Git index operations by the agent.
+- Operator requested `.format()` instead of `%` for this diagnostic. Both Locale log templates now use named `.format()` fields; rendered `key=value` output is unchanged. The 3 targeted cases, focused Ruff, and configured detour mypy (66 source files) passed.
+
 ## 2026-10-13 completed spreadsheet leading columns
 
 - Operator requested `rnd`, `cohort`, and `ineligibility_category` as the first three completed-spreadsheet CSV columns, in that order. `dashboard/ui.py::spreadsheet_completed` uses the existing `GRID_*_FIELD` names and researcher metadata; ineligibility category is blank when absent. The existing spreadsheet test now pins order, total width, and row values; ordinary and `martin` exports share the same path. Targeted Pixi pytest passed (1), Pixi Ruff passed, detour mypy passed (66 files), and `git diff --check` passed. No staging/unstaging.

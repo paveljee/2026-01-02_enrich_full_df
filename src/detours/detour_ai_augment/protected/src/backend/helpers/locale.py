@@ -879,7 +879,15 @@ class Locale:
     )
     PUSH_VALIDATION_FAILED_LOG: Final = "push_record_id=%s failed stage=%s: %s"
     EVIDENCE_ITEM_ASSESSMENT_LOG: Final = (
-        "commit_record_id=%s evidence field=%s index=%s outcome=%s excerpt=%r url=%r candidates=%r"
+        "commit_record_id={commit_record_id} evidence field={field} index={index} "
+        "outcome={outcome} excerpt={excerpt!r} raw_submitted_url={raw_submitted_url!r} "
+        "decoded_submitted_url={decoded_submitted_url!r} candidates=[{candidates}]"
+    )
+    EVIDENCE_CANDIDATE_ASSESSMENT_LOG: Final = (
+        "{{ref_id={ref_id!r} call_id={call_id!r} cite_text={cite_text!r} "
+        "excerpt_position={excerpt_position!r} raw_cited_url={raw_cited_url!r} "
+        "decoded_cited_url={decoded_cited_url!r} raw_url_equal={raw_url_equal} "
+        "decoded_url_equal={decoded_url_equal} selected={selected}}}"
     )
     PUSH_PYDANTIC_FAILED_LOG: Final = (
         "push_record_id=%s failed stage=%s field=%s value=%r: %s; pydantic=%s"

@@ -3429,6 +3429,73 @@ def test_persisted_index_is_idempotent_and_evidence_lookup_is_exact() -> None:
 
 
 @pytest.mark.parametrize(
+    ("excerpt", "cite_text", "expected_outcome"),
+    (
+        (TEST_EXCERPT, f"Result: {TEST_EXCERPT}", EVIDENCE_OUTCOME_V1_EXACT),
+        ("josé garcía — senior\nresearcher", V2_CITE_TEXT, EVIDENCE_OUTCOME_V2_NEAR),
+    ),
+    ids=("exact", "near"),
+)
+def test_evidence_percent_encoded_citation_url_matches_and_logs_raw_urls(
+    excerpt: str,
+    cite_text: str,
+    expected_outcome: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    submitted_url = f"{TEST_URL}/Alan_Evans_(neuroscientist)"
+    cited_url = f"{TEST_URL}/Alan_Evans_%28neuroscientist%29"
+    index = build_citation_index(((cited_url, cite_text),))
+    assessment = post_commit_validation.assess_submission_evidence(
+        index,
+        Submission.model_validate(submission_body_for_evidence(excerpt, url=submitted_url)),
+        codex_match_version=2,
+    )
+    assert {item.outcome for item in assessment.items} == {expected_outcome}
+    assert assessment.accepted is (expected_outcome == EVIDENCE_OUTCOME_V1_EXACT)
+    assert all(item.candidates[0].url == cited_url for item in assessment.items)
+    if assessment.accepted:
+        assert all(
+            item.match is not None and item.match.url == submitted_url
+            for item in assessment.items
+        )
+
+    _, commit_request_record = retry_commit_records(
+        original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+        session_id=TEST_SESSION_ID,
+        synthetic_record_id_seed="encoded-evidence-url",
+    )
+    caplog.set_level(logging.INFO, logger=post_commit_validation.__name__)
+    post_commit_validation._log_evidence_assessment(
+        assessment, commit_request_record=commit_request_record,
+    )
+    item_logs = [
+        record for record in caplog.records
+        if record.name == post_commit_validation.__name__
+        and "raw_submitted_url=" in record.getMessage()
+    ]
+    assert len(item_logs) == len(AI_AUGMENT_EVIDENCE_COLUMNS)
+    selected = expected_outcome == EVIDENCE_OUTCOME_V1_EXACT
+    assert all(
+        f"raw_submitted_url={submitted_url!r}" in record.getMessage()
+        and f"decoded_submitted_url={submitted_url!r}" in record.getMessage()
+        and (
+            f"raw_cited_url={cited_url!r} decoded_cited_url={submitted_url!r} "
+            f"raw_url_equal=False decoded_url_equal=True selected={selected}"
+        ) in record.getMessage()
+        for record in item_logs
+    )
+
+
+def test_evidence_url_comparison_rejects_invalid_utf8_on_decoded_path() -> None:
+    assert post_commit_validation.evidence_urls_match(
+        f"{TEST_URL}/cafe\u0301", f"{TEST_URL}/caf%C3%A9",
+    ) is True
+    assert post_commit_validation.evidence_urls_match(
+        f"{TEST_URL}/%FF", f"{TEST_URL}/different",
+    ) is False
+
+
+@pytest.mark.parametrize(
     ("excerpt", "expected_outcome"),
     (
         (V2_EXACT_EXCERPT, EVIDENCE_OUTCOME_V1_EXACT),
