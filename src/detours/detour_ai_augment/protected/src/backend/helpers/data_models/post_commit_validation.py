@@ -1567,8 +1567,9 @@ def render_codex_values(
         matches = evidence[column]
         ordered_matches.extend(matches)
         rendered[column] = codex_parse.render_footnoted_submission_value(
-            field_submission.value,
-            tuple(match.evidence_number for match in matches),
+            column=column,
+            value=field_submission.value,
+            footnote_numbers=tuple(match.evidence_number for match in matches),
         )
         standardized_column = standardized_columns[column]
         if isinstance(field_submission, StandardizedFieldSubmission):

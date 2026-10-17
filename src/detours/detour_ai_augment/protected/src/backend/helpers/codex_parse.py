@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import re
 import string
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AI_AUGMENT_REDACTED_REPORT_VALUE_COLUMNS,
+)
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.cards import MARKDOWN_CODE_DELIMITER
 
@@ -15,6 +18,9 @@ URL_ARGUMENT_ACTIONS = ("open", "click")
 REF_ID_ARGUMENT_KEY = "ref_id"
 URL_ARGUMENT_KEY = "url"
 AI_GENERATED_TEXT_PREFIX = "**AI-generated text**:"
+REDACTED_REPORT_VALUE: Callable[[str], str | None] = lambda column: (
+    "[REDACTED]" if column in AI_AUGMENT_REDACTED_REPORT_VALUE_COLUMNS else None
+)
 MARKDOWN_ESCAPE_TRANSLATION = str.maketrans({
     character: f"\\{character}" for character in string.punctuation
 })
@@ -102,7 +108,11 @@ def strip_citation_markup(
 # =======================================
 
 
-def render_footnoted_submission_value(value: str, footnote_numbers: tuple[int, ...]) -> str:
+def render_footnoted_submission_value(
+    value: str, footnote_numbers: tuple[int, ...], *, column: str
+) -> str:
+    if (redacted := REDACTED_REPORT_VALUE(column)) is not None:
+        return redacted
     marker = ""
     if footnote_numbers:
         marker = "^" + ",".join(str(number) for number in footnote_numbers) + "^"

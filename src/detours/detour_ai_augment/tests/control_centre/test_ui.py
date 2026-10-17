@@ -610,7 +610,7 @@ def completed_query_researcher(
     })
     for plain_column, standardized_column in AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS:
         values[plain_column] = render_footnoted_submission_value(
-            NOT_REPORTED_VALUE, (),
+            NOT_REPORTED_VALUE, (), column=plain_column,
         )
         values[standardized_column] = render_standardized_submission_value(
             json.dumps(NOT_REPORTED_VALUE),
@@ -3947,14 +3947,18 @@ async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pair
         docx_innerdicts=(ground_truth_innerdict,),
     )
     ai_values = {
-        ai_column: render_footnoted_submission_value(f"AI {index}", ())
+        ai_column: render_footnoted_submission_value(
+            f"AI {index}", (), column=ai_column,
+        )
         for index, (_, ai_column) in enumerate(DOCX_TO_AI_AUGMENT_COLUMNS)
     }
     first_ground_truth, first_ground_truth_run = completed_query_researcher(
         ground_truth_source, ai_field_values=ai_values,
     )
     second_ai_values = {
-        ai_column: render_footnoted_submission_value(f"Retry AI {index}", ())
+        ai_column: render_footnoted_submission_value(
+            f"Retry AI {index}", (), column=ai_column,
+        )
         for index, (_, ai_column) in enumerate(DOCX_TO_AI_AUGMENT_COLUMNS)
     }
     second_ground_truth, second_ground_truth_run = completed_query_researcher(

@@ -99,6 +99,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
     AI_AUGMENT_EVIDENCE_COLUMNS,
     AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
+    AI_AUGMENT_REDACTED_REPORT_VALUE_COLUMNS,
     AI_AUGMENT_STANDARDIZED_COLUMNS,
     AIVM_AUDIT_USER,
     AIVM_IDENTITY_FILE_ENV_NAME,
@@ -3286,7 +3287,7 @@ def test_submission_contract_has_nine_evidence_fields_and_optional_comments() ->
     ]
 
 
-def test_initial_submission_renders_raw_values_without_standardized_values() -> None:
+def test_initial_submission_redacts_selected_narrative_without_standardized_values() -> None:
     initial = Submission.model_validate(api.EVIDENCE_SUBMISSION_EXAMPLE)
     rendered = post_commit_validation.render_codex_values(
         initial,
@@ -3307,16 +3308,34 @@ def test_initial_submission_renders_raw_values_without_standardized_values() -> 
     )
     assert len(cards) == 1
     card = next(iter(cards.values()))
+    assert AI_AUGMENT_REDACTED_REPORT_VALUE_COLUMNS == [
+        KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
+    ]
     for (column, field_submission), (_, standardized_column) in zip(
         initial.evidence_items(), AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS, strict=True,
     ):
-        expected_value = codex_parse.render_footnoted_submission_value(
-            field_submission.value, (),
-        )
-        assert rendered[column] == expected_value
-        assert f"**`{column}`**: {expected_value}" in card
+        if column != KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL:
+            expected_value = codex_parse.render_footnoted_submission_value(
+                field_submission.value, (), column=column,
+            )
+            assert rendered[column] == expected_value
+            assert f"**`{column}`**: {expected_value}" in card
         assert rendered[standardized_column] is None
         assert f"**`{standardized_column}`**:" not in card
+    race_column = KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
+    assert rendered[race_column] == "[REDACTED]"
+    assert f"**`{race_column}`**: [REDACTED]" in card
+    assert initial.race_ethnicity_language_culture.value not in card
+
+
+def test_report_redaction_omits_ai_prefix_and_footnote_marker() -> None:
+    race_column = KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
+    assert codex_parse.render_footnoted_submission_value(
+        "Sensitive narrative", (1, 2), column=race_column,
+    ) == "[REDACTED]"
+    assert codex_parse.render_footnoted_submission_value(
+        "Public narrative", (1, 2), column=KTP_AI_AUGMENT_GENDER_COL,
+    ) == '**AI-generated text**: "Public narrative"^1,2^'
 
 
 def test_openapi_example_is_a_complete_pydantic_valid_submission(
@@ -5452,6 +5471,9 @@ def test_card_labels_stored_standardized_fields_without_mutating_source() -> Non
 
     assert len(cards) == 1
     card = next(iter(cards.values()))
+    race_narrative_column = KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
+    assert rendered[race_narrative_column] == "[REDACTED]"
+    assert f"**`{race_narrative_column}`**: [REDACTED]" in card
     for (_, field_submission), column in zip(
         submission.evidence_items(), AI_AUGMENT_STANDARDIZED_COLUMNS, strict=True,
     ):
