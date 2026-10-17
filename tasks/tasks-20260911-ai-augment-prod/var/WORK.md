@@ -1,3 +1,10 @@
+## Current turn — 2026-10-17
+
+- Objective from `src/TASK.md`: work with the Human Operator to prepare the AI-augmentation detour for production; the specific production-readiness target is not yet supplied. Asked the operator for the target/failure/release criterion and am awaiting details.
+- Constraints: `src.repl` must not run; main `data/scisci_process.duckdb` is read-only and the only data source; do not inspect other data artifacts; Git read-only (no staging/unstaging); preserve human-signed inline comments; use the `detour-ai-augment` Pixi environment for execution. The repo working tree was clean on entry.
+- Reviewed the task, authoritative detour README, preceding task workbook, main pipeline config and `repl.py`/initialization/step registry/runtime path. `--new` resets the main pipeline DB/state and runs the ten registered steps, so it is deliberately not being invoked. Detour Backend and Dashboard read that DB via read-only connections and use a separate detour DB/replay log.
+- Next: after the operator identifies the desired production outcome, inspect the relevant implementation/tests and make the narrow, verified change. No code, tests, main DB, or external artifacts have been changed this turn.
+
 ## 1. Timing rules
 
 | Object | `received_at_unix_usec` | `ready_to_respond_at_unix_usec` | `duration_usec` |

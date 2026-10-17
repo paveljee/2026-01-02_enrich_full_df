@@ -15,7 +15,9 @@ This includes the rollouts:
 - `rollout-2026-09-11T15-54-34-01a0912d-8624-7723-82ad-e69aadb05be7.jsonl.tgz`;
 - `rollout-2026-09-14T20-37-01-01a0a1a3-3069-75f0-8dbc-63015a7ef354.jsonl.tgz`;
 - rollout-2026-09-22T23-46-18-01a0cb83-59dc-78d3-aaf6-e1fbacdcf6f1.jsonl (intentionally missing);
-- rollout-2026-10-06T13-52-46-01a1117c-fa4c-7b03-be06-57781ae64c5d.jsonl (intentionally missing).
+- rollout-2026-10-06T13-52-46-01a1117c-fa4c-7b03-be06-57781ae64c5d.jsonl (intentionally missing);
+- rollout-2026-10-17T04-43-06-01a1482b-b50d-7742-a27a-72e4a9abc8a9.jsonl
+(intentionally missing).
 
 The first missing rollout session was largely limited to the work
 recorded in the commit `dea2bf1010d29e8b0aff14f6cb57f655b0940dae`.
@@ -29,8 +31,9 @@ concurrent human edits, which was never captured.
 The second missing rollout was created to properly transition
 from `gpt-6-sol` to `gpt-6.1-sol` 
 (which I then rolled back again to `gpt-6-sol`
-because I had concerns about performance) and
-was not captured for similar reasons.
+because I had concerns about performance);
+it and the following missing rollouts
+were not captured for similar reasons.
 
 While the rollout is a
 (sometimes tar/gzipped)
