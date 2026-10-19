@@ -558,6 +558,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                         or validation.stage not in {
                         BackendLifecycle.PYDANTIC_VALIDATION,
                         BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
+                        BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED,
                         }
                     ):
                         raise ValueError(Locale.REPLAY_DETAIL_TEMPLATE.format(

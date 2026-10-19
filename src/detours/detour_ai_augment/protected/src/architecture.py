@@ -564,6 +564,7 @@ class BackendComponent(
             "pydantic_validation",
             "duckdb_evidence_validation",
             "researcher_resolution",
+            "standardized_submission_required",
             "innerdict_and_card",
             "accepted",
             "configuration_error",

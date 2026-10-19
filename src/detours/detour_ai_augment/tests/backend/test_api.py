@@ -3723,7 +3723,10 @@ def test_evidence_assessment_is_exhaustive_and_public_guidance_is_nonrevealing(
             Submission.model_validate(body),
             codex_match_version=2,
         )
-        detail = post_commit_validation._assessment_public_detail(assessment)
+        detail = post_commit_validation._assessment_public_detail(
+            assessment,
+            progress_template=Locale.EVIDENCE_GOOD_PROGRESS_TEMPLATE,
+        )
     finally:
         connection.close()
 
@@ -3761,7 +3764,11 @@ def test_retry_guidance_separates_exact_progress_from_blocking_contract_violatio
     total = len(AI_AUGMENT_EVIDENCE_COLUMNS)
     location = f"{AI_AUGMENT_EVIDENCE_COLUMNS[0]}.web_search_excerpts[0]"
     violation = Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(location=location)
-    detail = post_commit_validation._assessment_public_detail(assessment, violations=(violation,))
+    detail = post_commit_validation._assessment_public_detail(
+        assessment,
+        progress_template=Locale.EVIDENCE_PROGRESS_TEMPLATE,
+        violations=(violation,),
+    )
 
     assert assessment.exact_count == total
     assert assessment.accepted is True
@@ -6387,7 +6394,7 @@ def test_accepted_push_is_committed_only_after_its_public_record(
             validation.validation_request_body.commit_request_record
             .commit_request_body.push_response_record is accepted_push
         )
-        assert api.BACKEND_LIFECYCLE is BackendLifecycle.COMPLETED
+        assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
 
     with api_store._writable(api_runtime):
         threaded_loop.run(asyncio.wait_for(exercise(), timeout=20))
@@ -6408,11 +6415,27 @@ def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
             transport=httpx.ASGITransport(app=http_app), base_url="http://invalid",
         ) as client:
             await client.get(PULL_PATH)
+            initial_pull = api_store.current_replayed_record
+            assert isinstance(initial_pull, PullResponseRecord)
+            response = await client.post(PUSH_PATH, json=valid_submission_body())
+            assert response.status_code == HTTPStatus.ACCEPTED
+            await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+            initial_validation = api_store.current_replayed_record
+            assert isinstance(initial_validation, BackendValidationRequestRecord)
+            assert (
+                initial_validation.validation_request_body.post_commit_validation.stage
+                is BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED
+            )
+            retry_response = await client.get(PULL_PATH)
+            assert retry_response.status_code == HTTPStatus.OK
             pull = api_store.current_replayed_record
             assert isinstance(pull, PullResponseRecord)
-            response = await client.post(PUSH_PATH, json=valid_submission_body())
-        assert response.status_code == HTTPStatus.ACCEPTED
-        await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+            assert pull.validation_request_record is initial_validation
+            response = await client.post(
+                PUSH_PATH, json=standardized_submission_body(valid_submission_body()),
+            )
+            assert response.status_code == HTTPStatus.ACCEPTED
+            await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
         validation = api_store.current_replayed_record
         assert isinstance(validation, BackendValidationRequestRecord)
         commit = validation.validation_request_body.commit_request_record
@@ -6542,7 +6565,7 @@ def test_accepted_push_finishes_after_client_or_response_send_failure(
         finally:
             release.set()
             await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
-        assert api.BACKEND_LIFECYCLE is BackendLifecycle.COMPLETED
+        assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
         records = AiAugmentBackendStore._authoritative_log_records(
             Path(api_store._replay_log).read_bytes()
         )
@@ -6561,10 +6584,10 @@ def test_accepted_push_finishes_after_client_or_response_send_failure(
     ("result", "stage", "expected_code", "expected_media_type", "schema_case"),
     (
         (
-            BackendLifecycle.ACCEPTED,
-            BackendLifecycle.ACCEPTED,
-            HTTPStatus.GONE,
-            ContentType.NDJSON_UTF8,
+            BackendLifecycle.REJECTED,
+            BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED,
+            HTTPStatus.OK,
+            ContentType.MARKDOWN,
             None,
         ),
         (
@@ -6677,6 +6700,30 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
                 validation_record = api_store.current_replayed_record
                 assert isinstance(validation_record, BackendValidationRequestRecord)
                 pull_response = await client.get(PULL_PATH)
+                if stage is BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED:
+                    assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
+                    assert api_store._execute(
+                        f"SELECT count(*) FROM {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}"
+                    ).fetchone() == (1,)
+                    assert api_store._execute(
+                        f"SELECT count(*) FROM {CODEX_OUTPUT_ROWS_TABLE}"
+                    ).fetchone() == (0,)
+                    retry = await client.post(
+                        PUSH_PATH,
+                        json=standardized_submission_body(submission_body),
+                    )
+                    assert retry.status_code == HTTPStatus.ACCEPTED
+                    await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+                    final_validation = api_store.current_replayed_record
+                    assert isinstance(final_validation, BackendValidationRequestRecord)
+                    final = final_validation.validation_request_body.post_commit_validation
+                    assert final.result is BackendLifecycle.ACCEPTED
+                    assert final.submission_type == STANDARDIZED_SUBMISSION_TYPE
+                    completed_pull = await client.get(PULL_PATH)
+                    assert completed_pull.status_code == HTTPStatus.GONE
+                    assert api_store._execute(
+                        f"SELECT count(*) FROM {CODEX_OUTPUT_ROWS_TABLE}"
+                    ).fetchone() == (1,)
             return pull_response, validation_record
 
         response, current_validation = threaded_loop.run(
@@ -6699,6 +6746,14 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
     elif result is BackendLifecycle.REJECTED:
         assert isinstance(validation.detail, str)
         assert response.text == validation.detail.rstrip() + "\n"
+        if stage is BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED:
+            assert response.text.startswith(
+                Locale.EVIDENCE_GOOD_PROGRESS_TEMPLATE.format(
+                    exact=len(AI_AUGMENT_EVIDENCE_COLUMNS),
+                    total=len(AI_AUGMENT_EVIDENCE_COLUMNS),
+                )
+            )
+            assert post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE in response.text
         if schema_case == "comments_extra":
             assert response.text == (
                 "1 submission issue needs correction:\n"
@@ -6728,6 +6783,24 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
         assert rows[0][KTP_AI_AUGMENT_EDUCATION_COL] == (
             education["value"]
         )
+    if stage is BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED:
+        live_database = logical_database_snapshot(api_store._detour_db_path)
+        log_bytes = Path(api_store._replay_log).read_bytes()
+        replay = AiAugmentBackendStore._from_resources(
+            replay_log=api_store._replay_log.model_copy(update={
+                nameof(lambda: ReplayLogRegisteredResource.hash): (
+                    hashlib.sha256(log_bytes).hexdigest()
+                ),
+            }),
+            detour_db=api_store._detour_db.model_copy(update={
+                nameof(lambda: AiAugmentDetourDB.path): (
+                    api_store._detour_db_path.with_name("standardized-required-replay.duckdb")
+                ),
+            }),
+            rollout_cas=api_store.rollout_cas,
+        )
+        replay._rebuild_from_log(api_runtime, reset_confirmed=True, confirm_replay=lambda: True)
+        assert logical_database_snapshot(replay._detour_db_path) == live_database
 
 
 def test_evidence_retry_uses_original_pull_for_schema_and_projection(

@@ -789,6 +789,7 @@ def completed_query_fixture_process() -> None:
         operator_capture_rollout,
         persisted_http_record,
         report_for_rollout,
+        standardized_submission_body,
         valid_submission_body,
     )
     from src.helpers.duckdb_utils import duckdb_quote_identifier as quote
@@ -931,18 +932,68 @@ def completed_query_fixture_process() -> None:
         print("Completed-query fixture: validating synthetic commit", flush=True)
         validated = store._validate_commit(commit.record_id)
         assert (
+            validated.validation_request_body.post_commit_validation.stage
+            is BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED
+        )
+        assert validated.validation_request_body.openalex_ror_records == ()
+        retry_pull = store._append_authoritative_record(
+            PullResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(),
+                    method=HTTP_GET_METHOD,
+                    path=PULL_PATH,
+                    response_code=HTTPStatus.OK,
+                    response_headers={HTTP_CONTENT_TYPE_HEADER: ContentType.MARKDOWN_UTF8},
+                    response_body=(
+                        validated.validation_request_body.post_commit_validation.detail or ""
+                    ).rstrip() + "\n",
+                ),
+                validation_request_record=validated,
+            ),
+        )
+        assert isinstance(retry_pull, PullResponseRecord)
+        push = store._append_authoritative_record(
+            PushResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(),
+                    method=HTTP_POST_METHOD,
+                    path=PUSH_PATH,
+                    response_code=HTTPStatus.ACCEPTED,
+                    request_body=json.dumps(standardized_submission_body(payload)),
+                    response_headers={LOCATION_HEADER: PULL_PATH},
+                ),
+                pull_response_record=retry_pull,
+            ),
+        )
+        assert isinstance(push, PushResponseRecord)
+        retry_body = CommitRequestBody(
+            pull_response_record=retry_pull,
+            push_response_record=push,
+            codex_session_record=body.codex_session_record,
+        )
+        draft = draft.model_copy(update={
+            "record_id": uuid7(),
+            "request_body": retry_body.model_dump_json(),
+            "ready_to_respond_at_unix_usec": (
+                time.time_ns() // NANOSECONDS_PER_MICROSECOND
+            ),
+            "commit_request_body": retry_body,
+        })
+        commit = store._append_authoritative_record(draft)
+        assert isinstance(commit, BackendCommitRequestRecord)
+        validated = store._validate_commit(commit.record_id)
+        assert (
             validated.validation_request_body.post_commit_validation.result
             is BackendLifecycle.ACCEPTED
         )
         assert validated.validation_request_body.openalex_ror_records == ()
-        # Plain initial submission needs no provider requests.
         submission_json = validated.validation_request_body.post_commit_validation.submission
         assert submission_json is not None
-        from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E501
-            Submission,
+        from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
+            StandardizedSubmission,
         )
 
-        submission = Submission.model_validate(submission_json)
+        submission = StandardizedSubmission.model_validate(submission_json)
         lines = [api.json_line(submission.normalized_values())]
         ground_truth_innerdict = store.ai_augment_singular_outerdicts()[0].ground_truth_innerdict()
         if ground_truth_innerdict is not None:

@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from random import Random
+from string import Formatter
 from typing import TYPE_CHECKING, Callable, Final, Literal, Self
 from unicodedata import normalize
 from urllib.parse import unquote
@@ -1151,21 +1152,27 @@ def _log_evidence_assessment(
         )
 
 
+def _validate_progress_template(template: str) -> str:
+    fields = {
+        field
+        for _, field, _, _ in Formatter().parse(template)
+        if field is not None
+    }
+    if fields != {"exact", "total"}:
+        raise ValueError("Expected {exact} and {total}")
+    return template
+
+
 def _assessment_public_detail(
     assessment: _EvidenceAssessment,
     *,
+    progress_template: str,
     violations: Sequence[str] = (),
     include_retry_contract: bool = False,
 ) -> str:
     total = len(assessment.items)
-    outcomes = tuple(item.outcome for item in assessment.items)
-    progress_template = (
-        Locale.EVIDENCE_GOOD_PROGRESS_TEMPLATE
-        if EVIDENCE_PROGRESS_PRAISE_DEF(outcomes)
-        else Locale.EVIDENCE_PROGRESS_TEMPLATE
-    )
     lines = [
-        progress_template.format(
+        _validate_progress_template(progress_template).format(
             exact=assessment.exact_count,
             total=total,
         )
@@ -1403,13 +1410,12 @@ def _evaluate_retry_submission(
     violations: tuple[str, ...] = ()
     baseline_obligations_json = None
     if baseline_row is None:
-        if not assessment.accepted:
-            baseline_obligations_json = initial_obligations.model_dump_json()
-            violations = tuple(
-                Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE
-                for item in assessment.items
-                if item.outcome == EVIDENCE_OUTCOME_WITHDRAWN
-            )
+        baseline_obligations_json = initial_obligations.model_dump_json()
+        violations = tuple(
+            Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE
+            for item in assessment.items
+            if item.outcome == EVIDENCE_OUTCOME_WITHDRAWN
+        )
     else:
         if (
             baseline_row.namekey_json != namekey_json
@@ -1624,7 +1630,7 @@ def render_codex_values(
 
 def _accepted_output_row(
     *,
-    submission: Submission | StandardizedSubmission,
+    submission: StandardizedSubmission,
     evidence: ValidatedEvidence,
     namekey: NameKey,
     draw_number: str,
@@ -1841,6 +1847,13 @@ def _evaluate_submission_for_commit(
                     Locale.EVIDENCE_SUBMISSION_REJECTED,
                     public_detail=_assessment_public_detail(
                         evidence_assessment,
+                        progress_template=(
+                            Locale.EVIDENCE_GOOD_PROGRESS_TEMPLATE
+                            if EVIDENCE_PROGRESS_PRAISE_DEF(
+                                tuple(item.outcome for item in evidence_assessment.items)
+                            )
+                            else Locale.EVIDENCE_PROGRESS_TEMPLATE
+                        ),
                         violations=retry_violations,
                         include_retry_contract=True,
                     ),
@@ -1852,6 +1865,24 @@ def _evaluate_submission_for_commit(
                 raise error
             if draw_number is None:
                 raise _ValidationPreparationError(Locale.CONFIGURED_NAMEKEY_NOT_FOUND)
+
+            if not isinstance(submission_payload, StandardizedSubmission):
+                stage = BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED
+                return result(
+                    commit_request_record=commit_request_record,
+                    stage=stage,
+                    submission_payload=submission_payload,
+                    retry_projection=retry_projection,
+                    rollout_index=rollout_index,
+                    output_row=None,
+                    validation_result=BackendLifecycle.REJECTED,
+                    detail=_assessment_public_detail(
+                        evidence_assessment,
+                        progress_template=Locale.EVIDENCE_GOOD_PROGRESS_TEMPLATE,
+                        include_retry_contract=True,
+                    ),
+                    error=None,
+                )
 
             stage = BackendLifecycle.INNERDICT_AND_CARD
             output_row = _accepted_output_row(
@@ -1976,7 +2007,8 @@ def _log_post_commit_validation(
     error: Exception | None,
 ) -> None:
     if error is None:
-        logger.info(Locale.PUSH_ACCEPTED_LOG, push_response_record.record_id)
+        if post_commit_validation.result is BackendLifecycle.ACCEPTED:
+            logger.info(Locale.PUSH_ACCEPTED_LOG, push_response_record.record_id)
     elif isinstance(error, ValidationError):
         field, reason, failed_input = pydantic_failure(error)
         logger.warning(

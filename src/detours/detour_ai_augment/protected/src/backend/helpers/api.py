@@ -446,6 +446,7 @@ def _pull_response(
             if validation.result is not BackendLifecycle.REJECTED or validation.stage not in {
                 BackendLifecycle.PYDANTIC_VALIDATION,
                 BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
+                BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED,
             }:
                 raise BackendStoreException(Locale.PULL_RETRY_VALIDATION_INCONSISTENT)
             logger.info(Locale.PULL_RETRY_STAGE_LOG, validation.stage)
@@ -579,6 +580,7 @@ def update_pull_state(validation_request_record: BackendValidationRequestRecord)
         elif validation.result is BackendLifecycle.REJECTED and validation.stage in {
             BackendLifecycle.PYDANTIC_VALIDATION,
             BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
+            BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED,
         }:
             BACKEND_LIFECYCLE = BackendLifecycle.RETRY
         else:

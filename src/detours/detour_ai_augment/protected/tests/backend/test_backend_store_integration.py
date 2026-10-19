@@ -25,6 +25,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import L
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AUTHORITATIVE_RECORDS_TABLE,
     EXCLUDED_NAMEKEY,
+    HTTP_CONTENT_TYPE_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
     NAME_KEY_HEADER,
@@ -36,6 +37,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     TEXT_ENCODING,
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
+    ContentType,
 )
 from src.detours.detour_ai_augment.protected.src.shared import name_key_header_value
 from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
@@ -72,6 +74,7 @@ from src.detours.detour_ai_augment.tests.backend import test_http_interceptor as
 from src.detours.detour_ai_augment.tests.backend.test_api import (
     TEST_NAMEKEY_MODEL,
     persisted_http_record,
+    standardized_submission_body,
     valid_submission_body,
 )
 from src.helpers.data_models import NameKey
@@ -267,7 +270,35 @@ def test_second_same_session_acceptance_fails_loudly(
             commit(backend_store, payload, payload)
         )
         assert (
-            first.validation_request_body.post_commit_validation.result
+            first.validation_request_body.post_commit_validation.stage
+            is BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED
+        )
+        retry_pull = backend_store._append_authoritative_record(
+            PullResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(),
+                    method=HTTP_GET_METHOD,
+                    path=PULL_PATH,
+                    response_code=HTTPStatus.OK,
+                    response_headers={HTTP_CONTENT_TYPE_HEADER: ContentType.MARKDOWN_UTF8},
+                    response_body=(
+                        first.validation_request_body.post_commit_validation.detail or ""
+                    ),
+                ),
+                validation_request_record=first,
+            )
+        )
+        assert isinstance(retry_pull, PullResponseRecord)
+        accepted = backend_store._validate_commit(
+            commit(
+                backend_store,
+                standardized_submission_body(payload),
+                payload,
+                pull=retry_pull,
+            )
+        )
+        assert (
+            accepted.validation_request_body.post_commit_validation.result
             is BackendLifecycle.ACCEPTED
         )
         backend_store._append_authoritative_record(init_request_record(TEST_NAMEKEY_MODEL))
@@ -278,10 +309,37 @@ def test_second_same_session_acceptance_fails_loudly(
                 b'"payload":{"type":"task_complete"}}\n'
             ),
         )
+        second = backend_store._validate_commit(second_commit_id)
+        assert (
+            second.validation_request_body.post_commit_validation.stage
+            is BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED
+        )
+        second_retry_pull = backend_store._append_authoritative_record(
+            PullResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(),
+                    method=HTTP_GET_METHOD,
+                    path=PULL_PATH,
+                    response_code=HTTPStatus.OK,
+                    response_headers={HTTP_CONTENT_TYPE_HEADER: ContentType.MARKDOWN_UTF8},
+                    response_body=(
+                        second.validation_request_body.post_commit_validation.detail or ""
+                    ),
+                ),
+                validation_request_record=second,
+            )
+        )
+        assert isinstance(second_retry_pull, PullResponseRecord)
+        duplicate_commit_id = commit(
+            backend_store,
+            standardized_submission_body(payload),
+            payload,
+            pull=second_retry_pull,
+        )
         with pytest.raises(
             ReplayInputMissing, match=Locale.ACCEPTED_IDENTITY_DUPLICATE
         ):
-            backend_store._validate_commit(second_commit_id)
+            backend_store._validate_commit(duplicate_commit_id)
 
 
 def test_resume_after_committed_row_and_postcommit_failure(

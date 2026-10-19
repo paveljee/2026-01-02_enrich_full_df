@@ -18,6 +18,7 @@ class BackendLifecycle(StrEnum):
         "pydantic_validation",
         "duckdb_evidence_validation",
         "researcher_resolution",
+        "standardized_submission_required",
         "innerdict_and_card",
         "accepted",
         "configuration_error",
@@ -35,6 +36,7 @@ class BackendLifecycle(StrEnum):
     PYDANTIC_VALIDATION = "pydantic_validation"
     DUCKDB_EVIDENCE_VALIDATION = "duckdb_evidence_validation"
     RESEARCHER_RESOLUTION = "researcher_resolution"
+    STANDARDIZED_SUBMISSION_REQUIRED = "standardized_submission_required"
     INNERDICT_AND_CARD = "innerdict_and_card"
     ACCEPTED = "accepted"
     CONFIGURATION_ERROR = "configuration_error"
@@ -57,6 +59,7 @@ POST_COMMIT_VALIDATION_STAGES: Final = frozenset({
     BackendLifecycle.PYDANTIC_VALIDATION,
     BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
     BackendLifecycle.RESEARCHER_RESOLUTION,
+    BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED,
     BackendLifecycle.INNERDICT_AND_CARD,
     BackendLifecycle.ACCEPTED,
 })

@@ -416,6 +416,51 @@ def commit(
     return store._append_authoritative_record(draft).record_id
 
 
+def standardized_retry_commit(
+    store: AiAugmentBackendStore,
+    payload: dict[str, Any],
+    *,
+    pull: PullResponseRecord | None = None,
+    session_id: UUID = UUID(OPERATOR_CAPTURED_SESSION_ID),
+    web_arguments: dict[str, object] | None = None,
+) -> UUID:
+    initial = store._validate_commit(
+        commit(
+            store, payload, payload, pull,
+            session_id=session_id,
+            web_arguments=web_arguments,
+        )
+    )
+    assert (
+        initial.validation_request_body.post_commit_validation.result
+        is BackendLifecycle.REJECTED
+    )
+    retry_pull = store._append_authoritative_record(
+        PullResponseRecord.from_http_request_log_record(
+            http_request_log_record=persisted_http_record(
+                record_id=uuid7(),
+                method=HTTP_GET_METHOD,
+                path=PULL_PATH,
+                response_code=HTTPStatus.OK,
+                response_headers={HTTP_CONTENT_TYPE_HEADER: ContentType.MARKDOWN_UTF8},
+                response_body=(
+                    initial.validation_request_body.post_commit_validation.detail or ""
+                ),
+            ),
+            validation_request_record=initial,
+        )
+    )
+    assert isinstance(retry_pull, PullResponseRecord)
+    return commit(
+        store,
+        standardized_submission_body(payload),
+        payload,
+        retry_pull,
+        session_id=session_id,
+        web_arguments=web_arguments,
+    )
+
+
 def standardized_payload() -> dict[str, Any]:
     payload = standardized_submission_body(valid_submission_body())
     education = payload[KTP_AI_AUGMENT_EDUCATION_COL]
@@ -659,7 +704,7 @@ def test_web_argument_eligibility_drives_retry_and_replays_identically(
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
     payload = valid_submission_body()
     with store._writable(runtime):
-        commit_id = commit(store, payload, payload, web_arguments=arguments)
+        commit_id = standardized_retry_commit(store, payload, web_arguments=arguments)
         result = store._validate_commit(commit_id)
         assert result is not None
         validation = result.validation_request_body.post_commit_validation
@@ -692,7 +737,7 @@ def test_web_argument_eligibility_drives_retry_and_replays_identically(
             assert store._execute(
                 f"SELECT {POST_COMMIT_VALIDATION_ACCEPTED_COL} "
                 f"FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}"
-            ).fetchall() == [(False,)]
+            ).fetchall() == [(False,), (False,)]
         snapshot = query_snapshot(store).model_dump_json()
     log_bytes = Path(store._replay_log).read_bytes()
     live_database = fixtures.logical_database_snapshot(store._detour_db_path)
@@ -826,7 +871,7 @@ def test_validation_preview_does_not_publish_zip(
     payload = valid_submission_body()
     monkeypatch.setattr(requests.Session, "send", no_network)
     with store._writable(runtime):
-        commit_id = commit(store, payload, payload)
+        commit_id = standardized_retry_commit(store, payload)
         original = AiAugmentBackendStore._append_authoritative_record
         before_preview = fixtures.store_database_snapshot(store)
         with monkeypatch.context() as patch:
@@ -873,7 +918,7 @@ def test_live_repeat_resume_and_explicit_replay_never_publish(
     old_archive.write_bytes(b"leave existing archives alone")
     before = old_archive.stat().st_mtime_ns
     with store._writable(runtime):
-        commit_id = commit(store, payload, payload)
+        commit_id = standardized_retry_commit(store, payload)
         result = store._validate_commit(commit_id)
         assert (
             result.validation_request_body.post_commit_validation.result
@@ -900,7 +945,9 @@ def test_replay_validation_mismatch_reports_first_nested_value(
     monkeypatch.setattr(requests.Session, "send", no_network)
     payload = valid_submission_body()
     with backend_store._writable(runtime):
-        result = backend_store._validate_commit(commit(backend_store, payload, payload))
+        result = backend_store._validate_commit(
+            standardized_retry_commit(backend_store, payload)
+        )
         assert (
             result.validation_request_body.post_commit_validation.result
             is BackendLifecycle.ACCEPTED
@@ -908,9 +955,13 @@ def test_replay_validation_mismatch_reports_first_nested_value(
         standardized_column = dict(AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS)[
             KTP_AI_AUGMENT_GENDER_COL
         ]
-        assert backend_store._execute(
+        standardized_row = backend_store._execute(
             f'SELECT "{standardized_column}" FROM {CODEX_OUTPUT_ROWS_TABLE}'
-        ).fetchone() == (None,)
+        ).fetchone()
+        assert standardized_row is not None
+        standardized_value = standardized_row[0]
+        assert isinstance(standardized_value, str)
+        assert NOT_REPORTED_VALUE in standardized_value
 
     log = Path(runtime.pipeline_config.replay_log)
     lines = log.read_bytes().splitlines(keepends=True)
@@ -1142,7 +1193,7 @@ def test_outcome_materializes_persisted_ids_identically_live_and_replay(
     store = backend_store
     payload = valid_submission_body()
     with store._writable(runtime):
-        commit_id = commit(store, payload, payload)
+        commit_id = standardized_retry_commit(store, payload)
         result = store._validate_commit(commit_id)
         assert (
             result.validation_request_body.post_commit_validation.result
@@ -1184,7 +1235,7 @@ def test_outcome_materializes_persisted_ids_identically_live_and_replay(
             (innerdict,) = singular_outerdict.codex_innerdicts
             data = innerdict.innerdict.data
             for column in AI_AUGMENT_STANDARDIZED_COLUMNS:
-                assert data[column] is None
+                assert data[column] is not None
             assert (
                 api.selected_card_outer_dict(singular_outerdict).get_inner_by_key(
                     singular_outerdict.namekey.to_json_key()
@@ -1273,7 +1324,11 @@ def test_outcome_without_matching_accepted_data_keeps_history_only(
             ).fetchone() == (4,)
         return
     with store._writable(runtime):
-        commit_id = commit(store, {} if case == "rejected" else payload, payload)
+        commit_id = (
+            commit(store, {} if case == "rejected" else payload, payload)
+            if case in ("unvalidated", "rejected")
+            else standardized_retry_commit(store, payload)
+        )
         typed_commit = store._backend_commit_request_record(store._http_record(commit_id))
         if case != "unvalidated":
             result = store._validate_commit(commit_id)
@@ -1329,7 +1384,9 @@ def test_outcome_finalizes_only_linked_commit_once(
         assert isinstance(retry_pull, PullResponseRecord)
         assert retry_pull.validation_request_record is first
 
-        result = store._validate_commit(commit(store, payload, payload, retry_pull))
+        result = store._validate_commit(
+            standardized_retry_commit(store, payload, pull=retry_pull)
+        )
         assert (
             result.validation_request_body.post_commit_validation.result
             is BackendLifecycle.ACCEPTED
@@ -1372,7 +1429,7 @@ def test_initial_pull_after_outcome_requires_new_backend_launch(
     store = backend_store
     payload = valid_submission_body()
     with pytest.raises(RuntimeError, match="Backend Store failed"), store._writable(runtime):
-        commit_id = commit(store, payload, payload)
+        commit_id = standardized_retry_commit(store, payload)
         result = store._validate_commit(commit_id)
         outcome = store._append_authoritative_record(outcome_for_commit(
             store, result.validation_request_body.commit_request_record,
@@ -1394,7 +1451,7 @@ def test_validation_after_session_outcome_fails_without_materialization(
     store = backend_store
     payload = valid_submission_body()
     with pytest.raises(RuntimeError, match="Backend Store failed"), store._writable(runtime):
-        commit_id = commit(store, payload, payload)
+        commit_id = standardized_retry_commit(store, payload)
         result = store._validate_commit(commit_id)
         store._append_authoritative_record(outcome_for_commit(
             store, result.validation_request_body.commit_request_record,
@@ -1420,7 +1477,7 @@ def test_durable_validation_allows_410_before_outcome_and_ipc_waits_for_http_sen
     monkeypatch.setattr(api, "AUTHORITATIVE_BACKGROUND_TASKS", set())
     payload = valid_submission_body()
     with store._writable(runtime):
-        commit_id = commit(store, payload, payload)
+        commit_id = standardized_retry_commit(store, payload)
         result = store._validate_commit(commit_id)
         assert result is not None
         assert str(result.record_id).encode() in (
@@ -1551,8 +1608,8 @@ def test_initial_validation_is_lifecycle_scoped_and_replays_explicit_links(
             )
             assert isinstance(retry_pull, PullResponseRecord)
             assert retry_pull.validation_request_record is initial
-            second = store._validate_commit(commit(
-                store, payload, payload, retry_pull, session_id=session_id,
+            second = store._validate_commit(standardized_retry_commit(
+                store, payload, pull=retry_pull, session_id=session_id,
             ))
             assert (
                 second.validation_request_body.post_commit_validation.result
