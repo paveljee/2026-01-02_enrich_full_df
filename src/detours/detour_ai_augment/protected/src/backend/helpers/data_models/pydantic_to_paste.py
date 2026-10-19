@@ -319,8 +319,8 @@ class ISCEDTertiaryLevel(StrEnum):
     # LEVEL_4 = "4"  # Post-secondary non-tertiary
     LEVEL_5 = "5"  # Short-cycle tertiary
     LEVEL_6 = "6"  # Bachelor's or equivalent
-    LEVEL_7 = "7"  # Master's or equivalent
-    LEVEL_8 = "8"  # Doctoral or equivalent
+    LEVEL_7 = "7"  # Master's or equivalent, *including most professional doctorates* (like MD or JD)
+    LEVEL_8 = "8"  # Doctoral or equivalent *advanced research qualification* (PhD-tier including joint MD-PhD programs)
 
 
 class EducationRecord(StrictModel):
