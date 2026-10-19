@@ -91,6 +91,14 @@ ignore = [
            # which may be neat for defining a global executable rule
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# This source is embedded verbatim in client instructions; keep its formatting intact.
+"src/detours/detour_ai_augment/protected/src/backend/helpers/data_models/pydantic_to_paste.py" = [
+  "E302",  # Expected 2 blank lines
+  "E305",  # Top-level functions and classes must be separated by 2 blank lines
+  "E501",  # Line too long
+]
+
 [tool.mypy]
 python_version = "3.14"
 # don't remember what third-party libs we had
