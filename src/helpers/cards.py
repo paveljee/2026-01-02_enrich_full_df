@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -15,10 +16,60 @@ import pandas as pd
 from .data_models import OuterDict
 from .vars import (
     DRAW_LABEL,
+    IS_A_KTP_FILENAME_COLUMN,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_ORIG_COLNAME_COL,
     KTP_LAST_NAME_ORIG_COLNAME_COL,
 )
+
+MARKDOWN_CODE_DELIMITER = "`"
+MARKDOWN_LITERAL_LABEL_MARKER = "_"
+
+
+def _markdown_literal(value: str) -> str:
+    if MARKDOWN_LITERAL_LABEL_MARKER not in value:
+        return value
+    return f"{MARKDOWN_CODE_DELIMITER}{value}{MARKDOWN_CODE_DELIMITER}"
+
+
+def _markdown_json_value(value: str) -> str:
+    """If a value parses as valid JSON
+    AND into a `dict` or a `list`, then
+    it is probably worth delimiting with
+    a code block when rendering as Markdown.
+    
+    Signed off: Pavel"""
+
+    types_to_delimit = (dict, list)
+    try:
+        if not isinstance(json.loads(value), types_to_delimit):
+            raise TypeError
+    except (json.JSONDecodeError, TypeError):
+        return value
+    
+    delimiter = MARKDOWN_CODE_DELIMITER
+    while delimiter in value:
+        delimiter += MARKDOWN_CODE_DELIMITER
+    
+    return f"{delimiter}{value}{delimiter}"
+
+
+def card_filename(
+    *,
+    draw_label: str,
+    first_name: str,
+    last_name: str,
+) -> str:
+    minified_card = (
+        f"{draw_label}: {first_name} {last_name}"
+        if draw_label
+        else f"{first_name} {last_name}"
+    )
+    return re.sub(
+        r"\s+",
+        "_",
+        re.sub(r"[^A-Za-z0-9\s]+", "", minified_card),
+    ).strip("_")
 
 
 def build_cards(
@@ -62,27 +113,47 @@ def build_cards(
                 break
         card = header + (fun_fact + "\n" if fun_fact else "")
 
-        minified_card = (
-            f"{draw_label}: {name_key.first_name} {name_key.last_name}"
-            if draw_label
-            else f"{name_key.first_name} {name_key.last_name}"
+        docx_filename = card_filename(
+            draw_label=draw_label,
+            first_name=name_key.first_name,
+            last_name=name_key.last_name,
         )
-        docx_filename = re.sub(
-            r"\s+",
-            "_",
-            re.sub(r"[^A-Za-z0-9\s]+", "", minified_card),
-        ).strip("_")
 
         for inner in inner_dicts:
             filename = inner.data.get(KTP_FILENAME_COL, "unknown")
-            card += f"\n\n#### {KTP_FILENAME_COL}: {filename}\n"
+            filename_label = _markdown_literal(KTP_FILENAME_COL)
+            rendered_filename = _markdown_literal(str(filename))
+            card += f"\n\n#### {filename_label}: {rendered_filename}\n"
             for col, val in inner.data.items():
                 if col in excluded_cols or pd.isna(val):
                     continue
-                if "\n" in str(val):
-                    card += f"**{col}**:\n\n{str(val).replace('\n', '\n\n')}\n\n"
+                rendered_col = _markdown_literal(col)
+                # Note that values are intentionally
+                # not tampered with, e.g., underscore-
+                # containing values do not get wrapped
+                # into backticks, etc. The only exceptions
+                # are the filename cols above and below and
+                # `_markdown_json_value`, which all have a
+                # predictable shape. Other than that,
+                # values are unpredictable and can contain
+                # anything. If you'd like to apply any
+                # other formatting to the value, please
+                # apply it at some point before the
+                # materialization into the innerdict,
+                # e.g., at the output VIEW stage.
+                # Signed off: Pavel
+                text = (
+                    _markdown_literal(str(val))
+                    if IS_A_KTP_FILENAME_COLUMN(col)
+                    else _markdown_json_value(str(val))
+                )
+                if "\n" in text:
+                    card += (
+                        f"**{rendered_col}**:\n\n"
+                        f"{text.replace('\n', '\n\n')}\n\n"
+                    )
                 else:
-                    card += f"**{col}**: {str(val)}\n\n"
+                    card += f"**{rendered_col}**: {text}\n\n"
                 # if want to render null values: ####
                 # if col in excluded_cols:
                 #     continue
@@ -110,6 +181,15 @@ def _render_docx(md_path: Path, docx_path: Path, reference_docx: Path) -> Path:
         check=True,
     )
     return docx_path
+
+
+def render_docx_bytes(markdown: str, reference_docx: Path) -> bytes:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        md_path = Path(tmpdir) / "card.md"
+        docx_path = Path(tmpdir) / "card.docx"
+        md_path.write_text(markdown, encoding="utf-8", newline="\n")
+        _render_docx(md_path, docx_path, reference_docx)
+        return docx_path.read_bytes()
 
 
 def write_cards_zip(

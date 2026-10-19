@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Final
+from typing import Callable, Final
 
 CARD_INTRODUCTION = """## Introduction
 **Draw number** is the sequential order in which rows were sampled from HCR tables.
@@ -61,8 +61,17 @@ KTP_LAST_NAME_COL: Final = "ktp.last_name"
 KTP_FIRST_NAME_ORIG_COLNAME_COL: Final = "ktp.first_name_original_column_name"
 KTP_LAST_NAME_ORIG_COLNAME_COL: Final = "ktp.last_name_original_column_name"
 KTP_FILENAME_COL: Final = "ktp.filename"
+
+# To be used in particular for delimiting these
+# with code blocks for Markdown rendering
+IS_A_KTP_FILENAME_COLUMN: Callable[[str], bool] = lambda column: (
+    column == KTP_FILENAME_COL
+    or (column.startswith("ktp.") and column.endswith("_filename"))
+)
+
 KTP_FRAGMENT_TYPE_COL: Final = "ktp.fragment_type"
-KTP_SOURCE_KEY_COL: Final = "ktp.source_key"
+KTP_NAMEKEY_COL: Final = "ktp.namekey"
+KTP_INNERDICT_JSONLINES_COL: Final = "ktp.innerdicts"
 KTP_ECONOMIES_COL: Final = "ktp.hcr_world_bank_economies"
 KTP_ECONOMIES_ISO_COL: Final = "ktp.hcr_world_bank_economies_iso"
 KTP_ECONOMIES_INCOME_GROUP_COL: Final = "ktp.hcr_world_bank_economies_income_group"
@@ -72,6 +81,7 @@ KTP_PRIORITY_GROUP_COL: Final = "ktp.priority_label"
 KTP_HCR_PRIMARY_AFFILIATIONS_COL: Final = "ktp.hcr_primary_affiliations"
 KTP_HCR_SECONDARY_AFFILIATIONS_COL: Final = "ktp.hcr_secondary_affiliations"
 DRAW_LABEL: Final = "ktp.draw_number"
+BATCH_LABEL: Final = "ktp.release_batch"
 RIGHT_NAME_COL: Final = "Researcher/author"
 KTP_FRAGMENT_COL: Final = "ktp.fragment"
 KTP_ALT_NAME_COL: Final = "ktp.alt_name"
@@ -174,9 +184,9 @@ KTP_PARTITION_NO_RESOLUTION_VALUE: Final = 0
 KTP_PARTITION_XLSX_VALUE: Final = 1
 KTP_PARTITION_SSN_VALUE: Final = 2
 KTP_PARTITION_DOCX_VALUE: Final = 4
-CARD_PARTITION_ARTIFACT_MODES: Final[set[int]] = {1, 2}
-KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: Final = "ktp.source_key_first_name_norm_tok"
-KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: Final = "ktp.source_key_last_name_norm"
+CARD_PARTITION_ARTIFACT_MODES: Final[set[int]] = {0, 1, 2}
+KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY: Final = "ktp.namekey_first_name_norm_tok"
+KTP_XLSX_MATCH_NAMEKEY_LAST_KEY: Final = "ktp.namekey_last_name_norm"
 KTP_XLSX_MATCH_FIRST_TOKENS_KEY: Final = "ktp.first_name_norm_tok"
 KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: Final = "ktp.last_name_norm"
 KTP_XLSX_MATCH_RULE_KEY: Final = "ktp.xlsx_match_rule"
@@ -184,8 +194,8 @@ KTP_XLSX_MATCH_RULE_V1: Final = "v1"
 KTP_XLSX_MATCH_RULE_V2: Final = "v2"
 KTP_DOCX_MATCH_RULE_KEY: Final = "ktp.docx_match_rule"
 KTP_DOCX_MATCH_RULE_V1: Final = "v1"
-KTP_DOCX_MATCH_KTP_FIRST_NORM_KEY: Final = "ktp.source_key_first_name_norm"
-KTP_DOCX_MATCH_KTP_LAST_NORM_KEY: Final = "ktp.source_key_last_name_norm"
+KTP_DOCX_MATCH_KTP_FIRST_NORM_KEY: Final = "ktp.namekey_first_name_norm"
+KTP_DOCX_MATCH_KTP_LAST_NORM_KEY: Final = "ktp.namekey_last_name_norm"
 KTP_DOCX_MATCH_DOCX_NAME_NORM_KEY: Final = "ktp.table_1_researcher_author_norm"
 KTP_SSN_MATCH_RULE_KEY: Final = "ktp.ssn_match_rule"
 KTP_SSN_MATCH_RULE_V1: Final = "v1"
@@ -212,7 +222,7 @@ KTP_OPENALEX_MATCH_COL: Final = "ktp.openalex_match"
 KTP_OPENALEX_REUSED_COL: Final = "ktp.openalex_reused"
 KTP_OPENALEX_RESPONSE_CODE_COL: Final = "ktp.openalex_response_code"
 KTP_OPENALEX_RECEIVED_AT_UNIX_USEC_COL: Final = "ktp.openalex_received_at_unix_usec"
-KTP_SSNAD_MATCH_KTP_NAME_NORM_KEY: Final = "ktp.source_key_norm"
+KTP_SSNAD_MATCH_KTP_NAME_NORM_KEY: Final = "ktp.namekey_norm"
 KTP_SSNAD_MATCH_SSNAD_NAME_NORM_KEY: Final = "ktp.ssnad_display_name_norm"
 KTP_DOCX_ROW_NUMBER_COL: Final = "ktp.table_1_row_number"
 KTP_DOCX_FOOTNOTES_COL: Final = "ktp.table_1_footnotes"
@@ -625,7 +635,7 @@ __all__ = [
     "KTP_POPULATION_INDEX_COL",
     "KTP_PRIORITY_COL",
     "KTP_PRIORITY_GROUP_COL",
-    "KTP_SOURCE_KEY_COL",
+    "KTP_NAMEKEY_COL",
     "SSNAD_RAW_AUTHORID_COL",
     "SSNAD_RAW_DISPLAY_NAME_COL",
     "SSNAD_RAW_DISPLAY_NAME_ALTERNATIVES_COL",

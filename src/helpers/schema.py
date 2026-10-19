@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+from .vars import KTP_INNERDICT_JSONLINES_COL, KTP_NAMEKEY_COL
+
 POPULATION_TABLE = "population"
 POPULATION_NAMES_TABLE = "population_names"
 POPULATION_NAMES_VIEW = "population_with_names"
@@ -13,9 +15,9 @@ SAMPLES_VIEW = "samples_with_context"
 SAMPLES_WITH_NAMES_VIEW = "samples_with_names"
 
 OUTERDICT_STUB_TABLE = "outerdict_stub"
-OUTERDICT_NAME_VIEW = "outerdict_name_keys"
+OUTERDICT_NAME_VIEW = "outerdict_namekeys"
 OUTERDICT_EXCLUDED_STUB_TABLE = "outerdict_stub_excluded"
-OUTERDICT_EXCLUDED_NAME_VIEW = "outerdict_name_keys_excluded"
+OUTERDICT_EXCLUDED_NAME_VIEW = "outerdict_namekeys_excluded"
 REGISTERED_RESOURCES_TABLE = "registered_resources"
 
 XLSX_MATCH_VIEW = "xlsx_matches"
@@ -26,6 +28,9 @@ DOCX_TABLE = "docx_rows"
 DOCX_MATCH_VIEW = "docx_matches"
 DOCX_INNERDICT_TABLE = "docx_innerdicts"
 DOCX_OUTPUT_VIEW = "docx_output"
+
+MISC_INNERDICT_TABLE = "misc_innerdicts"
+MISC_OUTPUT_VIEW = "misc_output"
 
 PARQUET_AUTHOR_MATCH_TABLE = "ssn_author_matches"
 PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW = "ssn_author_matches_nonzero_hit"
@@ -41,10 +46,22 @@ PARQUET_ALL_HITS_TABLE = "ssn_all_hits"
 PARQUET_AUTHOR_HIT_AGG_TABLE = "ssn_author_hit_agg"
 PARQUET_AUTHOR_AGG_TABLE = "ssn_author_agg"
 PARQUET_INNERDICT_TABLE = "ssn_innerdicts"
+PARQUET_LEGACY_ROWS_INNERDICT_TABLE = "ssn_legacy_rows_innerdicts"
 PARQUET_AUTHOR_OUTPUT_TABLE = "ssn_author_output"
 PARQUET_OUTPUT_VIEW = "ssn_parquet_output"
 
+INNERDICT_TABLE_SCHEMA: tuple[tuple[str, str], ...] = (
+    (KTP_NAMEKEY_COL, "VARCHAR"),
+    (KTP_INNERDICT_JSONLINES_COL, "VARCHAR"),
+)
+INNERDICT_SOURCE_RELATIONS: dict[str, str] = {
+    XLSX_INNERDICT_TABLE: XLSX_MATCH_VIEW,
+    DOCX_INNERDICT_TABLE: DOCX_MATCH_VIEW,
+    PARQUET_INNERDICT_TABLE: PARQUET_LEGACY_ROWS_INNERDICT_TABLE,
+}
+
 CARD_PARTITION_TABLE = "card_partitions"
+CARD_PARTITION_REVIEW_ROWS_TABLE = "card_partition_review_rows"
 CARD_PARTITION_REVIEW_VIEW = "card_partition_review"
 
 

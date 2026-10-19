@@ -96,6 +96,16 @@ def _ssn_hit_v2_candidate_projection_sql(table_alias: str) -> str:
     """
 
 
+def ssn_sum_hit_1pct_sql(hit_1pct_expr: str) -> str:
+    """Return the bounded SSN hit-count sum with a stable BIGINT result type.
+
+    DuckDB promotes ``SUM(INTEGER)`` to ``HUGEINT`` to avoid overflow. This
+    metric is bounded by the paper universe, so ``BIGINT`` is ample and keeps
+    its exact integer semantics across the pandas JSONL boundary.
+    """
+    return f"CAST(SUM(COALESCE({hit_1pct_expr}, 0)) AS BIGINT)"
+
+
 def ssn_removed_zero_hit_count_sql(*, author_id_col: str) -> str:
     return f"""
         SELECT COUNT(*)
