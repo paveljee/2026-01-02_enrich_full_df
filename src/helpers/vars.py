@@ -13,6 +13,7 @@ Date of report: {}
 """
 
 HCR_XLSX_KEY_PREFIX = "hcr_xlsx_"
+MANUAL_EXTRACTIONS_DOCX_KEY_PREFIX = "ri_"
 KTP_AUTHOR_DETAILS_UNNEST_KEY = "ktp_author_details_unnest"
 AUTHOR_DETAILS_UNNEST_RULE_VERSION_METADATA_KEY: Final = (
     "match_rule_version.ssn_name"

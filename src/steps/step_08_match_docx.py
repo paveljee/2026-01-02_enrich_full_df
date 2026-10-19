@@ -106,7 +106,8 @@ def load_single_table_docx(resources: dict[str, RegisteredResource]) -> pd.DataF
         except BadZipFile as exc:
             raise ValueError(
                 f"Invalid DOCX file '{path.name}' (not a valid DOCX/zip archive). "
-                "Remove temp/lock files (e.g., '~$*.docx') from docx_dir."
+                # "Remove temp/lock files (e.g., '~$*.docx') from docx_dir."
+                "Remove temp/lock files (e.g., '~$*.docx') from files_config."
             ) from exc
         if len(tables) != 1:
             raise ValueError(

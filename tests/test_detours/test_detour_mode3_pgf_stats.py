@@ -90,7 +90,7 @@ def _minimal_config_dict(db_path: Path) -> dict[str, object]:
         "output_dir": str(db_path.parent / "output"),
         "output_format": "txt",
         "pandoc_reference_docx": str(db_path.parent / "reference.docx"),
-        "docx_dir": str(db_path.parent / "docx"),
+        # "docx_dir": str(db_path.parent / "docx"),
         "timezone": "UTC",
         "sample_seed": 42,
         "sample_draw_sizes": [1],

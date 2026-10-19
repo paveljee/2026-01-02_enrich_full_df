@@ -9,7 +9,7 @@ from ..helpers.duckdb_utils import register_frame
 from ..helpers.resources import (
     PipelineResources,
     configured_hcr_xlsx_paths,
-    discover_docx_files,
+    # discover_docx_files,
     register_pipeline_resources,
 )
 from ..helpers.schema import REGISTERED_RESOURCES_TABLE
@@ -44,7 +44,7 @@ def run(context: PipelineContext) -> StepResult:
     if not xlsx_files:
         raise FileNotFoundError("No configured HCR XLSX files found in files_config.")
 
-    docx_files = discover_docx_files(context.config.docx_dir)
+    # docx_files = discover_docx_files(context.config.docx_dir)
 
     def log(message: str) -> None:
         if context.log is not None:
@@ -56,6 +56,7 @@ def run(context: PipelineContext) -> StepResult:
         log=log,
     )
     context.resources = resources
+    docx_files = [Path(resource) for resource in resources.docx_resources.values()]
     resources_df = _resource_registry_frame(resources)
     register_frame(context.conn, "registered_resources_frame", resources_df)
     context.conn.execute(
