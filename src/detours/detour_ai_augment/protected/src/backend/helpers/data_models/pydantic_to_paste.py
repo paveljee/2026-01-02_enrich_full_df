@@ -135,12 +135,19 @@ class ResearcherAuthorStandardized(StrictModel):
 
 # KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL
 Location: TypeAlias = CountryAlpha3
-
-
-class PlaceOfResidenceStandardized(StrictModel):
+class _PlaceOfResidence(StrictModel):
     place: SubmissionValueRequired[SubmissionText]
     location: SubmissionValueRequired[Location]
+class PlaceOfResidenceFromPrivateResidence(_PlaceOfResidence):
+    type: Literal["private_residence"]
+class PlaceOfResidenceFromProfessionalAffiliation(_PlaceOfResidence):
+    type: Literal["professional_affiliation"]
 
+PlaceOfResidenceStandardized: TypeAlias = Annotated[
+    PlaceOfResidenceFromPrivateResidence
+    | PlaceOfResidenceFromProfessionalAffiliation,
+    Field(discriminator="type"),
+]
 
 # KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
 Language: TypeAlias = ISO639_3

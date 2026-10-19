@@ -22,7 +22,7 @@ from .pydantic_to_paste import (
     FormerAcademicPosition,
     GenderSubmission,
     ISCEDTertiaryLevel,
-    PlaceOfResidenceStandardized,
+    PlaceOfResidenceFromProfessionalAffiliation,
     PlaceOfResidenceSubmission,
     RaceEthnicityLanguageCultureStandardized,
     RaceEthnicityLanguageCultureSubmission,
@@ -257,9 +257,10 @@ L_FEI_FEI_RETRY_FIXTURE.submission.researcher_author.standardized_value = (
     )
 )
 L_FEI_FEI_RETRY_FIXTURE.submission.place_of_residence.standardized_value = (
-    PlaceOfResidenceStandardized(
-    place="Stanford campus, Stanford, California",
-    location=CountryAlpha3("USA"),
+    PlaceOfResidenceFromProfessionalAffiliation(
+        place="Stanford campus, Stanford, California",
+        location=CountryAlpha3("USA"),
+        type="professional_affiliation",
     )
 )
 L_FEI_FEI_RETRY_FIXTURE.submission.race_ethnicity_language_culture.standardized_value = (

@@ -7,6 +7,7 @@ during the 2026-09-03 Human Operator end-to-end run
 for `'{"ktp.first_name":"A.","ktp.last_name":"Sheikh"}'`.
 The adaptation specifically entailed:
 for the current schema, the captured `GB` location is represented as `GBR`,
+the residence source is tagged `professional_affiliation`,
 and the four current academic positions specify `start: NR` and `end: NA`.
 The remaining content comes from the original capture.
 

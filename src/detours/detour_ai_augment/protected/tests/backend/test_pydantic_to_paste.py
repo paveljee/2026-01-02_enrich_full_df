@@ -60,7 +60,11 @@ FIELD_MODEL_CASES = (
     ),
     (
         schema.PlaceOfResidenceSubmission,
-        {"place": "Stanford, California", "location": "USA"},
+        {
+            "type": "professional_affiliation",
+            "place": "Stanford, California",
+            "location": "USA",
+        },
     ),
     (
         schema.RaceEthnicityLanguageCultureSubmission,
@@ -121,10 +125,6 @@ FIELD_MODEL_UNAVAILABLE_CASES = (
         },
     ),
     (
-        schema.PlaceOfResidenceSubmission,
-        {"place": NOT_REPORTED_VALUE, "location": NOT_REPORTED_VALUE},
-    ),
-    (
         schema.RaceEthnicityLanguageCultureSubmission,
         {
             "race": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
@@ -175,6 +175,54 @@ def test_field_submission_models_round_trip(
 
 
 @pytest.mark.parametrize(
+    ("tag", "expected_type"),
+    (
+        ("private_residence", schema.PlaceOfResidenceFromPrivateResidence),
+        ("professional_affiliation", schema.PlaceOfResidenceFromProfessionalAffiliation),
+    ),
+)
+def test_place_of_residence_discriminator_selects_variant(
+    tag: str, expected_type: type[BaseModel],
+) -> None:
+    payload = {
+        FIELD_VALUE_FIELD: "Plain-text research value.",
+        FIELD_STANDARDIZED_VALUE_FIELD: {
+            "type": tag,
+            "place": "Oxford",
+            "location": "GBR",
+        },
+        FIELD_EVIDENCE_FIELD: TEST_EVIDENCE,
+    }
+
+    parsed = schema.PlaceOfResidenceSubmission.model_validate_json(json.dumps(payload))
+
+    assert type(parsed.standardized_value) is expected_type
+    assert schema.PlaceOfResidenceSubmission.model_validate_json(
+        parsed.model_dump_json()
+    ) == parsed
+
+
+@pytest.mark.parametrize(
+    "standardized_value",
+    (
+        {"place": "Oxford", "location": "GBR"},
+        {"type": "unknown", "place": "Oxford", "location": "GBR"},
+        {"place": NOT_REPORTED_VALUE, "location": NOT_REPORTED_VALUE},
+    ),
+    ids=("missing-type", "unknown-type", "untyped-not-reported"),
+)
+def test_place_of_residence_rejects_missing_or_unknown_type(
+    standardized_value: dict[str, str],
+) -> None:
+    with pytest.raises(ValidationError):
+        schema.PlaceOfResidenceSubmission.model_validate({
+            FIELD_VALUE_FIELD: "Plain-text research value.",
+            FIELD_STANDARDIZED_VALUE_FIELD: standardized_value,
+            FIELD_EVIDENCE_FIELD: TEST_EVIDENCE,
+        })
+
+
+@pytest.mark.parametrize(
     ("model", "standardized_value"),
     FIELD_MODEL_UNAVAILABLE_CASES,
     ids=lambda value: value.__name__ if isinstance(value, type) else None,
@@ -200,6 +248,7 @@ def test_field_submission_models_support_allowed_placeholders(
     ("model", "standardized_value"),
     (
         (schema.PlaceOfResidenceSubmission, {
+            "type": "private_residence",
             "place": NOT_REPORTED_VALUE,
             "location": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
         }),

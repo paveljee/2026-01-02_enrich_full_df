@@ -36,7 +36,8 @@
     ],
     "standardized_value": {
       "place": "Oxford, England, United Kingdom",
-      "location": "GBR"
+      "location": "GBR",
+      "type": "professional_affiliation"
     }
   },
   "ktp.ai_augment_race_ethnicity_language_culture": {
