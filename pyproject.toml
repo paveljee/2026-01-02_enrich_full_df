@@ -204,6 +204,35 @@ input(
 """
 cwd = "."
 
+[tool.pixi.tasks.parse-docx]
+args = [{ arg = "docx_path" }]
+cmd = """
+python -c '
+from pathlib import Path
+from sys import argv
+from src.helpers.data_models import FragmentType, ResourceGroup
+from src.helpers.resources import register_resource
+from src.steps.step_08_match_docx import load_single_table_docx
+resource = register_resource(
+    docx := Path(argv[1]),
+    group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
+    fragment_type=FragmentType.DOCX_ROW,
+)
+parsed = load_single_table_docx({resource.name: resource})
+with docx.with_suffix(".json").open("x", encoding="utf-8") as output:
+    print(parsed.to_json(
+        orient="records",
+        index=False,
+        force_ascii=False,
+        indent=2
+    ), file=output)
+print(f"Parsed DOCX and saved the result to {output.name!r}")
+' "{{ docx_path }}"
+"""
+cwd = "."
+"""
+cwd = "."
+
 # ===============================
 # Default: Tasks for actual tests
 # ===============================
