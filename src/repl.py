@@ -84,12 +84,12 @@ def run_reproduction(args: argparse.Namespace) -> Path | None:
 
     context.log = log
 
-    for extension_load_message in context.manager.duckdb_extension_load_messages:
-        log(extension_load_message, style="cyan")
 
     try:
         if interactive:
             print_history()
+        for extension_load_message in context.manager.duckdb_extension_load_messages:
+            log(extension_load_message, style="cyan")
         if args.resume:
             if not auto_confirm:
                 if interactive:
