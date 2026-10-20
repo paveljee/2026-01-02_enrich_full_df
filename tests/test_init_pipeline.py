@@ -9,16 +9,22 @@ import duckdb
 
 from src.helpers.data_models import NameKey
 from src.helpers.init_pipeline import init_pipeline
-from src.helpers.schema import OUTERDICT_STUB_TABLE, PARQUET_INNERDICT_TABLE
+from src.helpers.jsonlines import dumps_jsonlines
+from src.helpers.schema import (
+    OUTERDICT_STUB_TABLE,
+    PARQUET_INNERDICT_TABLE,
+    PARQUET_LEGACY_ROWS_INNERDICT_TABLE,
+)
 from src.helpers.vars import (
     KTP_FRAGMENT_COL,
-    KTP_SOURCE_KEY_COL,
+    KTP_INNERDICT_JSONLINES_COL,
+    KTP_NAMEKEY_COL,
     STEP_BUILD_OUTERDICT,
     STEP_MATCH_PARQUET,
 )
 
 
-def test_resume_hydrates_parquet_from_enriched_innerdict_table(
+def test_resume_hydrates_parquet_from_jsonlines_innerdict_table(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -39,19 +45,34 @@ def test_resume_hydrates_parquet_from_enriched_innerdict_table(
 
     conn = duckdb.connect(str(db_file))
     try:
-        conn.execute(f"CREATE TABLE {OUTERDICT_STUB_TABLE} (name_key VARCHAR)")
+        conn.execute(
+            f'CREATE TABLE {OUTERDICT_STUB_TABLE} '
+            f'("{KTP_NAMEKEY_COL}" VARCHAR)'
+        )
         conn.execute(f"INSERT INTO {OUTERDICT_STUB_TABLE} VALUES (?)", [source_key])
         conn.execute(
             f'''
             CREATE TABLE {PARQUET_INNERDICT_TABLE} (
-                "{KTP_SOURCE_KEY_COL}" VARCHAR,
+                "{KTP_NAMEKEY_COL}" VARCHAR,
+                "{KTP_INNERDICT_JSONLINES_COL}" VARCHAR
+            )
+            '''
+        )
+        conn.execute(
+            f"INSERT INTO {PARQUET_INNERDICT_TABLE} VALUES (?, ?)",
+            [source_key, dumps_jsonlines([{KTP_FRAGMENT_COL: "A123"}])],
+        )
+        conn.execute(
+            f'''
+            CREATE TABLE {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} (
+                "{KTP_NAMEKEY_COL}" VARCHAR,
                 "{KTP_FRAGMENT_COL}" VARCHAR
             )
             '''
         )
         conn.execute(
-            f'INSERT INTO {PARQUET_INNERDICT_TABLE} VALUES (?, ?)',
-            [source_key, "A123"],
+            f'INSERT INTO {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} VALUES (?, ?)',
+            [source_key, "legacy-value"],
         )
     finally:
         conn.close()

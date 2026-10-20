@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import duckdb
-import pandas as pd
 
 from ..helpers.context import PipelineContext, StepResult
 from ..helpers.duckdb_utils import (
     append_innerdicts_from_jsonlines_table,
-    register_frame,
+    materialize_innerdicts_from_rows_table,
 )
-from ..helpers.jsonlines import dumps_jsonlines
 from ..helpers.name_matching import xlsx_match_sql
 from ..helpers.procedures import XlsxMatchProcedure
 from ..helpers.schema import (
+    INNERDICT_SOURCE_RELATIONS,
     OUTERDICT_NAME_VIEW,
     POPULATION_ECON_TABLE,
     POPULATION_NAMES_TABLE,
@@ -36,18 +35,18 @@ from ..helpers.vars import (
     KTP_HCR_ROW_NUMBER_COL,
     KTP_HCR_SECONDARY_AFFILIATIONS_COL,
     KTP_LAST_NAME_COL,
+    KTP_NAMEKEY_COL,
     KTP_POPULATION_INDEX_COL,
     KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
-    KTP_SOURCE_KEY_COL,
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_LAST_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY,
     KTP_XLSX_MATCH_RULE_KEY,
     KTP_XLSX_MATCH_RULE_V1,
     KTP_XLSX_MATCH_RULE_V2,
-    KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
     STEP_MATCH_XLSX,
 )
 from .shared import draw_sort_ctes_sql, draw_sort_order_by_sql, hcr_excluded_columns
@@ -89,7 +88,7 @@ def run(context: PipelineContext) -> StepResult:
         )
     base_select_sql = f"""
             {match_sql.base_select_keyword}
-                nd."{KTP_SOURCE_KEY_COL}",
+                nd."{KTP_NAMEKEY_COL}",
                 p."{KTP_HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
                 p."{KTP_HCR_ROW_NUMBER_COL}" AS "{KTP_FRAGMENT_COL}",
                 COALESCE(p.resource_fragment_type, 'excel_row') AS "{KTP_FRAGMENT_TYPE_COL}",
@@ -98,8 +97,8 @@ def run(context: PipelineContext) -> StepResult:
                 p.pop_last AS "{KTP_LAST_NAME_COL}",
                 json_object(
                     {match_sql.rule_payload_entry}
-                    '{KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY}', to_json(nd.nd_first_tokens),
-                    '{KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY}', {match_sql.source_last_payload_expr},
+                    '{KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY}', to_json(nd.nd_first_tokens),
+                    '{KTP_XLSX_MATCH_NAMEKEY_LAST_KEY}', {match_sql.source_last_payload_expr},
                     '{KTP_XLSX_MATCH_FIRST_TOKENS_KEY}', to_json(p.pop_first_tokens),
                     '{KTP_XLSX_MATCH_LAST_NAME_NORM_KEY}', {match_sql.target_last_payload_expr}
                 ) AS "{KTP_XLSX_MATCH_COL}",
@@ -125,13 +124,13 @@ def run(context: PipelineContext) -> StepResult:
         ),
         base_min_priority AS (
             SELECT
-                "{KTP_SOURCE_KEY_COL}",
+                "{KTP_NAMEKEY_COL}",
                 "{KTP_FILENAME_COL}",
                 "{KTP_FRAGMENT_COL}",
                 MIN(xlsx_match_path_priority) AS xlsx_match_path_priority
             FROM base_candidates
             GROUP BY
-                "{KTP_SOURCE_KEY_COL}",
+                "{KTP_NAMEKEY_COL}",
                 "{KTP_FILENAME_COL}",
                 "{KTP_FRAGMENT_COL}"
         ),
@@ -139,7 +138,7 @@ def run(context: PipelineContext) -> StepResult:
             SELECT bc.* EXCLUDE (xlsx_match_path_priority)
             FROM base_candidates bc
             JOIN base_min_priority bp
-              ON bc."{KTP_SOURCE_KEY_COL}" = bp."{KTP_SOURCE_KEY_COL}"
+              ON bc."{KTP_NAMEKEY_COL}" = bp."{KTP_NAMEKEY_COL}"
              AND bc."{KTP_FILENAME_COL}" = bp."{KTP_FILENAME_COL}"
              AND bc."{KTP_FRAGMENT_COL}" = bp."{KTP_FRAGMENT_COL}"
              AND bc.xlsx_match_path_priority = bp.xlsx_match_path_priority
@@ -155,7 +154,7 @@ def run(context: PipelineContext) -> StepResult:
         f"""
         CREATE OR REPLACE VIEW {XLSX_MATCH_VIEW} AS
         WITH name_draws AS (
-            SELECT nk."{KTP_SOURCE_KEY_COL}" as "{KTP_SOURCE_KEY_COL}",
+            SELECT nk."{KTP_NAMEKEY_COL}" as "{KTP_NAMEKEY_COL}",
                    nk."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
                    nk."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
                    {match_sql.name_draws_fields}
@@ -185,36 +184,23 @@ def run(context: PipelineContext) -> StepResult:
               ON rr.resource_name = p."{KTP_HCR_FILENAME_COL}"
         ){match_sql.extra_ctes},
         {base_ctes_sql},
-        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
+        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_NAMEKEY_COL)}
         SELECT * EXCLUDE (row_draw_group, row_draw_num, source_draw_group, source_draw_num)
         FROM ranked
         ORDER BY
             {draw_sort_order_by_sql(
-                source_key_col=KTP_SOURCE_KEY_COL,
+                source_key_col=KTP_NAMEKEY_COL,
                 filename_col=KTP_FILENAME_COL,
                 fragment_col=KTP_FRAGMENT_COL,
             )}
         """
     )
 
-    matched_df = conn.execute(f"SELECT * FROM {XLSX_MATCH_VIEW}").df()
-    matched_df = matched_df[matched_df[KTP_FILENAME_COL].notna()]
-
-    inner_rows = []
-    for name_key, group in matched_df.groupby(KTP_SOURCE_KEY_COL, dropna=False):
-        rows = group.drop(columns=[KTP_SOURCE_KEY_COL]).to_dict("records")
-        inner_rows.append(
-            {
-                "name_key": name_key,
-                "innerdicts": dumps_jsonlines(rows),
-            }
-        )
-    inner_df = pd.DataFrame(inner_rows, columns=["name_key", "innerdicts"])
-    register_frame(conn, "xlsx_innerdict_frame", inner_df)
-    conn.execute(
-        f"CREATE OR REPLACE TABLE {XLSX_INNERDICT_TABLE} AS SELECT * FROM xlsx_innerdict_frame"
+    _innerdict_keys, matched_rows = materialize_innerdicts_from_rows_table(
+        conn,
+        source_relation=INNERDICT_SOURCE_RELATIONS[XLSX_INNERDICT_TABLE],
+        table_name=XLSX_INNERDICT_TABLE,
     )
-    conn.execute("DROP TABLE IF EXISTS xlsx_innerdict_frame")
 
     append_innerdicts_from_jsonlines_table(
         conn,
@@ -232,12 +218,12 @@ def run(context: PipelineContext) -> StepResult:
             FROM {XLSX_MATCH_VIEW}
             WHERE "{KTP_FILENAME_COL}" IS NOT NULL
         ),
-        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
+        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_NAMEKEY_COL)}
         SELECT * EXCLUDE (row_draw_group, row_draw_num, source_draw_group, source_draw_num)
         FROM ranked
         ORDER BY
             {draw_sort_order_by_sql(
-                source_key_col=KTP_SOURCE_KEY_COL,
+                source_key_col=KTP_NAMEKEY_COL,
                 filename_col=KTP_FILENAME_COL,
                 fragment_col=KTP_FRAGMENT_COL,
             )}
@@ -249,6 +235,6 @@ def run(context: PipelineContext) -> StepResult:
     return StepResult(
         step_id=STEP_MATCH_XLSX,
         artifacts={"xlsx_matches_df": output_df},
-        messages=[f"Matched XLSX rows: {len(matched_df)}"],
-        diagnostics=[f"Matched XLSX rows: {len(matched_df)}"],
+        messages=[f"Matched XLSX rows: {matched_rows}"],
+        diagnostics=[f"Matched XLSX rows: {matched_rows}"],
     )

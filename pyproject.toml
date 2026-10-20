@@ -1,11 +1,15 @@
+# =================================
+# Broadly compatible pyproject.toml
+# =================================
+
 [project]
 name = "2026-01-02_enrich_full_df"
 version = "0.1.0"
-requires-python = ">=3.14.2,<3.15"
+requires-python = "==3.14.2"
 authors = [{name = "Pavel Zhelnov", email = "pzhelnov@p1m.org"}]
+# the below are treated by Pixi as PyPi deps
 dependencies = [
     "pandas>=2.3.3,<3",
-    "duckdb==1.5.1",
     "rich>=14.2.0,<15",
     "psutil>=7.2.1,<8",
     "python-docx>=1.2.0,<2",
@@ -20,43 +24,104 @@ dependencies = [
     "openpyxl>=3.1.5,<4",
     "pytest-cov>=7.0.0,<8",
     "python-dotenv>=1.2.2,<2",
+    "ipykernel==7.3.0",
+    "pyyaml==6.0.3",
+    "types-pyyaml==6.0.12.20250915",
+]
+# the below are pip etc compatible groups
+[dependency-groups]
+detour-mode0-econ-stats = [
+  "kaleido==0.2.1",
+  "plotly==6.6.0",
 ]
 
+# ============
+# Tool configs
+# ============
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+norecursedirs = [
+    "tmp",  # retained runtime/test artifacts, not test sources
+    "logs",  # includes copied diagnostic/test artifact bundles
+    "tests/test_detours",  # can run via `pixi run test tests/test_detours`
+]
+markers = [
+    "slow: long-running integration tests against real config/data",
+    "real_api: live-network tests against external APIs; run explicitly with -m real_api",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+preview = true
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = [
+  "E731",  # allows to assign a `lambda` expressions instead of using a `def`,
+           # which may be neat for defining a global executable rule
+]
+
+[tool.mypy]
+python_version = "3.14"
+# don't remember what third-party libs we had
+# that necessitated this setting,
+# but let's keep it for now;
+# signed off: human
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = true
+
+# ==================
+# Pixi Environments
+# ==================
+
+# "default" environment goes without saying
+[tool.pixi.environments.default]
+no-default-feature = false
+features = []
+
+# The features themselves are defined below per detour
+[tool.pixi.environments.detour-mode0-econ-stats]
+no-default-feature = false
+features = [
+  "detour-mode0-econ-stats",
+]
+
+# =======================
+# Default: Infrastructure
+# =======================
+
+# Supported deployments
 [tool.pixi.workspace]
 channels = ["conda-forge"]
 platforms = ["osx-arm64", "linux-aarch64", "linux-64"]
+
+# Conda dependencies
+[tool.pixi.dependencies]
+python = "==3.14.2"
+duckdb = "==1.5.1"
+pandoc = "==3.7.0.2"
+
+# ======================
+# Default: Generic tasks
+# ======================
 
 [tool.pixi.tasks.test]  # flexible task for downstream use
 args = [
   { arg = "module_name" },  # required
   { arg = "marker", default = "" },
 ]
-# centralizes -vv -s behaviour
+# centralizes pytest behaviour
 cmd = """
-pytest -vv -s {{ module_name }} \
+pytest -vv -srA {{ module_name }} \
   {% if marker %}-m "{{ marker }}"{% endif %}
 """
 cwd = "."
 
-[tool.pixi.tasks.test-repl]
-depends-on = [
-  { task = "test", args = ["."] },  # whatever is in pytest.ini_options
-  # no slow tests so far - otherwise exits 1 here
-  # { task = "test", args = [".", "slow"] },
-  { task = "test", args = [".", "real_api"] },
-]
-
-[tool.pixi.tasks.test-detours]
-# econ env is default plus more while default is sufficient for non-econ tests 
-depends-on = [
-  { task = "test", args = ["tests/test_detours"], environment = "detour-mode0-econ-stats" },
-  { task = "test", args = ["tests/test_detours", "slow"], environment = "detour-mode0-econ-stats" },
-]
-
-[tool.pixi.tasks.cov]
-cmd = "pytest -vv --cov=src --cov-report=term-missing --cov-report=xml"
-cwd = "."
-
+# Mostly unused really
 [tool.pixi.tasks.module]
 args = [
   { arg = "module_name", default = "src.repl" },
@@ -69,6 +134,29 @@ python -m src.repl --config "{{ config_path }}" --new --yes --non-interactive
 """
 cwd = "."
 
+[tool.pixi.tasks.ruff]
+args = [
+  { arg = "module_names", default = "src tests" },
+]
+cmd = "ruff check {{ module_names }}"
+cwd = "."
+
+[tool.pixi.tasks.mypy]
+args = [
+  { arg = "module_names", default = "src tests" },
+]
+cmd = "mypy {{ module_names }}"
+cwd = "."
+
+[tool.pixi.tasks.lint]
+depends-on = [
+  { task = "ruff", environment = "default" },
+  { task = "mypy", environment = "default" },
+]
+
+# ====================================
+# Default: Tasks for actual execution
+# ====================================
 [tool.pixi.tasks.repl]
 args = [
   { arg = "config_path", default = "config.repl.json" },
@@ -116,22 +204,26 @@ input(
 """
 cwd = "."
 
-[tool.pixi.tasks.ruff]
-args = [
-  { arg = "module_names", default = "src tests" },
-]
-cmd = "ruff check {{ module_names }}"
-cwd = "."
+# ===============================
+# Default: Tasks for actual tests
+# ===============================
 
-[tool.pixi.tasks.mypy]
-args = [
-  { arg = "module_names", default = "src tests" },
+[tool.pixi.tasks.test-repl]
+depends-on = [
+  { task = "test", args = ["."], environment = "default" },  # whatever is in pytest.ini_options
 ]
-cmd = "mypy {{ module_names }}"
-cwd = "."
+# note that the below cmd is only executed if all depends-on pass
+cmd = """
+echo "NOTE: slow and real_api tests need to be run separately"
+"""
 
-[tool.pixi.tasks.lint]
-depends-on = ["ruff", "mypy"]  # whatever is default
+# The tasks themselves are specified below per detour
+[tool.pixi.tasks.test-detours]
+depends-on = [
+  { task = "test-detour-step4-breakdown", environment = "default" },
+  { task = "test-detour-mode3-pgf-stats", environment = "default" },
+  { task = "test-detour-mode0-econ-stats", environment = "detour-mode0-econ-stats" },
+]
 
 [tool.pixi.tasks.pre-commit]
 depends-on = [
@@ -146,38 +238,61 @@ depends-on = ["lint", "test-repl"]
 [tool.pixi.tasks.pre-commit-detours]
 depends-on = ["lint", "test-detours"]
 
-[tool.pixi.feature.detour-mode0-econ-stats.dependencies]
-plotly = "==6.6.0"
+# note that all the above tasks
+# do not include extra tests for
+# smooth non-interactive execution
 
-[tool.pixi.environments]
-detour-mode0-econ-stats = ["detour-mode0-econ-stats"]
-
-[tool.pytest.ini_options]
-pythonpath = ["."]
-testpaths = ["tests"]
-norecursedirs = [
-    "tmp",  # retained runtime/test artifacts, not test sources
-    "logs",  # includes copied diagnostic/test artifact bundles
-    "tests/test_detours",  # can run via `pixi run test tests/test_detours`
-]
-markers = [
-    "slow: long-running integration tests against real config/data",
-    "real_api: live-network tests against external APIs; run explicitly with -m real_api",
+[tool.pixi.tasks.test-repl-extra]
+depends-on = [
+  # no slow tests so far - otherwise exits 1 here
+  # { task = "test", args = [".", "slow"] },
+  { task = "test", args = [".", "real_api"], environment = "default" },
 ]
 
-[tool.ruff]
-line-length = 100
-target-version = "py314"
-preview = true
+[tool.pixi.tasks.test-repl-operator]
+depends-on = [
+    "test-repl",
+    "test-repl-extra",
+]
 
-[tool.ruff.lint]
-select = ["E", "F", "I"]
+[tool.pixi.tasks.pre-commit-extra]
+depends-on = [
+  { task = "test-repl-extra", environment = "default" },
+]
 
-[tool.mypy]
-python_version = "3.14"
-ignore_missing_imports = true
-plugins = ["pydantic.mypy"]
-warn_unused_ignores = true
+# =======================
+# Default: Test coverage
+# =======================
 
-[dependency-groups]
-detour-mode0-econ-stats = ["kaleido==0.2.1"]
+[tool.pixi.tasks.cov]
+cmd = "pytest -vv --cov=src --cov-report=term-missing --cov-report=xml"
+cwd = "."
+
+# ========================
+# Detour: Step 4 breakdown
+# ========================
+
+[tool.pixi.tasks.test-detour-step4-breakdown]
+depends-on = [
+  { task = "test", args = ["tests/test_detours/test_detour_step4_breakdown.py"], environment = "default" },
+  # no tests marked slow in other detour tests
+  { task = "test", args = ["tests/test_detours/test_detour_step4_breakdown.py", "slow"], environment = "default" },
+]
+
+# ==========================
+# Detour: Mode 3 P(gf) stats
+# ==========================
+
+[tool.pixi.tasks.test-detour-mode3-pgf-stats]
+depends-on = [
+  { task = "test", args = ["tests/test_detours/test_detour_mode3_pgf_stats.py"], environment = "default" },
+]
+
+# ==========================
+# Detour: Mode 0 econ stats
+# ==========================
+
+[tool.pixi.feature.detour-mode0-econ-stats.tasks]
+test-detour-mode0-econ-stats = [
+  { task = "test", args = ["tests/test_detours/test_detour_mode0_econ_stats.py"], environment = "detour-mode0-econ-stats" },
+]

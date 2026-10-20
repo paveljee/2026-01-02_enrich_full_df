@@ -118,7 +118,7 @@ def test_csv_rows_match_samples(tmp_path: Path) -> None:
             output_dir=tmp_path / "output",
             output_format="txt",
             pandoc_reference_docx=tmp_path / "reference.docx",
-            docx_dir=tmp_path,
+            # docx_dir=tmp_path,
             timezone="America/Toronto",
             sample_seed=42,
             sample_draw_sizes=[

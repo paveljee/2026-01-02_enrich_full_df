@@ -58,7 +58,7 @@ class PipelineConfig(BaseModel):
     output_dir: Path
     output_format: str
     pandoc_reference_docx: Path
-    docx_dir: Path
+    # docx_dir: Path
     timezone: str
     sample_seed: int
     sample_draw_sizes: list[SampleDrawSpec]

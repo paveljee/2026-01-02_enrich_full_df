@@ -9,19 +9,20 @@ from .config import PipelineConfig
 from .context import PipelineContext
 from .data_models import NameKey, OuterDict
 from .diagnostics import DiagnosticsReport
-from .duckdb_utils import append_innerdicts_from_jsonlines_table, append_innerdicts_from_rows_table
+from .duckdb_utils import append_innerdicts_from_jsonlines_table
 from .pipeline_manager import PipelineManager
 from .procedures import DocxMatchProcedure, ParquetMatchProcedure, XlsxMatchProcedure
 from .resource_monitor import ResourceMonitor
 from .resources import PipelineResources, register_pipeline_resources
 from .schema import (
     DOCX_INNERDICT_TABLE,
+    OUTERDICT_NAME_VIEW,
     OUTERDICT_STUB_TABLE,
     PARQUET_INNERDICT_TABLE,
     XLSX_INNERDICT_TABLE,
 )
 from .vars import (
-    KTP_SOURCE_KEY_COL,
+    KTP_NAMEKEY_COL,
     STEP_BUILD_OUTERDICT,
     STEP_MATCH_DOCX,
     STEP_MATCH_PARQUET,
@@ -55,17 +56,20 @@ def _reset_pipeline(conn, manager: PipelineManager) -> None:
         "docx_innerdicts",
         "ssn_author_matches",
         "ssn_innerdicts",
+        "card_partitions",
+        "card_partition_review_rows",
     ]
     views = [
         "population_with_names",
         "population_with_names_economy",
         "samples_with_context",
         "samples_with_names",
-        "outerdict_name_keys",
+        OUTERDICT_NAME_VIEW,
         "xlsx_matches",
         "xlsx_output",
         "docx_matches",
         "docx_output",
+        "card_partition_review",
     ]
     for table in tables:
         conn.execute(f"DROP TABLE IF EXISTS {table}")
@@ -88,7 +92,9 @@ def _reset_pipeline(conn, manager: PipelineManager) -> None:
 
 
 def _load_outerdict_stub(conn, table_name: str) -> OuterDict:
-    rows = conn.execute(f"SELECT name_key FROM {table_name}").fetchall()
+    rows = conn.execute(
+        f'SELECT "{KTP_NAMEKEY_COL}" FROM {table_name}'
+    ).fetchall()
     name_keys = [NameKey.from_json_key(row[0]) for row in rows]
     return OuterDict.from_name_keys(name_keys)
 
@@ -157,12 +163,11 @@ def init_pipeline(
                     procedure=DocxMatchProcedure(),
                 )
             if manager.is_done(STEP_MATCH_PARQUET):
-                append_innerdicts_from_rows_table(
+                append_innerdicts_from_jsonlines_table(
                     conn,
                     table_name=PARQUET_INNERDICT_TABLE,
                     outer_dict=outer_dict,
                     procedure=ParquetMatchProcedure(),
-                    key_column=KTP_SOURCE_KEY_COL,
                 )
 
         context = PipelineContext(

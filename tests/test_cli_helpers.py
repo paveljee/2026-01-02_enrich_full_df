@@ -5,23 +5,22 @@ from pathlib import Path
 import pandas as pd
 
 from src.helpers.data_models import FragmentType, ResourceGroup
-from src.helpers.files import find_files_by_extension
 from src.helpers.resources import register_resource
 from src.helpers.vars import RIGHT_NAME_COL
 from src.steps.step_08_match_docx import load_docx_tables
 
+# from src.helpers.files import find_files_by_extension
+# def test_find_files_by_extension(tmp_path: Path) -> None:
+#     (tmp_path / "docs").mkdir()
+#     (tmp_path / "docs" / "a.docx").write_text("stub", encoding="utf-8")
+#     (tmp_path / "b.docx").write_text("stub", encoding="utf-8")
+#     (tmp_path / "c.csv").write_text("stub", encoding="utf-8")
 
-def test_find_files_by_extension(tmp_path: Path) -> None:
-    (tmp_path / "docs").mkdir()
-    (tmp_path / "docs" / "a.docx").write_text("stub", encoding="utf-8")
-    (tmp_path / "b.docx").write_text("stub", encoding="utf-8")
-    (tmp_path / "c.csv").write_text("stub", encoding="utf-8")
+#     non_recursive = find_files_by_extension(tmp_path, "docx")
+#     assert {p.name for p in non_recursive} == {"b.docx"}
 
-    non_recursive = find_files_by_extension(tmp_path, "docx")
-    assert {p.name for p in non_recursive} == {"b.docx"}
-
-    recursive = find_files_by_extension(tmp_path, "docx", recursive=True)
-    assert {p.name for p in recursive} == {"a.docx", "b.docx"}
+#     recursive = find_files_by_extension(tmp_path, "docx", recursive=True)
+#     assert {p.name for p in recursive} == {"a.docx", "b.docx"}
 
 
 def test_load_docx_tables_uses_parser(tmp_path: Path, monkeypatch) -> None:

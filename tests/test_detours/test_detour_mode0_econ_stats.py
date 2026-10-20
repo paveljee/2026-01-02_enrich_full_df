@@ -26,7 +26,7 @@ from src.helpers.jsonlines import dumps_jsonlines
 from src.helpers.resources import register_resource
 from src.helpers.schema import (
     OUTERDICT_STUB_TABLE,
-    PARQUET_INNERDICT_TABLE,
+    PARQUET_LEGACY_ROWS_INNERDICT_TABLE,
     PARQUET_OUTPUT_VIEW,
     POPULATION_ECON_VIEW,
     XLSX_INNERDICT_TABLE,
@@ -44,17 +44,18 @@ from src.helpers.vars import (
     KTP_HCR_PRIMARY_AFFILIATIONS_COL,
     KTP_HCR_ROW_NUMBER_COL,
     KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+    KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
+    KTP_NAMEKEY_COL,
     KTP_POPULATION_INDEX_COL,
     KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
     KTP_PRIORITY_GROUP_LABELS,
-    KTP_SOURCE_KEY_COL,
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_LAST_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY,
     OGHIST_INCOME_LABELS,
     REQUIRED_FILES_CONFIG_KEYS,
     WORLD_BANK_XLSX_KEY,
@@ -74,8 +75,8 @@ def _name_key(first: str, last: str) -> str:
 def _exact_xlsx_payload(first_tokens: list[str], last_norm: str) -> str:
     return json.dumps(
         {
-            KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: first_tokens,
-            KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: last_norm,
+            KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY: first_tokens,
+            KTP_XLSX_MATCH_NAMEKEY_LAST_KEY: last_norm,
             KTP_XLSX_MATCH_FIRST_TOKENS_KEY: first_tokens,
             KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: last_norm,
         },
@@ -88,8 +89,8 @@ def _non_exact_xlsx_payload(
 ) -> str:
     return json.dumps(
         {
-            KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: source_tokens,
-            KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: last_norm,
+            KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY: source_tokens,
+            KTP_XLSX_MATCH_NAMEKEY_LAST_KEY: last_norm,
             KTP_XLSX_MATCH_FIRST_TOKENS_KEY: first_tokens,
             KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: last_norm,
         },
@@ -154,7 +155,7 @@ def _minimal_config_dict(
         "output_dir": str(db_path.parent / "output"),
         "output_format": "txt",
         "pandoc_reference_docx": str(db_path.parent / "reference.docx"),
-        "docx_dir": str(db_path.parent / "docx"),
+        # "docx_dir": str(db_path.parent / "docx"),
         "timezone": "UTC",
         "sample_seed": 42,
         "sample_draw_sizes": [1],
@@ -190,23 +191,23 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
         con.execute(
             f"""
             CREATE TABLE {OUTERDICT_STUB_TABLE} (
-                name_key VARCHAR,
-                innerdicts VARCHAR
+                "{KTP_NAMEKEY_COL}" VARCHAR,
+                "{KTP_INNERDICT_JSONLINES_COL}" VARCHAR
             )
             """
         )
         con.execute(
             f"""
             CREATE TABLE {XLSX_INNERDICT_TABLE} (
-                name_key VARCHAR,
-                innerdicts VARCHAR
+                "{KTP_NAMEKEY_COL}" VARCHAR,
+                "{KTP_INNERDICT_JSONLINES_COL}" VARCHAR
             )
             """
         )
         con.execute(
             f"""
-            CREATE TABLE {PARQUET_INNERDICT_TABLE} (
-                "{KTP_SOURCE_KEY_COL}" VARCHAR
+            CREATE TABLE {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} (
+                "{KTP_NAMEKEY_COL}" VARCHAR
             )
             """
         )
@@ -789,21 +790,22 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
             (keys["fail_non_exact_jsonl"],),
         ]
         con.executemany(
-            f'INSERT INTO {PARQUET_INNERDICT_TABLE} ("{KTP_SOURCE_KEY_COL}") VALUES (?)',
+            f'INSERT INTO {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} '
+            f'("{KTP_NAMEKEY_COL}") VALUES (?)',
             ssn_rows,
         )
         con.execute(
             f"""
             CREATE OR REPLACE VIEW {PARQUET_OUTPUT_VIEW} AS
             SELECT
-                "{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
+                "{KTP_NAMEKEY_COL}" AS "{KTP_NAMEKEY_COL}",
                 0.25 AS "ssnau.p_gf",
                 3 AS "ssnau.inference_counts",
                 1 AS "ssnau.inference_sources",
                 'author_details.parquet' AS "ktp.ssnad_filename",
                 'authors.parquet' AS "ktp.ssnau_filename",
                 '["Field A"]' AS "ssn.field_ids_list"
-            FROM {PARQUET_INNERDICT_TABLE}
+            FROM {PARQUET_LEGACY_ROWS_INNERDICT_TABLE}
             """
         )
 
@@ -853,7 +855,9 @@ def test_detour_contract_and_mode0_econ_stats_readonly(
         before_counts = {
             OUTERDICT_STUB_TABLE: _row_count(before, OUTERDICT_STUB_TABLE),
             XLSX_INNERDICT_TABLE: _row_count(before, XLSX_INNERDICT_TABLE),
-            PARQUET_INNERDICT_TABLE: _row_count(before, PARQUET_INNERDICT_TABLE),
+            PARQUET_LEGACY_ROWS_INNERDICT_TABLE: _row_count(
+                before, PARQUET_LEGACY_ROWS_INNERDICT_TABLE
+            ),
         }
     finally:
         before.close()
@@ -1125,14 +1129,16 @@ def test_detour_contract_and_mode0_econ_stats_readonly(
         after_counts = {
             OUTERDICT_STUB_TABLE: _row_count(after, OUTERDICT_STUB_TABLE),
             XLSX_INNERDICT_TABLE: _row_count(after, XLSX_INNERDICT_TABLE),
-            PARQUET_INNERDICT_TABLE: _row_count(after, PARQUET_INNERDICT_TABLE),
+            PARQUET_LEGACY_ROWS_INNERDICT_TABLE: _row_count(
+                after, PARQUET_LEGACY_ROWS_INNERDICT_TABLE
+            ),
         }
     finally:
         after.close()
     assert before_counts == after_counts == {
         OUTERDICT_STUB_TABLE: baseline_counts["outerdict_rows"],
         XLSX_INNERDICT_TABLE: baseline_counts["xlsx_innerdict_rows"],
-        PARQUET_INNERDICT_TABLE: baseline_counts["ssn_innerdict_rows"],
+        PARQUET_LEGACY_ROWS_INNERDICT_TABLE: baseline_counts["ssn_innerdict_rows"],
     }
 
 

@@ -148,8 +148,8 @@ def _base_config_dict(tmp_path: Path) -> dict[str, object]:
         "desc": "HCR XLSX 2024",
     }
 
-    docx_dir = data_dir / "docx"
-    docx_dir.mkdir(parents=True, exist_ok=True)
+    # docx_dir = data_dir / "docx"
+    # docx_dir.mkdir(parents=True, exist_ok=True)
 
     reference_doc = data_dir / "reference.docx"
     reference_doc.write_text("stub", encoding="utf-8")
@@ -161,7 +161,7 @@ def _base_config_dict(tmp_path: Path) -> dict[str, object]:
         "output_dir": str(data_dir / "output"),
         "output_format": "txt",
         "pandoc_reference_docx": str(reference_doc),
-        "docx_dir": str(docx_dir),
+        # "docx_dir": str(docx_dir),
         "timezone": "America/Toronto",
         "sample_seed": 42,
         "sample_draw_sizes": [20] + [40] * 7,
@@ -632,7 +632,7 @@ def _resource_paths_from_config(config_path: Path) -> list[Path]:
     for item in files_config.values():
         if isinstance(item, dict) and "path" in item:
             paths.append(Path(str(item["path"])))
-    paths.append(Path(str(cfg.get("docx_dir", ""))))
+    # paths.append(Path(str(cfg.get("docx_dir", ""))))
     return [p for p in paths if str(p)]
 
 

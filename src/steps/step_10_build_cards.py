@@ -19,6 +19,7 @@ from ..helpers.duckdb_utils import (
     register_frame,
 )
 from ..helpers.schema import (
+    CARD_PARTITION_REVIEW_ROWS_TABLE,
     CARD_PARTITION_REVIEW_VIEW,
     CARD_PARTITION_TABLE,
     DOCX_OUTPUT_VIEW,
@@ -51,6 +52,7 @@ from ..helpers.vars import (
     KTP_HCR_PRIMARY_AFFILIATIONS_COL,
     KTP_HCR_SECONDARY_AFFILIATIONS_COL,
     KTP_LAST_NAME_COL,
+    KTP_NAMEKEY_COL,
     KTP_PARTITION_COL,
     KTP_PARTITION_DOCX_VALUE,
     KTP_PARTITION_FLAG_DOCX_ANY_COL,
@@ -61,7 +63,6 @@ from ..helpers.vars import (
     KTP_PARTITION_NO_RESOLUTION_VALUE,
     KTP_PARTITION_SSN_VALUE,
     KTP_PARTITION_XLSX_VALUE,
-    KTP_SOURCE_KEY_COL,
     KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
     KTP_SSN_SUM_HIT_1PCT_COL,
     KTP_SSN_TOP_INSTITUTIONS_COL,
@@ -79,11 +80,11 @@ from ..helpers.vars import (
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_LAST_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY,
     KTP_XLSX_MATCH_RULE_KEY,
     KTP_XLSX_MATCH_RULE_V1,
     KTP_XLSX_MATCH_RULE_V2,
-    KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
     SSNAD_CITED_BY_COUNT_COL,
     SSNAD_DISPLAY_NAME_ALTERNATIVES_COL,
     SSNAD_DISPLAY_NAME_COL,
@@ -94,6 +95,9 @@ from ..helpers.vars import (
 from .shared import draw_sort_ctes_sql, draw_sort_order_by_sql
 
 CARD_PARTITION_FRAME_TABLE = "card_partition_frame"
+XLSX_REVIEW_SOURCE_TABLE = "card_partition_review_xlsx_source"
+SCISCINET_REVIEW_SOURCE_TABLE = "card_partition_review_sciscinet_source"
+DOCX_REVIEW_SOURCE_TABLE = "card_partition_review_docx_source"
 REVIEW_DOMAIN_XLSX = "xlsx"
 REVIEW_DOMAIN_SCISCINET = "sciscinet"
 REVIEW_DOMAIN_DOCX = "docx"
@@ -198,8 +202,8 @@ def _is_exact_xlsx_match_payload(value: object) -> bool:
         return False
     if not isinstance(payload, dict):
         return False
-    source_key_tokens = payload.get(KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY, [])
-    source_key_last = payload.get(KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY)
+    source_key_tokens = payload.get(KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY, [])
+    source_key_last = payload.get(KTP_XLSX_MATCH_NAMEKEY_LAST_KEY)
     first_tokens = payload.get(KTP_XLSX_MATCH_FIRST_TOKENS_KEY, [])
     last_name_norm = payload.get(KTP_XLSX_MATCH_LAST_NAME_NORM_KEY)
     if not isinstance(source_key_tokens, list):
@@ -483,7 +487,7 @@ def _partition_rows_df(
     states = [state_by_source_key[name_key.to_json_key()] for name_key, _ in selected_items]
     states.sort(key=_partition_sort_key)
     columns = [
-        KTP_SOURCE_KEY_COL,
+        KTP_NAMEKEY_COL,
         KTP_PARTITION_COL,
         KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
         KTP_PARTITION_FLAG_XLSX_ANY_COL,
@@ -497,7 +501,7 @@ def _partition_rows_df(
     ]
     records = [
         {
-            KTP_SOURCE_KEY_COL: state.source_key,
+            KTP_NAMEKEY_COL: state.source_key,
             KTP_PARTITION_COL: _partition_value(state),
             KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: state.xlsx_non_exact_any,
             KTP_PARTITION_FLAG_XLSX_ANY_COL: state.xlsx_any,
@@ -526,6 +530,33 @@ def _materialize_partition_table(
     conn.execute(f"DROP TABLE IF EXISTS {CARD_PARTITION_FRAME_TABLE}")
 
 
+def _materialize_partition_review_source_table(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    source_view: str,
+    table_name: str,
+) -> None:
+    source_key = duckdb_quote_identifier(KTP_NAMEKEY_COL)
+    conn.execute(
+        f"""
+        CREATE OR REPLACE TEMP TABLE {table_name} AS
+        SELECT source.*
+        FROM {source_view} source
+        JOIN {CARD_PARTITION_TABLE} cp
+          ON source.{source_key} = cp.{source_key}
+        """
+    )
+
+
+def _drop_partition_review_source_tables(conn: duckdb.DuckDBPyConnection) -> None:
+    for table_name in (
+        XLSX_REVIEW_SOURCE_TABLE,
+        SCISCINET_REVIEW_SOURCE_TABLE,
+        DOCX_REVIEW_SOURCE_TABLE,
+    ):
+        conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
 def _relation_columns(conn: duckdb.DuckDBPyConnection, relation_name: str) -> list[str]:
     try:
         return [row[0] for row in conn.execute(f"DESCRIBE {relation_name}").fetchall()]
@@ -545,15 +576,15 @@ def _required_docx_table1_columns(docx_columns: list[str]) -> list[str]:
 
 def _review_columns(docx_columns: list[str]) -> list[str]:
     return [
-        KTP_SOURCE_KEY_COL,
+        KTP_NAMEKEY_COL,
         KTP_PARTITION_COL,
         KTP_FILENAME_COL,
         KTP_FRAGMENT_COL,
         KTP_FRAGMENT_TYPE_COL,
+        DRAW_LABEL,
         KTP_FF_AUTHOR_ID_COL,
         KTP_FF_DISCARD_COL,
         KTP_FF_NOTE_COL,
-        DRAW_LABEL,
         KTP_FIRST_NAME_COL,
         KTP_LAST_NAME_COL,
         SSNAD_DISPLAY_NAME_COL,
@@ -681,7 +712,7 @@ def _review_source_expr(
     domain_columns: dict[str, set[str]],
     col: str,
 ) -> str:
-    if col == KTP_SOURCE_KEY_COL:
+    if col == KTP_NAMEKEY_COL:
         return _qualified("cp", col)
     if col == KTP_PARTITION_COL:
         return _qualified("cp", col)
@@ -827,7 +858,7 @@ def _review_context_cte_sql(
     if not specs:
         return f"""
         {cte_name} AS (
-            SELECT DISTINCT {duckdb_quote_identifier(KTP_SOURCE_KEY_COL)}
+            SELECT DISTINCT {duckdb_quote_identifier(KTP_NAMEKEY_COL)}
             FROM {source_view}
         )
         """
@@ -848,8 +879,8 @@ def _review_context_cte_sql(
         for col, values_col in values_cols.items()
     )
     source_key_select = (
-        f"{_qualified(source_alias, KTP_SOURCE_KEY_COL)} "
-        f"AS {duckdb_quote_identifier(KTP_SOURCE_KEY_COL)}"
+        f"{_qualified(source_alias, KTP_NAMEKEY_COL)} "
+        f"AS {duckdb_quote_identifier(KTP_NAMEKEY_COL)}"
     )
     return f"""
         {values_cte_name} AS (
@@ -857,11 +888,11 @@ def _review_context_cte_sql(
                 {source_key_select},
                 {values_select}
             FROM {source_view} {source_alias}
-            GROUP BY {_qualified(source_alias, KTP_SOURCE_KEY_COL)}
+            GROUP BY {_qualified(source_alias, KTP_NAMEKEY_COL)}
         ),
         {cte_name} AS (
             SELECT
-                {duckdb_quote_identifier(KTP_SOURCE_KEY_COL)},
+                {duckdb_quote_identifier(KTP_NAMEKEY_COL)},
                 {context_select}
             FROM {values_cte_name}
         )
@@ -874,14 +905,14 @@ def _context_joins_sql() -> str:
     docx_alias = REVIEW_CONTEXT_ALIASES[REVIEW_DOMAIN_DOCX]
     return f"""
             LEFT JOIN {XLSX_CONTEXT_CTE} {xlsx_alias}
-              ON {_qualified(xlsx_alias, KTP_SOURCE_KEY_COL)} =
-                 {_qualified('cp', KTP_SOURCE_KEY_COL)}
+              ON {_qualified(xlsx_alias, KTP_NAMEKEY_COL)} =
+                 {_qualified('cp', KTP_NAMEKEY_COL)}
             LEFT JOIN {SCISCINET_CONTEXT_CTE} {sciscinet_alias}
-              ON {_qualified(sciscinet_alias, KTP_SOURCE_KEY_COL)} =
-                 {_qualified('cp', KTP_SOURCE_KEY_COL)}
+              ON {_qualified(sciscinet_alias, KTP_NAMEKEY_COL)} =
+                 {_qualified('cp', KTP_NAMEKEY_COL)}
             LEFT JOIN {DOCX_CONTEXT_CTE} {docx_alias}
-              ON {_qualified(docx_alias, KTP_SOURCE_KEY_COL)} =
-                 {_qualified('cp', KTP_SOURCE_KEY_COL)}
+              ON {_qualified(docx_alias, KTP_NAMEKEY_COL)} =
+                 {_qualified('cp', KTP_NAMEKEY_COL)}
     """
 
 
@@ -901,8 +932,8 @@ def _review_branch_sql(
         domain_columns=domain_columns,
     )
     source_key_join = (
-        f"{_qualified(source_alias, KTP_SOURCE_KEY_COL)} = "
-        f"{_qualified('cp', KTP_SOURCE_KEY_COL)}"
+        f"{_qualified(source_alias, KTP_NAMEKEY_COL)} = "
+        f"{_qualified('cp', KTP_NAMEKEY_COL)}"
     )
     return f"""
             SELECT
@@ -925,8 +956,8 @@ def _review_placeholder_branch_sql(
     partition_value: int,
 ) -> str:
     source_key_join = (
-        f"{_qualified(source_alias, KTP_SOURCE_KEY_COL)} = "
-        f"{_qualified('cp', KTP_SOURCE_KEY_COL)}"
+        f"{_qualified(source_alias, KTP_NAMEKEY_COL)} = "
+        f"{_qualified('cp', KTP_NAMEKEY_COL)}"
     )
     return f"""
             SELECT
@@ -972,6 +1003,21 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
     sciscinet_columns = set(_relation_columns(conn, PARQUET_OUTPUT_VIEW))
     docx_column_list = _relation_columns(conn, DOCX_OUTPUT_VIEW)
     docx_columns = set(docx_column_list)
+    _materialize_partition_review_source_table(
+        conn,
+        source_view=XLSX_OUTPUT_VIEW,
+        table_name=XLSX_REVIEW_SOURCE_TABLE,
+    )
+    _materialize_partition_review_source_table(
+        conn,
+        source_view=PARQUET_OUTPUT_VIEW,
+        table_name=SCISCINET_REVIEW_SOURCE_TABLE,
+    )
+    _materialize_partition_review_source_table(
+        conn,
+        source_view=DOCX_OUTPUT_VIEW,
+        table_name=DOCX_REVIEW_SOURCE_TABLE,
+    )
     domain_columns = {
         REVIEW_DOMAIN_XLSX: xlsx_columns,
         REVIEW_DOMAIN_SCISCINET: sciscinet_columns,
@@ -981,7 +1027,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
     branches = [
         _review_branch_sql(
             columns=columns,
-            source_view=XLSX_OUTPUT_VIEW,
+            source_view=XLSX_REVIEW_SOURCE_TABLE,
             source_alias="x",
             source_domain=REVIEW_DOMAIN_XLSX,
             domain_columns=domain_columns,
@@ -989,7 +1035,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         ),
         _review_placeholder_branch_sql(
             columns=columns,
-            source_view=XLSX_OUTPUT_VIEW,
+            source_view=XLSX_REVIEW_SOURCE_TABLE,
             source_alias="x",
             source_domain=REVIEW_DOMAIN_XLSX,
             domain_columns=domain_columns,
@@ -997,7 +1043,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         ),
         _review_branch_sql(
             columns=columns,
-            source_view=PARQUET_OUTPUT_VIEW,
+            source_view=SCISCINET_REVIEW_SOURCE_TABLE,
             source_alias="s",
             source_domain=REVIEW_DOMAIN_SCISCINET,
             domain_columns=domain_columns,
@@ -1005,7 +1051,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         ),
         _review_placeholder_branch_sql(
             columns=columns,
-            source_view=PARQUET_OUTPUT_VIEW,
+            source_view=SCISCINET_REVIEW_SOURCE_TABLE,
             source_alias="s",
             source_domain=REVIEW_DOMAIN_SCISCINET,
             domain_columns=domain_columns,
@@ -1013,7 +1059,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         ),
         _review_branch_sql(
             columns=columns,
-            source_view=DOCX_OUTPUT_VIEW,
+            source_view=DOCX_REVIEW_SOURCE_TABLE,
             source_alias="d",
             source_domain=REVIEW_DOMAIN_DOCX,
             domain_columns=domain_columns,
@@ -1021,7 +1067,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         ),
         _review_placeholder_branch_sql(
             columns=columns,
-            source_view=DOCX_OUTPUT_VIEW,
+            source_view=DOCX_REVIEW_SOURCE_TABLE,
             source_alias="d",
             source_domain=REVIEW_DOMAIN_DOCX,
             domain_columns=domain_columns,
@@ -1037,11 +1083,11 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
     select_columns = ",\n            ".join(duckdb_quote_identifier(col) for col in columns)
     conn.execute(
         f"""
-        CREATE OR REPLACE VIEW {CARD_PARTITION_REVIEW_VIEW} AS
+        CREATE OR REPLACE TABLE {CARD_PARTITION_REVIEW_ROWS_TABLE} AS
         WITH
         {_review_context_cte_sql(
             cte_name=XLSX_CONTEXT_CTE,
-            source_view=XLSX_OUTPUT_VIEW,
+            source_view=XLSX_REVIEW_SOURCE_TABLE,
             source_alias='x_context_source',
             source_domain=REVIEW_DOMAIN_XLSX,
             source_columns=xlsx_columns,
@@ -1049,7 +1095,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         )},
         {_review_context_cte_sql(
             cte_name=SCISCINET_CONTEXT_CTE,
-            source_view=PARQUET_OUTPUT_VIEW,
+            source_view=SCISCINET_REVIEW_SOURCE_TABLE,
             source_alias='s_context_source',
             source_domain=REVIEW_DOMAIN_SCISCINET,
             source_columns=sciscinet_columns,
@@ -1057,7 +1103,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         )},
         {_review_context_cte_sql(
             cte_name=DOCX_CONTEXT_CTE,
-            source_view=DOCX_OUTPUT_VIEW,
+            source_view=DOCX_REVIEW_SOURCE_TABLE,
             source_alias='d_context_source',
             source_domain=REVIEW_DOMAIN_DOCX,
             source_columns=docx_columns,
@@ -1066,10 +1112,17 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         base AS (
             {union_sql}
         ),
-        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
+        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_NAMEKEY_COL)}
+        SELECT *
+        FROM ranked
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE OR REPLACE VIEW {CARD_PARTITION_REVIEW_VIEW} AS
         SELECT
             {select_columns}
-        FROM ranked
+        FROM {CARD_PARTITION_REVIEW_ROWS_TABLE}
         ORDER BY
             CASE "{KTP_PARTITION_COL}"
                 WHEN {KTP_PARTITION_XLSX_VALUE} THEN 0
@@ -1092,12 +1145,13 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
                 ELSE 0
             END,
             {draw_sort_order_by_sql(
-                source_key_col=KTP_SOURCE_KEY_COL,
+                source_key_col=KTP_NAMEKEY_COL,
                 filename_col=KTP_FILENAME_COL,
                 fragment_col=KTP_FRAGMENT_COL,
             )}
         """
     )
+    _drop_partition_review_source_tables(conn)
     return columns
 
 
@@ -1221,7 +1275,7 @@ def run(context: PipelineContext) -> StepResult:
 
     excluded_cols = {
         KTP_FILENAME_COL,
-        KTP_SOURCE_KEY_COL,
+        KTP_NAMEKEY_COL,
         CSV_ROW_INDEX_COL,
         DOCX_TABLE_INDEX_COL,
         DOCX_ROW_INDEX_COL,

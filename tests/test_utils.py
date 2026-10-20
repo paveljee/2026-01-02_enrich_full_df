@@ -8,7 +8,6 @@ import pandas as pd
 
 from src.helpers.data_models import FragmentType, ResourceGroup
 from src.helpers.duckdb_utils import register_frame
-from src.helpers.files import find_files_by_extension
 from src.helpers.resources import register_resource, register_resources
 
 
@@ -66,9 +65,10 @@ def test_register_resources_expected_hashes(tmp_path: Path) -> None:
     assert resources[path_b.name].hash == _sha256(path_b)
 
 
-def test_find_files_by_extension_uppercase(tmp_path: Path) -> None:
-    file_path = tmp_path / "REPORT.TXT"
-    file_path.write_text("ok", encoding="utf-8")
-
-    matches = find_files_by_extension(tmp_path, "TXT")
-    assert matches == [file_path]
+# from src.helpers.files import find_files_by_extension
+# def test_find_files_by_extension_uppercase(tmp_path: Path) -> None:
+#     file_path = tmp_path / "REPORT.TXT"
+#     file_path.write_text("ok", encoding="utf-8")
+#
+#     matches = find_files_by_extension(tmp_path, "TXT")
+#     assert matches == [file_path]

@@ -18,13 +18,17 @@ class XlsxMatchSql:
     match_path_priority_expr: str = ""
 
 
-def xlsx_v2_tokens_sql(expr: str) -> str:
+def normalized_tokens_sql(expr: str) -> str:
     normalized = (
         f"regexp_replace(lower(unaccent(COALESCE({expr}, ''))), "
         "'[[:punct:][:space:]]+', ' ', 'g')"
     )
     split = f"regexp_split_to_array(trim({normalized}), '\\s+')"
     return f"list_filter(list_transform({split}, token -> trim(token)), token -> token <> '')"
+
+
+def xlsx_v2_tokens_sql(expr: str) -> str:
+    return normalized_tokens_sql(expr)
 
 
 def xlsx_clean_tokens_sql(tokens_expr: str) -> str:

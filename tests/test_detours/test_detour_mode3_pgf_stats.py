@@ -21,17 +21,22 @@ from src.detours.detour_mode3_pgf_stats import (
 )
 from src.helpers.config import PipelineConfig
 from src.helpers.jsonlines import dumps_jsonlines
-from src.helpers.schema import OUTERDICT_STUB_TABLE, PARQUET_INNERDICT_TABLE, XLSX_INNERDICT_TABLE
+from src.helpers.schema import (
+    OUTERDICT_STUB_TABLE,
+    PARQUET_LEGACY_ROWS_INNERDICT_TABLE,
+    XLSX_INNERDICT_TABLE,
+)
 from src.helpers.vars import (
     HCR_XLSX_KEY_PREFIX,
     KTP_FILENAME_COL,
     KTP_FRAGMENT_COL,
-    KTP_SOURCE_KEY_COL,
+    KTP_INNERDICT_JSONLINES_COL,
+    KTP_NAMEKEY_COL,
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_LAST_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY,
     REQUIRED_FILES_CONFIG_KEYS,
 )
 
@@ -49,8 +54,8 @@ def _name_key(first: str, last: str) -> str:
 def _exact_xlsx_payload(first_tokens: list[str], last_norm: str) -> str:
     return json.dumps(
         {
-            KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: first_tokens,
-            KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: last_norm,
+            KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY: first_tokens,
+            KTP_XLSX_MATCH_NAMEKEY_LAST_KEY: last_norm,
             KTP_XLSX_MATCH_FIRST_TOKENS_KEY: first_tokens,
             KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: last_norm,
         },
@@ -63,8 +68,8 @@ def _non_exact_xlsx_payload(
 ) -> str:
     return json.dumps(
         {
-            KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: source_tokens,
-            KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: last_norm,
+            KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY: source_tokens,
+            KTP_XLSX_MATCH_NAMEKEY_LAST_KEY: last_norm,
             KTP_XLSX_MATCH_FIRST_TOKENS_KEY: first_tokens,
             KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: last_norm,
         },
@@ -92,7 +97,7 @@ def _minimal_config_dict(db_path: Path) -> dict[str, object]:
         "output_dir": str(db_path.parent / "output"),
         "output_format": "txt",
         "pandoc_reference_docx": str(db_path.parent / "reference.docx"),
-        "docx_dir": str(db_path.parent / "docx"),
+        # "docx_dir": str(db_path.parent / "docx"),
         "timezone": "UTC",
         "sample_seed": 42,
         "sample_draw_sizes": [1],
@@ -111,23 +116,23 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
         con.execute(
             f"""
             CREATE TABLE {OUTERDICT_STUB_TABLE} (
-                name_key VARCHAR,
-                innerdicts VARCHAR
+                "{KTP_NAMEKEY_COL}" VARCHAR,
+                "{KTP_INNERDICT_JSONLINES_COL}" VARCHAR
             )
             """
         )
         con.execute(
             f"""
             CREATE TABLE {XLSX_INNERDICT_TABLE} (
-                name_key VARCHAR,
-                innerdicts VARCHAR
+                "{KTP_NAMEKEY_COL}" VARCHAR,
+                "{KTP_INNERDICT_JSONLINES_COL}" VARCHAR
             )
             """
         )
         con.execute(
             f"""
-            CREATE TABLE {PARQUET_INNERDICT_TABLE} (
-                "{KTP_SOURCE_KEY_COL}" VARCHAR,
+            CREATE TABLE {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} (
+                "{KTP_NAMEKEY_COL}" VARCHAR,
                 "ssnau.p_gf" DOUBLE,
                 "ssnau.inference_counts" BIGINT,
                 "ssnau.inference_sources" BIGINT
@@ -261,8 +266,8 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
         ]
         con.executemany(
             (
-                f'INSERT INTO {PARQUET_INNERDICT_TABLE} '
-                f'("{KTP_SOURCE_KEY_COL}", "ssnau.p_gf", '
+                f'INSERT INTO {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} '
+                f'("{KTP_NAMEKEY_COL}", "ssnau.p_gf", '
                 f'"ssnau.inference_counts", "ssnau.inference_sources") '
                 f"VALUES (?, ?, ?, ?)"
             ),
@@ -310,7 +315,9 @@ def test_detour_contract_and_mode3_stats_readonly(
         before_counts = {
             OUTERDICT_STUB_TABLE: _row_count(before, OUTERDICT_STUB_TABLE),
             XLSX_INNERDICT_TABLE: _row_count(before, XLSX_INNERDICT_TABLE),
-            PARQUET_INNERDICT_TABLE: _row_count(before, PARQUET_INNERDICT_TABLE),
+            PARQUET_LEGACY_ROWS_INNERDICT_TABLE: _row_count(
+                before, PARQUET_LEGACY_ROWS_INNERDICT_TABLE
+            ),
         }
     finally:
         before.close()
@@ -334,7 +341,7 @@ def test_detour_contract_and_mode3_stats_readonly(
     assert md["tables_used"] == [
         OUTERDICT_STUB_TABLE,
         XLSX_INNERDICT_TABLE,
-        PARQUET_INNERDICT_TABLE,
+        PARQUET_LEGACY_ROWS_INNERDICT_TABLE,
     ]
     methodology = md["methodology_notice"]
     assert "full normalized string first" in methodology["nomquamgender_name_handling"]
@@ -422,14 +429,16 @@ def test_detour_contract_and_mode3_stats_readonly(
         after_counts = {
             OUTERDICT_STUB_TABLE: _row_count(after, OUTERDICT_STUB_TABLE),
             XLSX_INNERDICT_TABLE: _row_count(after, XLSX_INNERDICT_TABLE),
-            PARQUET_INNERDICT_TABLE: _row_count(after, PARQUET_INNERDICT_TABLE),
+            PARQUET_LEGACY_ROWS_INNERDICT_TABLE: _row_count(
+                after, PARQUET_LEGACY_ROWS_INNERDICT_TABLE
+            ),
         }
     finally:
         after.close()
     assert before_counts == after_counts == {
         OUTERDICT_STUB_TABLE: baseline_counts["outerdict_rows"],
         XLSX_INNERDICT_TABLE: baseline_counts["xlsx_innerdict_rows"],
-        PARQUET_INNERDICT_TABLE: baseline_counts["ssn_innerdict_rows"],
+        PARQUET_LEGACY_ROWS_INNERDICT_TABLE: baseline_counts["ssn_innerdict_rows"],
     }
 
 
