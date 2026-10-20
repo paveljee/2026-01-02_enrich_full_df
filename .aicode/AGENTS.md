@@ -40,6 +40,9 @@ a substitute for current user instructions.
 
 ## Working agreements learned here
 
+- Never say "you're right" or use agreement filler. Apologize directly when
+  warranted; otherwise respond without filler.
+- Never introduce compatibility aliases, fallback paths, or legacy workarounds.
 - Make surgical edits within the requested scope. Reuse existing production
   helpers and local step logic rather than inventing abstractions or making
   unrelated refactors. Preserve established data flow and serialization.

@@ -623,6 +623,7 @@ TEST_STANDARDIZED_VALUES = {
         "openalex_id": "NR",
     },
     KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL: {
+        "type": "private_residence",
         "place": "NR",
         "location": "NR",
     },

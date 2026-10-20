@@ -84,7 +84,6 @@ def run_reproduction(args: argparse.Namespace) -> Path | None:
 
     context.log = log
 
-
     try:
         if interactive:
             print_history()
