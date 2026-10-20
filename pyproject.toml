@@ -691,3 +691,14 @@ print(f"Exported {input_path!r} to {str(output_path)!r}")
 ' "{{ input_path }}" "{{ output_path }}" "{{ config_path }}"
 """
 cwd = "."
+
+# Set OPENALEX_API_KEY if you need it:
+# ~~~
+# OPENALEX_API_KEY="$(pixi run python -c '
+# import os
+# from dotenv import dotenv_values
+
+# env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
+# print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
+# ')"
+# ~~~
