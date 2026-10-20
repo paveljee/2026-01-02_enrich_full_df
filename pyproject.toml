@@ -104,6 +104,7 @@ platforms = ["osx-arm64", "linux-aarch64", "linux-64"]
 python = "==3.14.2"
 duckdb = "==1.5.1"
 pandoc = "==3.7.0.2"
+bun = "==1.4.2"
 
 # ======================
 # Default: Generic tasks
@@ -230,6 +231,22 @@ print(f"Parsed DOCX and saved the result to {output.name!r}")
 ' "{{ docx_path }}"
 """
 cwd = "."
+
+[tool.pixi.tasks.diff2html]
+args = [
+  { arg = "old_file_path" },
+  { arg = "new_file_path" },
+  { arg = "html_diff_path" },
+]
+cmd = """
+bun install --frozen-lockfile --silent && diff -u -- "{{ old_file_path }}" "{{ new_file_path }}" | bunx --bun diff2html-cli -i stdin -s line -d char --lm words -F "{{ html_diff_path }}" && python -c '
+from pathlib import Path
+from sys import argv
+out = Path(argv[1])
+s = out.read_text(encoding="utf-8")
+out.write_text(s.replace("</head>", "<style>.d2h-code-line-ctn{white-space:pre-wrap!important;overflow-wrap:anywhere!important}.d2h-code-line{white-space:normal!important}</style></head>"), encoding="utf-8")
+print(f"Produced diff and rendered with diff2html-cli to {str(out)!r}")
+' "{{ html_diff_path }}"
 """
 cwd = "."
 
