@@ -102,8 +102,8 @@ def _config_dict(tmp_path: Path, *, ssn_name_rule_version: int = 2) -> dict[str,
         "desc": "fixture hcr",
     }
 
-    docx_dir = data_dir / "docx"
-    docx_dir.mkdir()
+    # docx_dir = data_dir / "docx"
+    # docx_dir.mkdir()
     reference_docx = data_dir / "reference.docx"
     reference_docx.write_text("reference", encoding="utf-8")
 
@@ -114,7 +114,7 @@ def _config_dict(tmp_path: Path, *, ssn_name_rule_version: int = 2) -> dict[str,
         "output_dir": str(tmp_path / "output"),
         "output_format": "txt",
         "pandoc_reference_docx": str(reference_docx),
-        "docx_dir": str(docx_dir),
+        # "docx_dir": str(docx_dir),
         "timezone": "UTC",
         "sample_seed": 1,
         "sample_draw_sizes": [1],

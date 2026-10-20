@@ -9,7 +9,10 @@ import duckdb
 from .config import PipelineConfig
 from .data_models import FragmentType, RegisteredResource, ResourceGroup
 from .duckdb_utils import duckdb_string_literal
-from .files import file_sha256, find_files_by_extension
+from .files import (
+    file_sha256,
+    # find_files_by_extension,
+)
 from .name_matching import sciscinet_author_alt_name_key_exprs_sql
 from .openalex import (
     validate_openalex_paper_title_read_model,
@@ -20,6 +23,7 @@ from .vars import (
     HCR_XLSX_KEY_PREFIX,
     KTP_ALT_NAME_COL,
     KTP_AUTHOR_DETAILS_UNNEST_KEY,
+    MANUAL_EXTRACTIONS_DOCX_KEY_PREFIX,
     OPENALEX_AUTHOR_SEARCH_LOG_KEY,
     OPENALEX_PAPER_TITLE_LOG_KEY,
     OPENALEX_PAPER_TITLE_PARQUET_FILENAME,
@@ -86,11 +90,24 @@ def register_resources(
     return resources
 
 
-def discover_docx_files(docx_dir: Path) -> list[Path]:
+# def discover_docx_files(docx_dir: Path) -> list[Path]:
+#     return sorted(
+#         path
+#         for path in find_files_by_extension(docx_dir, "docx", recursive=False)
+#         if not path.name.startswith("~$")
+#     )
+
+
+def configured_docx_entries(config: PipelineConfig) -> list[tuple[str, dict[str, str]]]:
     return sorted(
-        path
-        for path in find_files_by_extension(docx_dir, "docx", recursive=False)
-        if not path.name.startswith("~$")
+        (
+            (key, meta)
+            for key, meta in config.files_config.items()
+            if Path(meta["path"]).suffix.lower() == ".docx"
+            and not Path(meta["path"]).name.startswith("~$")
+            and key.startswith(MANUAL_EXTRACTIONS_DOCX_KEY_PREFIX)
+        ),
+        key=lambda item: item[0],
     )
 
 
@@ -543,13 +560,23 @@ def register_pipeline_resources(
         description=world_bank_meta.get("desc", "World Bank country list"),
         expected_hash=world_bank_meta.get("sha256"),
     )
-    docx_files = discover_docx_files(config.docx_dir)
-    docx_resources = register_resources(
-        docx_files,
-        group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
-        fragment_type=FragmentType.DOCX_ROW,
-        description="KTP DOCX inputs",
-    )
+    # docx_files = discover_docx_files(config.docx_dir)
+    # docx_resources = register_resources(
+    #     docx_files,
+    #     group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
+    #     fragment_type=FragmentType.DOCX_ROW,
+    #     description="KTP DOCX inputs",
+    # )
+    docx_resources = {
+        Path(meta["path"]).name: register_resource(
+            Path(meta["path"]),
+            group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
+            fragment_type=FragmentType.DOCX_ROW,
+            description=meta["desc"],
+            expected_hash=meta["sha256"],
+        )
+        for _, meta in configured_docx_entries(config)
+    }
     author_details_unnest_resource, messages = _ensure_author_details_unnest_resource(
         config,
         conn=conn,
@@ -595,7 +622,8 @@ __all__ = [
     "PipelineResources",
     "configured_hcr_xlsx_entries",
     "configured_hcr_xlsx_paths",
-    "discover_docx_files",
+    # "discover_docx_files",
+    "configured_docx_entries",
     "register_pipeline_resources",
     "register_resource",
     "register_resources",

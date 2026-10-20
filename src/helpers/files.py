@@ -16,11 +16,17 @@ def file_sha256(path: Path) -> str:
     return file_hash(path, algorithm="sha256")
 
 
-def find_files_by_extension(directory: Path, extension: str, recursive: bool = False) -> list[Path]:
-    pattern = f"*.{extension}"
-    if recursive:
-        return list(directory.rglob(pattern))
-    return list(directory.glob(pattern))
+# def find_files_by_extension(
+#     directory: Path, extension: str, recursive: bool = False
+# ) -> list[Path]:
+#     pattern = f"*.{extension}"
+#     if recursive:
+#         return list(directory.rglob(pattern))
+#     return list(directory.glob(pattern))
 
 
-__all__ = ["file_hash", "file_sha256", "find_files_by_extension"]
+__all__ = [
+    "file_hash",
+    "file_sha256",
+    # "find_files_by_extension",
+]

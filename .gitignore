@@ -7,6 +7,7 @@ embargoed/
 .tmp
 .nicegui
 logs/
+node_modules
 
 # pixi environments
 .pixi/*
