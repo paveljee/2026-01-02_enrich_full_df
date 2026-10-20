@@ -299,7 +299,7 @@ args = [
   { arg = "html_diff_path" },
 ]
 cmd = """
-bun install --frozen-lockfile --silent && diff -u -- "{{ old_file_path }}" "{{ new_file_path }}" | bunx --bun diff2html-cli -i stdin -s line -d char --lm words -F "{{ html_diff_path }}" && python -c '
+bun install --frozen-lockfile --silent && diff -U 999999 -- "{{ old_file_path }}" "{{ new_file_path }}" | bunx --bun diff2html-cli -i stdin -s line -d char --lm words -F "{{ html_diff_path }}" && python -c '
 from pathlib import Path
 from sys import argv
 out = Path(argv[1])
