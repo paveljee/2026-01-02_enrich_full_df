@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -9,13 +9,12 @@ from src.detours.detour_ai_augment.protected.src.architecture import ControlCent
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,  # noqa: E501
 )
+from src.detours.detour_ai_augment.protected.src.shared import utc_datetime_from_unix_usec
 from src.helpers.architecture import implements
 from src.helpers.data_models import NameKey
 
 from .lifecycle import RunLifecycle
 from .run_outcome_event import RunOutcomeResponseRecord
-
-MICROSECONDS_PER_SECOND = 1_000_000
 
 
 @implements[ControlCentreComponent.RunEventProperty]()
@@ -29,10 +28,7 @@ class RunEvent(BaseModel):
 
     @property
     def occurred_at(self) -> datetime:
-        return datetime.fromtimestamp(
-            self.occurred_at_unix_usec / MICROSECONDS_PER_SECOND,
-            tz=timezone.utc,
-        )
+        return utc_datetime_from_unix_usec(self.occurred_at_unix_usec)
 
     @staticmethod
     def datetime_to_unix_usec(value: datetime) -> int:

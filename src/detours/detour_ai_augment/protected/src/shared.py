@@ -1,5 +1,7 @@
 import re
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from uuid import UUID
 
 from pydantic import ValidationError
 
@@ -23,6 +25,8 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     APPENDWATCH_REMOVED_SECTION_HEADER_LINES,
     APPENDWATCH_ROOT_ENTRY,
     APPENDWATCH_TREE_START_INDEX,
+    MICROSECONDS_PER_SECOND,
+    MILLISECONDS_PER_SECOND,
     NAME_KEY_PATTERN,
     ROLLOUT_LINE_FRAGMENT_TYPE,
     SOURCE_KEY_PATTERN,
@@ -41,6 +45,16 @@ from src.helpers.vars import (
     KTP_FRAGMENT_COL,
     KTP_LAST_NAME_COL,
 )
+
+
+def utc_datetime_from_unix_usec(value: int) -> datetime:
+    return datetime.fromtimestamp(value / MICROSECONDS_PER_SECOND, tz=timezone.utc)
+
+
+def unix_usec_from_uuidv7(value: UUID) -> int:
+    if value.version != 7:
+        raise ValueError(Locale.UUID7_TIMESTAMP_REQUIRED)
+    return value.time * (MICROSECONDS_PER_SECOND // MILLISECONDS_PER_SECOND)
 
 
 def pydantic_diagnostic_json(error: ValidationError) -> str:

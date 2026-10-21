@@ -222,6 +222,7 @@ class Locale:
     RUN_OUTCOME_SELF_ID_INCONSISTENT: Final = 'Run-outcome response self ID is inconsistent'
     RUN_OUTCOME_VALIDATION_COMMIT_REQUIRED: Final = 'Run-outcome validation requires its commit ID'
     RUN_OUTCOME_REFERENCE_UUID_INVALID: Final = 'Run-outcome reference IDs must be UUIDv7'
+    UUID7_TIMESTAMP_REQUIRED: Final = "Timestamp extraction requires a UUIDv7"
 
     API_TITLE: Final = "Highly-Cited Researcher Annotation API"
     API_DESCRIPTION: Final = (
