@@ -15,7 +15,7 @@ from collections.abc import Callable, Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from importlib.metadata import version
 from io import StringIO
@@ -171,19 +171,18 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
     LOCATION_HEADER,
     MAP_SUBSET_0_TO_BATCH_KEY,
+    MICROSECONDS_PER_SECOND,
     NAME_KEY_HEADER,
     NAMEKEY_ENV_NAME,
     NANOSECONDS_PER_MICROSECOND,
     NOT_AVAILABLE_OR_APPLICABLE_VALUE,
     NOT_REPORTED_VALUE,
-    POST_COMMIT_VALIDATION_ACCEPTED_COL,
-    POST_COMMIT_VALIDATION_APPLIED_COL,
-    POST_COMMIT_VALIDATION_ASSESSMENT_COL,
     POST_COMMIT_VALIDATION_AUDIT_ID_COL,
     POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL,
-    POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE,
+    POST_COMMIT_VALIDATION_FIELD_AUDIT_COL,
+    POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE,
+    POST_COMMIT_VALIDATION_FIELD_COL,
     POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL,
-    POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE,
     PULL_PATH,
     PUSH_PATH,
     PYDANTIC_TO_PASTE_SOURCE,
@@ -367,6 +366,16 @@ EVIDENCE_WITHDRAWAL_REASON = get_args(
 TEST_ROLLOUT_GUEST_PATH = "/home/ai/.codex/sessions/2026/07/31/rollout-chat.jsonl"
 TEST_ROLLOUT_RELATIVE_PATH = PurePosixPath("2026/07/31/rollout-chat.jsonl")
 TEST_TIMEZONE = "America/Toronto"
+MATCH_V1_CONFIG_FACTS = post_commit_validation._CommitConfigFacts(
+    timezone_name=TEST_TIMEZONE,
+    sample_seed=17,
+    codex_match_version=1,
+)
+MATCH_V2_CONFIG_FACTS = post_commit_validation._CommitConfigFacts(
+    timezone_name=TEST_TIMEZONE,
+    sample_seed=17,
+    codex_match_version=2,
+)
 TEST_SESSION_ID = UUID("019d0000-0000-7000-8000-000000000001")
 TEST_SESSION_TIMESTAMP = "2026-07-31T16:10:36.000Z"
 TEST_ROLLOUT_FILENAME = f"rollout-2026-07-31T12-10-36-{TEST_SESSION_ID}.jsonl"
@@ -521,10 +530,9 @@ def evaluate_retry_submission_for_test(
     conn: duckdb.DuckDBPyConnection,
     *,
     original_pull_record_id: UUID,
-    namekey: NameKey,
+    init_request_record: BackendInitRequestRecord,
     session_id: UUID,
     synthetic_record_id_seed: str,
-    commit_request_timestamp: datetime,
     submission_payload: Submission | StandardizedSubmission,
     assessment: post_commit_validation._EvidenceAssessment,
 ) -> tuple[str, ...]:
@@ -534,57 +542,85 @@ def evaluate_retry_submission_for_test(
         synthetic_record_id_seed=synthetic_record_id_seed,
     )
     store = store_for_connection(conn)
-
-    def baseline_row() -> tuple[post_commit_validation._RetryBaselineRow | None, None]:
-        row = store._retry_baseline_row(original_pull.record_id)
-        return (None if row is None else post_commit_validation._RetryBaselineRow(
-            namekey_json=row[0],
-            session_id_text=row[1],
-            commit_record_id_text=row[2],
-            obligations_json=row[3],
-        )), None
-
-    def audit_rows(
-        baseline_commit_record_id: UUID,
-    ) -> tuple[tuple[post_commit_validation._AppliedRetryAuditRow, ...], None]:
-        return tuple(
-            post_commit_validation._AppliedRetryAuditRow(
-                submission_json=submission_json,
-                assessment_json=assessment_json,
-            )
-            for submission_json, assessment_json in store._applied_retry_audit_rows(
-                original_pull_record_id=original_pull.record_id,
-                baseline_commit_record_id=baseline_commit_record_id,
-            )
-        ), None
-
-    db_reads = post_commit_validation._DetourDbValidationReads(
-        retry_baseline_exists=lambda: (
-            store._retry_baseline_exists(
-                original_pull=original_pull,
-                namekey=namekey,
-                session_id=session_id,
-            ), None
-        ),
-        retry_baseline_row=baseline_row,
-        applied_retry_audit_rows=audit_rows,
-    )
-    violations, projection = post_commit_validation._evaluate_retry_submission(
-        commit_request_record=commit_request_record,
-        namekey=namekey,
-        submission_payload=submission_payload,
-        assessment=assessment,
-        db_reads=db_reads,
-    )
-    assert projection.commit_request_record is commit_request_record
-    store._project_retry_evidence(
+    previous = {
+        audit.submission_column: audit.state
+        for audit in store._field_audits(
+            commit_request_record,
+            original_pull_response_record=original_pull,
+            init_request_record=init_request_record,
+        )
+    }
+    audits = []
+    for column, field_submission in submission_payload.evidence_items():
+        field = post_commit_validation._EvidenceSubmissionColumn(column)
+        field_assessment = post_commit_validation._EvidenceAssessment(items=tuple(
+            item for item in assessment.items if item.field == column
+        ))
+        audits.append(post_commit_validation._transition_field(
+            field,
+            field_submission,
+            field_submission if isinstance(field_submission, StandardizedFieldSubmission)
+            else None,
+            previous.get(field, post_commit_validation._FieldPinState()),
+            assessment=field_assessment,
+            push_response_record=commit_request_record.commit_request_body.push_response_record,
+        ))
+    store._project_field_audits(
         commit_request_record,
-        projection,
+        tuple(audits),
         original_pull_response_record=original_pull,
-        namekey=namekey,
-        commit_request_timestamp=commit_request_timestamp,
     )
-    return violations
+    return tuple(
+        violation.message for audit in audits for violation in audit.violations
+    )
+
+
+def test_age_evidence_validation_uses_push_utc_date_and_logs_privately(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    age_field = L_FEI_FEI_RETRY_FIXTURE.submission.age_first_publication
+    age_value = age_field.standardized_value
+    assert isinstance(age_value, pydantic_to_paste.AgeFromBirth)
+    as_of = age_value.as_of
+    push_usec = int(
+        datetime(as_of.year, as_of.month, as_of.day, 23, 59, 59, tzinfo=timezone.utc)
+        .timestamp()
+    ) * MICROSECONDS_PER_SECOND
+    _, commit = retry_commit_records(
+        original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+        session_id=TEST_SESSION_ID,
+        synthetic_record_id_seed="age-evidence-push",
+    )
+    push = commit.commit_request_body.push_response_record.model_copy(update={
+        "ready_to_respond_at_unix_usec": push_usec + MICROSECONDS_PER_SECOND,
+        "duration_usec": MICROSECONDS_PER_SECOND,
+    })
+
+    assert not post_commit_validation._age_evidence_check_failed(
+        age_field, push_response_record=push,
+    )
+    with caplog.at_level(logging.WARNING):
+        assert post_commit_validation._age_evidence_check_failed(
+            age_field,
+            push_response_record=push.model_copy(update={
+                "ready_to_respond_at_unix_usec": (
+                    push.ready_to_respond_at_unix_usec + 2 * MICROSECONDS_PER_SECOND
+                ),
+            }),
+        )
+    assert "age evidence as_of mismatch" in caplog.text
+    assert str(push_usec + 2 * MICROSECONDS_PER_SECOND) in caplog.text
+
+    without_reported_year = age_field.model_copy(update={
+        "web_search_excerpts": [WebSearchExcerpt(excerpt="No date stated", url=TEST_URL)],
+    })
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert post_commit_validation._age_evidence_check_failed(
+            without_reported_year, push_response_record=push,
+        )
+    assert "reported='1976'" in caplog.text
+    assert "No date stated" in caplog.text
 
 
 HAANEN_REJECTED_CAPTURE_ID = "20260813T141344_678596Z_8ef1f6372b4a48d9a3b1279736356363"
@@ -623,8 +659,9 @@ TEST_STANDARDIZED_VALUES = {
         "openalex_id": "NR",
     },
     KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL: {
-        "place": "NR",
-        "location": "NR",
+        "type": "private_residence",
+        "place": "Scotland",
+        "location": "GBR",
     },
     KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL: {
         "race": "NA",
@@ -1889,6 +1926,16 @@ def assert_captured_operator_push_contour(
         OPERATOR_ACCEPTED_PUSH_FIXTURE,
     )
     accepted_push = read_json(accepted_push_path)
+    age_field = accepted_push[KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL]
+    assert isinstance(age_field, dict)
+    age_standardized = age_field[FIELD_STANDARDIZED_VALUE_FIELD]
+    assert isinstance(age_standardized, dict)
+    push_date = datetime.now(timezone.utc).date()
+    age_standardized["as_of"] = push_date.isoformat()
+    computed_age = age_standardized["age"]
+    assert isinstance(computed_age, dict)
+    computed_age["age_numeral"] = push_date.year - 1968
+    accepted_push_body = json.dumps(accepted_push, ensure_ascii=False).encode()
     accepted_values: dict[str, object] = {}
     for column in AI_AUGMENT_COLUMNS:
         field = accepted_push[column]
@@ -2024,7 +2071,7 @@ def assert_captured_operator_push_contour(
                 store,
                 HTTP_POST_METHOD,
                 PUSH_PATH,
-                read_bytes(accepted_push_path),
+                accepted_push_body,
             )
             gone_pull = await authoritative_api_exchange(
                 runtime,
@@ -2061,7 +2108,7 @@ def assert_captured_operator_push_contour(
         )
         assert len(pushes) == len(commits) == 2
         assert isinstance(pushes[-1].request_body, str)
-        assert pushes[-1].request_body == read_text(accepted_push_path)
+        assert pushes[-1].request_body == accepted_push_body.decode()
         assert commits[-1].request_body is not None
         accepted_commit_record, _ = store._cursor_commit_validation()
         assert accepted_commit_record is not None
@@ -2887,12 +2934,11 @@ def test_failed_post_commit_work_projects_without_conditional_rollback(
         api_store._append_authoritative_record(record)
         replayed_commit = api_store.current_replayed_record
         assert isinstance(replayed_commit, BackendCommitRequestRecord)
-        inputs, db_reads = api_store._validated_commit_inputs(
+        inputs, db_reads, _ = api_store._validated_commit_inputs(
             replayed_commit, initial_validation_request_record=None,
         )
         failed_validation, _ = post_commit_validation.evaluate_commit(
             replayed_commit,
-            initial_validation_request_record=None,
             inputs=inputs,
             db_reads=db_reads,
         )
@@ -3076,7 +3122,10 @@ def test_evidence_candidates_exclude_unsupported_calls(
         post_commit_validation._seed_evidence_random(17)
         assessment = post_commit_validation.assess_submission_evidence(
             index, submission,
-            codex_match_version=codex_match_version,
+            config_facts=(
+                MATCH_V2_CONFIG_FACTS if codex_match_version == 2
+                else MATCH_V1_CONFIG_FACTS
+            ),
         )
         assert assessment.accepted is include_supported
         for item in assessment.items:
@@ -3093,7 +3142,7 @@ def test_evidence_candidates_exclude_unsupported_calls(
             near = post_commit_validation.assess_submission_evidence(
                 index,
                 Submission.model_validate(submission_body_for_evidence(TEST_EXCERPT.upper())),
-                codex_match_version=2,
+                config_facts=MATCH_V2_CONFIG_FACTS,
             )
             for item in near.items:
                 assert item.outcome == (
@@ -3419,6 +3468,7 @@ def test_persisted_index_is_idempotent_and_evidence_lookup_is_exact() -> None:
         validated = post_commit_validation.validate_submission_evidence(
             index,
             submission,
+            config_facts=MATCH_V1_CONFIG_FACTS,
         )
         assert [
             match.evidence_number for matches in validated.values() for match in matches
@@ -3432,6 +3482,7 @@ def test_persisted_index_is_idempotent_and_evidence_lookup_is_exact() -> None:
             post_commit_validation.validate_submission_evidence(
                 index,
                 Submission.model_validate(changed_excerpt),
+                config_facts=MATCH_V1_CONFIG_FACTS,
             )
 
         changed_url = json.loads(json.dumps(body))
@@ -3442,6 +3493,7 @@ def test_persisted_index_is_idempotent_and_evidence_lookup_is_exact() -> None:
             post_commit_validation.validate_submission_evidence(
                 index,
                 Submission.model_validate(changed_url),
+                config_facts=MATCH_V1_CONFIG_FACTS,
             )
     finally:
         connection.close()
@@ -3467,7 +3519,7 @@ def test_evidence_percent_encoded_citation_url_matches_and_logs_raw_urls(
     assessment = post_commit_validation.assess_submission_evidence(
         index,
         Submission.model_validate(submission_body_for_evidence(excerpt, url=submitted_url)),
-        codex_match_version=2,
+        config_facts=MATCH_V2_CONFIG_FACTS,
     )
     assert {item.outcome for item in assessment.items} == {expected_outcome}
     assert assessment.accepted is (expected_outcome == EVIDENCE_OUTCOME_V1_EXACT)
@@ -3538,7 +3590,7 @@ def test_codex_v2_classifies_normalized_variants_without_accepting_them(
         assessment = post_commit_validation.assess_submission_evidence(
             index,
             Submission.model_validate(submission_body_for_evidence(excerpt)),
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
     finally:
         connection.close()
@@ -3614,7 +3666,7 @@ def test_codex_v2_matches_non_latin_token_sequences_conservatively(
         assessment = post_commit_validation.assess_submission_evidence(
             index,
             Submission.model_validate(submission_body_for_evidence(excerpt)),
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
     finally:
         connection.close()
@@ -3645,7 +3697,7 @@ def test_codex_v2_rejects_noncontiguous_or_empty_token_sequences(
         assessment = post_commit_validation.assess_submission_evidence(
             index,
             Submission.model_validate(submission_body_for_evidence(excerpt)),
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
     finally:
         connection.close()
@@ -3668,7 +3720,7 @@ def test_codex_v2_cannot_join_tokens_across_citation_sections(
         assessment = post_commit_validation.assess_submission_evidence(
             index,
             Submission.model_validate(submission_body_for_evidence("Alpha Beta Gamma Delta")),
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
     finally:
         connection.close()
@@ -3692,7 +3744,7 @@ def test_codex_v2_requires_the_exact_candidate_url(
                     url=f"{TEST_URL}/other",
                 )
             ),
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
     finally:
         connection.close()
@@ -3721,7 +3773,7 @@ def test_evidence_assessment_is_exhaustive_and_public_guidance_is_nonrevealing(
         assessment = post_commit_validation.assess_submission_evidence(
             index,
             Submission.model_validate(body),
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         detail = post_commit_validation._assessment_public_detail(
             assessment,
@@ -3742,9 +3794,7 @@ def test_evidence_assessment_is_exhaustive_and_public_guidance_is_nonrevealing(
 
 
 def test_retry_guidance_separates_exact_progress_from_blocking_contract_violations() -> None:
-    submission = StandardizedSubmission.model_validate(
-        standardized_submission_body(submission_body_for_evidence(V2_EXACT_EXCERPT))
-    )
+    submission = L_FEI_FEI_RETRY_FIXTURE.submission
     assessment = post_commit_validation._EvidenceAssessment(
         items=tuple(
             post_commit_validation._EvidenceItemAssessment(
@@ -3763,11 +3813,35 @@ def test_retry_guidance_separates_exact_progress_from_blocking_contract_violatio
     )
     total = len(AI_AUGMENT_EVIDENCE_COLUMNS)
     location = f"{AI_AUGMENT_EVIDENCE_COLUMNS[0]}.web_search_excerpts[0]"
-    violation = Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(location=location)
+    violation = post_commit_validation._RetryViolation(
+        submission_column=post_commit_validation._EvidenceSubmissionColumn(
+            AI_AUGMENT_EVIDENCE_COLUMNS[0]
+        ),
+        message=Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(location=location),
+    )
+    age_violation = post_commit_validation._RetryViolation(
+        submission_column=(
+            post_commit_validation._EvidenceSubmissionColumn.AGE_FIRST_PUBLICATION
+        ),
+        message=(
+            f"{KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL}: "
+            f"{Locale.EVIDENCE_SUBMISSION_REJECTED}"
+        ),
+    )
     detail = post_commit_validation._assessment_public_detail(
         assessment,
         progress_template=Locale.EVIDENCE_PROGRESS_TEMPLATE,
         violations=(violation,),
+    )
+    age_detail = post_commit_validation._assessment_public_detail(
+        assessment,
+        progress_template=Locale.EVIDENCE_PROGRESS_TEMPLATE,
+        violations=(age_violation,),
+    )
+    combined_detail = post_commit_validation._assessment_public_detail(
+        assessment,
+        progress_template=Locale.EVIDENCE_PROGRESS_TEMPLATE,
+        violations=(violation, age_violation),
     )
 
     assert assessment.exact_count == total
@@ -3778,7 +3852,12 @@ def test_retry_guidance_separates_exact_progress_from_blocking_contract_violatio
     assert "archived rollout" not in detail
     assert Locale.EVIDENCE_REVIEW_HEADER not in detail
     assert Locale.EVIDENCE_RETRY_VIOLATION_HEADER in detail
-    assert f"- {violation}" in detail
+    assert f"- {violation.message}" in detail
+    assert Locale.EVIDENCE_RETRY_VIOLATION_HEADER in age_detail
+    assert f"- {age_violation.message}" in age_detail
+    assert Locale.EVIDENCE_RETRY_VIOLATIONS_HEADER_TEMPLATE.format(count=2) in combined_detail
+    assert f"- {violation.message}" in combined_detail
+    assert f"- {age_violation.message}" in combined_detail
 
 
 def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
@@ -3793,26 +3872,100 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
         "web_search_excerpts"
     ][0]["excerpt"] = "Jose Garcia Senior Researcher"
     near_submission = Submission.model_validate(near_body)
+    near_standardized_submission = StandardizedSubmission.model_validate(
+        standardized_submission_body(near_body)
+    )
+    invalid_contract_body = near_standardized_submission.model_dump(mode="json", by_alias=True)
+    invalid_contract_field = invalid_contract_body[AI_AUGMENT_EVIDENCE_COLUMNS[0]]
+    assert isinstance(invalid_contract_field, dict)
+    invalid_contract_evidence = invalid_contract_field[FIELD_EVIDENCE_FIELD]
+    assert isinstance(invalid_contract_evidence, list)
+    invalid_contract_evidence[0]["excerpt"] = "Jose Garcia Lead Researcher"
+    invalid_contract_submission = StandardizedSubmission.model_validate(
+        invalid_contract_body
+    )
+    changed_education_body = near_standardized_submission.model_dump(mode="json", by_alias=True)
+    changed_education_field = changed_education_body[KTP_AI_AUGMENT_EDUCATION_COL]
+    assert isinstance(changed_education_field, dict)
+    changed_education_field[FIELD_STANDARDIZED_VALUE_FIELD] = [
+        dict.fromkeys(EducationRecord.model_fields, NOT_REPORTED_VALUE)
+    ]
+    changed_education_submission = StandardizedSubmission.model_validate(
+        changed_education_body
+    )
     exact_submission = StandardizedSubmission.model_validate(
         standardized_submission_body(submission_body_for_evidence(V2_EXACT_EXCERPT))
     )
+    changed_body = exact_submission.model_dump(mode="json", by_alias=True)
+    changed_field = changed_body[KTP_AI_AUGMENT_EDUCATION_COL]
+    assert isinstance(changed_field, dict)
+    changed_field[FIELD_STANDARDIZED_VALUE_FIELD] = [
+        dict.fromkeys(EducationRecord.model_fields, NOT_REPORTED_VALUE)
+    ]
+    changed_submission = StandardizedSubmission.model_validate(changed_body)
     try:
         near_assessment = post_commit_validation.assess_submission_evidence(
             index,
             near_submission,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         assert near_assessment.accepted is False
         assert (
             evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
-                namekey=TEST_NAMEKEY_MODEL,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="commit-near",
-                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=near_submission,
                 assessment=near_assessment,
+            )
+            == ()
+        )
+        assert evaluate_retry_submission_for_test(
+            connection,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+            session_id=TEST_SESSION_ID,
+            synthetic_record_id_seed="commit-contract-invalid",
+            submission_payload=invalid_contract_submission,
+            assessment=post_commit_validation.assess_submission_evidence(
+                index, invalid_contract_submission, config_facts=MATCH_V2_CONFIG_FACTS,
+            ),
+        ) == (
+            Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(
+                location=f"{AI_AUGMENT_EVIDENCE_COLUMNS[0]}.web_search_excerpts[0]"
+            ),
+        )
+        assert evaluate_retry_submission_for_test(
+            connection,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+            session_id=TEST_SESSION_ID,
+            synthetic_record_id_seed="commit-changed-education-before-applied",
+            submission_payload=changed_education_submission,
+            assessment=post_commit_validation.assess_submission_evidence(
+                index, changed_education_submission, config_facts=MATCH_V2_CONFIG_FACTS,
+            ),
+        ) == (
+            Locale.EVIDENCE_EXACT_IMMUTABLE_TEMPLATE.format(
+                immutable=(
+                    f"{KTP_AI_AUGMENT_EDUCATION_COL}."
+                    f"{FIELD_STANDARDIZED_VALUE_FIELD}"
+                ),
+            ),
+        )
+        assert (
+            evaluate_retry_submission_for_test(
+                connection,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                session_id=TEST_SESSION_ID,
+                synthetic_record_id_seed="commit-near-standardized",
+                submission_payload=near_standardized_submission,
+                assessment=post_commit_validation.assess_submission_evidence(
+                    index, near_standardized_submission, config_facts=MATCH_V2_CONFIG_FACTS,
+                ),
             )
             == ()
         )
@@ -3820,40 +3973,57 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
         exact_assessment = post_commit_validation.assess_submission_evidence(
             index,
             exact_submission,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         assert exact_assessment.accepted is True
+        changed_violations = evaluate_retry_submission_for_test(
+            connection,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+            session_id=TEST_SESSION_ID,
+            synthetic_record_id_seed="commit-changed-standardized",
+            submission_payload=changed_submission,
+            assessment=post_commit_validation.assess_submission_evidence(
+                index, changed_submission, config_facts=MATCH_V2_CONFIG_FACTS,
+            ),
+        )
+        assert changed_violations == (
+            Locale.EVIDENCE_EXACT_IMMUTABLE_TEMPLATE.format(
+                immutable=f"{KTP_AI_AUGMENT_EDUCATION_COL}.{FIELD_STANDARDIZED_VALUE_FIELD}"
+            ),
+        )
         assert (
             evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
-                namekey=TEST_NAMEKEY_MODEL,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="commit-exact",
-                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=exact_submission,
                 assessment=exact_assessment,
             )
             == ()
         )
 
-        baseline_count = connection.execute(
-            f"SELECT count(*) FROM {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}"
-        ).fetchone()
         audit_rows = connection.execute(
             f"""
-            SELECT
-                {POST_COMMIT_VALIDATION_APPLIED_COL},
-                {POST_COMMIT_VALIDATION_ACCEPTED_COL}
-            FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
+            SELECT {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL},
+                   {POST_COMMIT_VALIDATION_FIELD_COL},
+                   {POST_COMMIT_VALIDATION_FIELD_AUDIT_COL}
+            FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}
             ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}
             """
         ).fetchall()
     finally:
         connection.close()
 
-    assert baseline_count == (1,)
-    assert audit_rows == [(True, False), (True, True)]
+    assert len(audit_rows) == 6 * len(AI_AUGMENT_EVIDENCE_COLUMNS)
+    assert len({row[0] for row in audit_rows}) == 6
+    assert all(row[1] == json.loads(row[2])["submission_column"] for row in audit_rows)
+    assert all(
+        json.loads(row[2])["state"]["pins"] == 7
+        for row in audit_rows[-len(AI_AUGMENT_EVIDENCE_COLUMNS):]
+    )
 
 
 def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
@@ -3875,16 +4045,15 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
         near_assessment = post_commit_validation.assess_submission_evidence(
             index,
             near_submission,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         assert (
             evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
-                namekey=TEST_NAMEKEY_MODEL,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="commit-near",
-                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=near_submission,
                 assessment=near_assessment,
             )
@@ -3897,15 +4066,14 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
         changed_assessment = post_commit_validation.assess_submission_evidence(
             index,
             changed_submission,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         changed_violations = evaluate_retry_submission_for_test(
             connection,
             original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
-            namekey=TEST_NAMEKEY_MODEL,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
             session_id=TEST_SESSION_ID,
             synthetic_record_id_seed="commit-changed",
-            commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
             submission_payload=changed_submission,
             assessment=changed_assessment,
         )
@@ -3915,19 +4083,20 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
         repeated_violations = evaluate_retry_submission_for_test(
             connection,
             original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
-            namekey=TEST_NAMEKEY_MODEL,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
             session_id=TEST_SESSION_ID,
             synthetic_record_id_seed="commit-near-again",
-            commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
             submission_payload=near_retry_submission,
             assessment=near_assessment,
         )
-        applied_rows = connection.execute(
+        field_audits = connection.execute(
             f"""
-            SELECT {POST_COMMIT_VALIDATION_APPLIED_COL}
-            FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
+            SELECT {POST_COMMIT_VALIDATION_FIELD_AUDIT_COL}
+            FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}
+            WHERE {POST_COMMIT_VALIDATION_FIELD_COL} = ?
             ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}
-            """
+            """,
+            [failed_field],
         ).fetchall()
     finally:
         connection.close()
@@ -3939,7 +4108,9 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
     )
     assert repeated_violations == ()
     assert near_assessment.accepted is False
-    assert applied_rows == [(True,), (False,), (True,)]
+    assert len(field_audits) == 3
+    assert json.loads(field_audits[1][0])["violations"]
+    assert not json.loads(field_audits[2][0])["violations"]
 
 
 def test_retry_preserves_exact_items_inside_a_rejected_field(
@@ -3962,16 +4133,15 @@ def test_retry_preserves_exact_items_inside_a_rejected_field(
         baseline_assessment = post_commit_validation.assess_submission_evidence(
             index,
             baseline_submission,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         assert (
             evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
-                namekey=TEST_NAMEKEY_MODEL,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="commit-baseline",
-                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=baseline_submission,
                 assessment=baseline_assessment,
             )
@@ -3984,15 +4154,14 @@ def test_retry_preserves_exact_items_inside_a_rejected_field(
         changed_assessment = post_commit_validation.assess_submission_evidence(
             index,
             changed_submission,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         violations = evaluate_retry_submission_for_test(
             connection,
             original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
-            namekey=TEST_NAMEKEY_MODEL,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
             session_id=TEST_SESSION_ID,
             synthetic_record_id_seed="commit-changed",
-            commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
             submission_payload=changed_submission,
             assessment=changed_assessment,
         )
@@ -4028,16 +4197,15 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts(
         baseline_assessment = post_commit_validation.assess_submission_evidence(
             index,
             baseline_submission,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         assert (
             evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
-                namekey=TEST_NAMEKEY_MODEL,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="commit-baseline",
-                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=baseline_submission,
                 assessment=baseline_assessment,
             )
@@ -4050,15 +4218,14 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts(
         changed_assessment = post_commit_validation.assess_submission_evidence(
             index,
             changed_submission,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         violations = evaluate_retry_submission_for_test(
             connection,
             original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
-            namekey=TEST_NAMEKEY_MODEL,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
             session_id=TEST_SESSION_ID,
             synthetic_record_id_seed="commit-changed",
-            commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
             submission_payload=changed_submission,
             assessment=changed_assessment,
         )
@@ -4117,16 +4284,15 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
         baseline_assessment = post_commit_validation.assess_submission_evidence(
             index,
             baseline_submission,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         assert (
             evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
-                namekey=TEST_NAMEKEY_MODEL,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="commit-baseline",
-                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=baseline_submission,
                 assessment=baseline_assessment,
             )
@@ -4139,15 +4305,14 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
         retry_assessment = post_commit_validation.assess_submission_evidence(
             index,
             retry_submission,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         violations = evaluate_retry_submission_for_test(
             connection,
             original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
-            namekey=TEST_NAMEKEY_MODEL,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
             session_id=TEST_SESSION_ID,
             synthetic_record_id_seed="commit-retry",
-            commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
             submission_payload=retry_submission,
             assessment=retry_assessment,
         )
@@ -4184,16 +4349,15 @@ def test_v2_near_evidence_cannot_be_withdrawn(
         baseline_assessment = post_commit_validation.assess_submission_evidence(
             index,
             baseline_submission,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         assert (
             evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
-                namekey=TEST_NAMEKEY_MODEL,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="commit-baseline",
-                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=baseline_submission,
                 assessment=baseline_assessment,
             )
@@ -4206,15 +4370,14 @@ def test_v2_near_evidence_cannot_be_withdrawn(
         withdrawal_assessment = post_commit_validation.assess_submission_evidence(
             index,
             withdrawal_submission,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         violations = evaluate_retry_submission_for_test(
             connection,
             original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
-            namekey=TEST_NAMEKEY_MODEL,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
             session_id=TEST_SESSION_ID,
             synthetic_record_id_seed="commit-withdrawal",
-            commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
             submission_payload=withdrawal_submission,
             assessment=withdrawal_assessment,
         )
@@ -4225,6 +4388,7 @@ def test_v2_near_evidence_cannot_be_withdrawn(
         Locale.EVIDENCE_WITHDRAWAL_NOT_ALLOWED_TEMPLATE.format(
             location=f"{field}.web_search_excerpts[0]"
         ),
+        Locale.EVIDENCE_ACCEPTED_FIELD_IMMUTABLE_TEMPLATE.format(immutable=field),
     )
 
 
@@ -4257,16 +4421,15 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_original_pull(
             assessment = post_commit_validation.assess_submission_evidence(
                 index,
                 submission,
-                codex_match_version=2,
+                config_facts=MATCH_V2_CONFIG_FACTS,
             )
             assert (
                 evaluate_retry_submission_for_test(
                     first_connection,
                     original_pull_record_id=original_pull_record_id,
-                    namekey=TEST_NAMEKEY_MODEL,
+                    init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
                     session_id=TEST_SESSION_ID,
                     synthetic_record_id_seed=synthetic_record_id_seed,
-                    commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                     submission_payload=submission,
                     assessment=assessment,
                 )
@@ -4287,7 +4450,7 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_original_pull(
         exact_assessment = post_commit_validation.assess_submission_evidence(
             index,
             exact_submission,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         for original_pull_record_id, synthetic_record_id_seed in (
             (TEST_ORIGINAL_PULL_RECORD_ID, "run-one-exact"),
@@ -4297,37 +4460,37 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_original_pull(
                 evaluate_retry_submission_for_test(
                     second_connection,
                     original_pull_record_id=original_pull_record_id,
-                    namekey=TEST_NAMEKEY_MODEL,
+                    init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
                     session_id=TEST_SESSION_ID,
                     synthetic_record_id_seed=synthetic_record_id_seed,
-                    commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                     submission_payload=exact_submission,
                     assessment=exact_assessment,
                 )
                 == ()
             )
-        baseline_rows = second_connection.execute(
+        original_pulls = second_connection.execute(
             f"""
-            SELECT {POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL}
-            FROM {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}
+            SELECT DISTINCT {POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL}
+            FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}
             ORDER BY {POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL}
             """
         ).fetchall()
-        accepted_rows = second_connection.execute(
+        audit_rows = second_connection.execute(
             f"""
-            SELECT count(*)
-            FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
-            WHERE {POST_COMMIT_VALIDATION_ACCEPTED_COL}
+            SELECT {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL},
+                   {POST_COMMIT_VALIDATION_FIELD_AUDIT_COL}
+            FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}
             """
-        ).fetchone()
+        ).fetchall()
     finally:
         second_connection.close()
 
-    assert baseline_rows == sorted([
+    assert original_pulls == sorted([
         (str(TEST_ORIGINAL_PULL_RECORD_ID),),
         (str(TEST_SECOND_ORIGINAL_PULL_RECORD_ID),),
     ])
-    assert accepted_rows == (2,)
+    assert len({commit for commit, audit in audit_rows
+                if json.loads(audit)["state"]["pins"] == 7}) == 2
 
 
 def test_concurrent_first_rejections_cannot_replace_the_baseline(
@@ -4357,16 +4520,16 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
             plain_body = submission_body_for_evidence(excerpt)
             barrier.wait()
             with operation_lock:
-                original_pull, _commit_request_record = retry_commit_records(
+                original_pull, commit_request_record = retry_commit_records(
                     original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                     session_id=TEST_SESSION_ID,
                     synthetic_record_id_seed=synthetic_record_id_seed,
                 )
-                retry_expected = store_for_connection(connection)._retry_baseline_exists(
-                    original_pull=original_pull,
-                    namekey=TEST_NAMEKEY_MODEL,
-                    session_id=TEST_SESSION_ID,
-                )
+                retry_expected = bool(store_for_connection(connection)._field_audits(
+                    commit_request_record,
+                    original_pull_response_record=original_pull,
+                    init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                ))
                 submission: Submission | StandardizedSubmission = (
                     StandardizedSubmission.model_validate(standardized_submission_body(plain_body))
                     if retry_expected
@@ -4375,16 +4538,15 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
                 assessment = post_commit_validation.assess_submission_evidence(
                     index,
                     submission,
-                    codex_match_version=2,
+                    config_facts=MATCH_V2_CONFIG_FACTS,
                 )
                 assert (
                     evaluate_retry_submission_for_test(
                         connection,
                         original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
-                        namekey=TEST_NAMEKEY_MODEL,
+                        init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
                         session_id=TEST_SESSION_ID,
                         synthetic_record_id_seed=synthetic_record_id_seed,
-                        commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                         submission_payload=submission,
                         assessment=assessment,
                     )
@@ -4411,24 +4573,16 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
 
     verification_connection = duckdb.connect(str(database_path))
     try:
-        baseline_commit_record = verification_connection.execute(
-            f"""
-            SELECT {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL}
-            FROM {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}
-            """
-        ).fetchone()
         audit_commit_records = verification_connection.execute(
             f"""
-            SELECT {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL}
-            FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
-            ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}
+            SELECT DISTINCT {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL}
+            FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}
             """
         ).fetchall()
     finally:
         verification_connection.close()
 
     assert len(audit_commit_records) == 2
-    assert baseline_commit_record == audit_commit_records[0]
 
 
 def test_corrupt_applied_audit_fails_as_configuration_error(
@@ -4447,7 +4601,7 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
         post_commit_validation.assess_submission_evidence(
             index,
             submission,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         retry_submission = StandardizedSubmission.model_validate(standardized_submission_body(body))
         for synthetic_record_id_seed, candidate_submission in (
@@ -4457,16 +4611,15 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
             candidate_assessment = post_commit_validation.assess_submission_evidence(
                 index,
                 candidate_submission,
-                codex_match_version=2,
+                config_facts=MATCH_V2_CONFIG_FACTS,
             )
             assert (
                 evaluate_retry_submission_for_test(
                     connection,
                     original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
-                    namekey=TEST_NAMEKEY_MODEL,
+                    init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
                     session_id=TEST_SESSION_ID,
                     synthetic_record_id_seed=synthetic_record_id_seed,
-                    commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                     submission_payload=candidate_submission,
                     assessment=candidate_assessment,
                 )
@@ -4474,8 +4627,8 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
             )
         connection.execute(
             f"""
-            UPDATE {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
-            SET {POST_COMMIT_VALIDATION_ASSESSMENT_COL} = ?
+            UPDATE {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}
+            SET {POST_COMMIT_VALIDATION_FIELD_AUDIT_COL} = ?
             WHERE {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL} = ?
             """,
             ["{}", str(deterministic_uuid7("audit-second"))],
@@ -4488,10 +4641,9 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
             evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
-                namekey=TEST_NAMEKEY_MODEL,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="audit-third",
-                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=retry_submission,
                 assessment=candidate_assessment,
             )
@@ -4521,7 +4673,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
         original_assessment = post_commit_validation.assess_submission_evidence(
             rollout_index,
             original_submission,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         original_archived_items = tuple(
             item
@@ -4545,10 +4697,9 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
             evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=HAANEN_ORIGINAL_PULL_RECORD_ID,
-                namekey=HAANEN_NAMEKEY_MODEL,
+                init_request_record=init_request_record(HAANEN_NAMEKEY_MODEL),
                 session_id=HAANEN_SESSION_ID,
                 synthetic_record_id_seed=HAANEN_REJECTED_CAPTURE_ID,
-                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=original_submission,
                 assessment=original_assessment,
             )
@@ -4559,7 +4710,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
         archived_retry_assessment = post_commit_validation.assess_submission_evidence(
             rollout_index,
             archived_retry,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         assert (
             len(
@@ -4574,10 +4725,9 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
         archived_retry_violations = evaluate_retry_submission_for_test(
             connection,
             original_pull_record_id=HAANEN_ORIGINAL_PULL_RECORD_ID,
-            namekey=HAANEN_NAMEKEY_MODEL,
+            init_request_record=init_request_record(HAANEN_NAMEKEY_MODEL),
             session_id=HAANEN_SESSION_ID,
             synthetic_record_id_seed=HAANEN_ACCEPTED_CAPTURE_ID,
-            commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
             submission_payload=archived_retry,
             assessment=archived_retry_assessment,
         )
@@ -4629,7 +4779,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
         ideal_assessment = post_commit_validation.assess_submission_evidence(
             rollout_index,
             ideal_retry,
-            codex_match_version=2,
+            config_facts=MATCH_V2_CONFIG_FACTS,
         )
         ideal_archived_items = tuple(
             item
@@ -4646,10 +4796,9 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
             evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=HAANEN_ORIGINAL_PULL_RECORD_ID,
-                namekey=HAANEN_NAMEKEY_MODEL,
+                init_request_record=init_request_record(HAANEN_NAMEKEY_MODEL),
                 session_id=HAANEN_SESSION_ID,
                 synthetic_record_id_seed=f"{HAANEN_ACCEPTED_CAPTURE_ID}-ideal",
-                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=ideal_retry,
                 assessment=ideal_assessment,
             )
@@ -4660,28 +4809,30 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
             f"""
             SELECT
                 {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL},
-                {POST_COMMIT_VALIDATION_APPLIED_COL},
-                {POST_COMMIT_VALIDATION_ACCEPTED_COL}
-            FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
+                {POST_COMMIT_VALIDATION_FIELD_AUDIT_COL}
+            FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}
+            WHERE {POST_COMMIT_VALIDATION_FIELD_COL} = ?
             ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}
-            """
+            """,
+            [KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL],
         ).fetchall()
     finally:
         connection.close()
 
-    assert audit_rows == [
-        (str(deterministic_uuid7(HAANEN_REJECTED_CAPTURE_ID)), True, False),
-        (str(deterministic_uuid7(HAANEN_ACCEPTED_CAPTURE_ID)), False, False),
-        (
-            str(deterministic_uuid7(f"{HAANEN_ACCEPTED_CAPTURE_ID}-ideal")),
-            True,
-            True,
-        ),
+    assert [row[0] for row in audit_rows] == [
+        str(deterministic_uuid7(HAANEN_REJECTED_CAPTURE_ID)),
+        str(deterministic_uuid7(HAANEN_ACCEPTED_CAPTURE_ID)),
+        str(deterministic_uuid7(f"{HAANEN_ACCEPTED_CAPTURE_ID}-ideal")),
     ]
+    assert json.loads(audit_rows[1][1])["violations"]
+    assert json.loads(audit_rows[2][1])["state"]["pins"] == 7
 
 
 @pytest.mark.skip(reason="multiple evidence matches are currently allowed")
-def test_multiple_sql_matches_report_the_exact_excerpt() -> None:
+def test_multiple_sql_matches_report_the_exact_excerpt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(post_commit_validation, "ALLOW_MULTIPLE_EVIDENCE_MATCHES", False)
     connection = duckdb.connect(":memory:")
     try:
         index = build_test_index()
@@ -4735,6 +4886,7 @@ def test_multiple_sql_matches_report_the_exact_excerpt() -> None:
             post_commit_validation.validate_submission_evidence(
                 duplicate_index,
                 Submission.model_validate(body),
+                config_facts=MATCH_V1_CONFIG_FACTS,
             )
         assert raised.value.excerpt == TEST_EXCERPT
         assert TEST_EXCERPT in Locale.MULTIPLE_MATCH_DETAIL_TEMPLATE.format(
@@ -4742,6 +4894,28 @@ def test_multiple_sql_matches_report_the_exact_excerpt() -> None:
         )
     finally:
         connection.close()
+
+
+@pytest.mark.skip(reason="multiple evidence matches are currently allowed")
+def test_multiple_sql_matches_are_audited_by_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(post_commit_validation, "ALLOW_MULTIPLE_EVIDENCE_MATCHES", False)
+    duplicate_index = build_duplicate_evidence_index()
+    body = {
+        column: {
+            "value": column,
+            "web_search_excerpts": [{"excerpt": TEST_EXCERPT, "url": TEST_URL}],
+        }
+        for column in AI_AUGMENT_EVIDENCE_COLUMNS
+    }
+    with pytest.raises(post_commit_validation._MultipleEvidenceMatches) as raised:
+        post_commit_validation.assess_submission_evidence(
+            duplicate_index,
+            Submission.model_validate(body),
+            config_facts=MATCH_V1_CONFIG_FACTS,
+        )
+    assert raised.value.excerpt == TEST_EXCERPT
 
 
 def test_multiple_exact_excerpt_and_url_matches_use_random_candidate(
@@ -4764,10 +4938,12 @@ def test_multiple_exact_excerpt_and_url_matches_use_random_candidate(
             post_commit_validation._seed_evidence_random(42)
             validated = post_commit_validation.validate_submission_evidence(
                 duplicate_index, Submission.model_validate(body),
+                config_facts=MATCH_V1_CONFIG_FACTS,
             )
             post_commit_validation._seed_evidence_random(42)
             repeated = post_commit_validation.validate_submission_evidence(
                 duplicate_index, Submission.model_validate(body),
+                config_facts=MATCH_V1_CONFIG_FACTS,
             )
         finally:
             post_commit_validation.EVIDENCE_RANDOM.setstate(original_state)
@@ -4804,6 +4980,7 @@ def test_seeded_evidence_selection_round_trips_deterministically(
             validated = post_commit_validation.validate_submission_evidence(
                 index,
                 submission,
+                config_facts=MATCH_V1_CONFIG_FACTS,
             )
             selections.append(
                 tuple(
@@ -6613,7 +6790,7 @@ def test_accepted_push_finishes_after_client_or_response_send_failure(
         ),
         (
             BackendLifecycle.REJECTED,
-            BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
+            BackendLifecycle.FIELD_VALIDATION,
             HTTPStatus.OK,
             ContentType.MARKDOWN,
             None,
@@ -6681,7 +6858,7 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
             excerpt = excerpts[0]
             assert isinstance(excerpt, dict)
             excerpt[nameof(lambda: WebSearchExcerpt.excerpt)] = ""
-    elif stage is BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION:
+    elif stage is BackendLifecycle.FIELD_VALIDATION:
         field = cast(dict[str, object], submission_body[KTP_AI_AUGMENT_EDUCATION_COL])
         evidence = cast(list[dict[str, str]], field["web_search_excerpts"])
         evidence[0]["excerpt"] = "fabricated excerpt"
@@ -6703,7 +6880,8 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
                 if stage is BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED:
                     assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
                     assert api_store._execute(
-                        f"SELECT count(*) FROM {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}"
+                        f"SELECT count(DISTINCT {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL}) "
+                        f"FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}"
                     ).fetchone() == (1,)
                     assert api_store._execute(
                         f"SELECT count(*) FROM {CODEX_OUTPUT_ROWS_TABLE}"
@@ -6755,21 +6933,26 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
             )
             assert post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE in response.text
         if schema_case == "comments_extra":
-            assert response.text == (
+            assert response.text.startswith(
                 "1 submission issue needs correction:\n"
                 f"- {KTP_AI_AUGMENT_COMMENTS_COL}."
                 f"{nameof(lambda: FieldSubmission.web_search_excerpts)}: "
                 "Remove this field.\n"
                 "Correct these issues and resubmit the complete payload.\n"
             )
+            assert Locale.EVIDENCE_PROGRESS_TEMPLATE.format(
+                exact=len(AI_AUGMENT_EVIDENCE_COLUMNS),
+                total=len(AI_AUGMENT_EVIDENCE_COLUMNS),
+            ) in response.text
         elif schema_case == "nested_evidence":
-            assert response.text == (
+            assert response.text.startswith(
                 "1 submission issue needs correction:\n"
                 f"- {KTP_AI_AUGMENT_EDUCATION_COL}."
                 f"{nameof(lambda: FieldSubmission.web_search_excerpts)}[0]: "
                 "Check this field's format and value.\n"
                 "Correct these issues and resubmit the complete payload.\n"
             )
+            assert "current evidence items exactly match" not in response.text
     else:
         assert validation.submission is not None
         assert validation.submission_type == SUBMISSION_TYPE
@@ -6808,7 +6991,6 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
     api_store: AiAugmentBackendStore,
     api_push_capture: tuple[CodexRolloutRecord, aivm_audit._AivmAuditConfiguration],
     threaded_loop: asyncio.Runner,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert api_push_capture[0].line_count > 0
     rejected_evidence = valid_submission_body()
@@ -6824,35 +7006,34 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
     plain = valid_submission_body()
     standardized = standardized_submission_body(plain)
     standardized_rejected = standardized_submission_body(rejected_evidence)
+    standardized_age_invalid = deepcopy(standardized)
     standardized_changed = deepcopy(standardized)
+    standardized_fixed_age = deepcopy(standardized)
+    push_date = datetime.now(timezone.utc).date()
+    for candidate, as_of in (
+        (standardized_age_invalid, push_date - timedelta(days=1)),
+        (standardized_changed, push_date),
+        (standardized_fixed_age, push_date),
+    ):
+        age_field = candidate[KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL]
+        assert isinstance(age_field, dict)
+        age_field[FIELD_STANDARDIZED_VALUE_FIELD] = {
+            "basis": "birth",
+            "as_of": as_of.isoformat(),
+            "age": {"provenance": "computed", "age_numeral": as_of.year - 1968},
+            "birth": {"provenance": "reported", "age_numeral": 1968},
+        }
+    rejected_age = standardized_rejected[KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL]
+    invalid_age = standardized_age_invalid[KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL]
+    assert isinstance(rejected_age, dict) and isinstance(invalid_age, dict)
+    rejected_age[FIELD_STANDARDIZED_VALUE_FIELD] = deepcopy(
+        invalid_age[FIELD_STANDARDIZED_VALUE_FIELD]
+    )
     changed_field = standardized_changed[KTP_AI_AUGMENT_EDUCATION_COL]
     assert isinstance(changed_field, dict)
     changed_field[FIELD_STANDARDIZED_VALUE_FIELD] = [
         dict.fromkeys(EducationRecord.model_fields, NOT_REPORTED_VALUE)
     ]
-
-    assess_evidence = post_commit_validation.assess_submission_evidence
-
-    def reject_before_evidence_audit(
-        rollout_index: post_commit_validation._RolloutIndex,
-        submission_payload: Submission | StandardizedSubmission,
-        *,
-        codex_match_version: int,
-    ) -> post_commit_validation._EvidenceAssessment:
-        if isinstance(submission_payload, StandardizedSubmission) and any(
-            isinstance(item, WebSearchExcerpt) and item.excerpt == fabricated_excerpt
-            for item in submission_payload.education.web_search_excerpts
-        ):
-            raise post_commit_validation._MultipleEvidenceMatches(fabricated_excerpt)
-        return assess_evidence(
-            rollout_index, submission_payload, codex_match_version=codex_match_version,
-        )
-
-    monkeypatch.setattr(
-        post_commit_validation,
-        nameof(lambda: post_commit_validation.assess_submission_evidence),
-        reject_before_evidence_audit,
-    )
 
     with api_store._writable(api_runtime):
         async def exercise() -> None:
@@ -6872,7 +7053,7 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
                         BackendLifecycle.REJECTED, HTTPStatus.OK,
                     ),
                     (
-                        rejected_evidence, BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
+                        rejected_evidence, BackendLifecycle.FIELD_VALIDATION,
                         BackendLifecycle.REJECTED, HTTPStatus.OK,
                     ),
                     (
@@ -6880,15 +7061,19 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
                         BackendLifecycle.REJECTED, HTTPStatus.OK,
                     ),
                     (
-                        standardized_rejected, BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
+                        standardized_rejected, BackendLifecycle.FIELD_VALIDATION,
                         BackendLifecycle.REJECTED, HTTPStatus.OK,
                     ),
                     (
-                        standardized_changed, BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
+                        standardized_age_invalid, BackendLifecycle.FIELD_VALIDATION,
                         BackendLifecycle.REJECTED, HTTPStatus.OK,
                     ),
                     (
-                        standardized, BackendLifecycle.ACCEPTED,
+                        standardized_changed, BackendLifecycle.FIELD_VALIDATION,
+                        BackendLifecycle.REJECTED, HTTPStatus.OK,
+                    ),
+                    (
+                        standardized_fixed_age, BackendLifecycle.ACCEPTED,
                         BackendLifecycle.ACCEPTED, HTTPStatus.GONE,
                     ),
                 ):
@@ -6902,17 +7087,17 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
                     assert outcome.result is expected_result
                     if expected_result is BackendLifecycle.ACCEPTED:
                         assert outcome.submission_type == STANDARDIZED_SUBMISSION_TYPE
-                        assert outcome.submission == StandardizedSubmission.model_validate(
-                            standardized
+                        assert outcome.submission == StandardizedSubmission.model_validate_json(
+                            json.dumps(standardized_fixed_age)
                         ).model_dump(mode="json", by_alias=True)
                     elif submission is standardized_rejected:
                         assert outcome.submission_type == STANDARDIZED_SUBMISSION_TYPE
-                        assert outcome.submission == StandardizedSubmission.model_validate(
-                            standardized_rejected
+                        assert outcome.submission == StandardizedSubmission.model_validate_json(
+                            json.dumps(standardized_rejected)
                         ).model_dump(mode="json", by_alias=True)
                         assert api_store._execute(
-                            f"SELECT count(*) FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}"
-                        ).fetchone() == (1,)
+                            f"SELECT count(*) FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}"
+                        ).fetchone()[0] >= len(AI_AUGMENT_EVIDENCE_COLUMNS)
                     pull = await client.get(PULL_PATH)
                     assert pull.status_code == expected_pull_status
                     if submission is rejected_evidence:
@@ -6927,33 +7112,34 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
                             f"{KTP_AI_AUGMENT_EDUCATION_COL}.{FIELD_STANDARDIZED_VALUE_FIELD}"
                             in pull.text
                         )
-                    elif submission is standardized_changed:
+                    elif submission is standardized_age_invalid:
                         assert (
-                            Locale.EVIDENCE_EXACT_IMMUTABLE_TEMPLATE.format(
-                                immutable=(
-                                    f"{KTP_AI_AUGMENT_EDUCATION_COL}."
-                                    f"{FIELD_STANDARDIZED_VALUE_FIELD}"
-                                ),
-                            )
+                            f"{KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL}: "
+                            f"{Locale.EVIDENCE_SUBMISSION_REJECTED}"
                             in pull.text
                         )
-            baseline_rows = api_store._execute(
-                f"SELECT {POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL} "
-                f"FROM {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}"
-            ).fetchall()
+                    elif submission is standardized_changed:
+                        assert (
+                            f"{KTP_AI_AUGMENT_EDUCATION_COL}.{FIELD_STANDARDIZED_VALUE_FIELD}"
+                            in pull.text
+                        )
+                        assert (
+                            f"{KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL}: "
+                            f"{Locale.EVIDENCE_SUBMISSION_REJECTED}"
+                            not in pull.text
+                        )
             audit_rows = api_store._execute(
                 f"SELECT {POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL}, "
-                f"{POST_COMMIT_VALIDATION_APPLIED_COL}, "
-                f"{POST_COMMIT_VALIDATION_ACCEPTED_COL} "
-                f"FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE} "
+                f"{POST_COMMIT_VALIDATION_FIELD_COL}, "
+                f"{POST_COMMIT_VALIDATION_FIELD_AUDIT_COL} "
+                f"FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE} "
                 f"ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}"
             ).fetchall()
-            assert baseline_rows == [(str(original_pull.record_id),)]
-            assert audit_rows == [
-                (str(original_pull.record_id), True, False),
-                (str(original_pull.record_id), False, False),
-                (str(original_pull.record_id), True, True),
-            ]
+            assert audit_rows
+            assert {row[0] for row in audit_rows} == {str(original_pull.record_id)}
+            latest = {column: json.loads(audit) for _, column, audit in audit_rows}
+            assert set(latest) == set(AI_AUGMENT_EVIDENCE_COLUMNS)
+            assert all(audit["state"]["pins"] == 7 for audit in latest.values())
 
         threaded_loop.run(asyncio.wait_for(exercise(), timeout=60))
 

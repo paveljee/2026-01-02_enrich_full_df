@@ -8,6 +8,8 @@ from .vars import (
 
 
 class Locale:
+    AGE_EXPECTED_TEMPLATE: Final = "Expected age {expected_age}, got {actual_age}"
+
     VALIDATION_STAGE_INVALID: Final = "invalid post-commit validation stage"
     VALIDATION_RESULT_INVALID: Final = "invalid post-commit validation result"
     VALIDATION_ACCEPTANCE_MISMATCH: Final = "accepted validation stage and result must agree"
@@ -544,10 +546,15 @@ class Locale:
         "- {location}; was withdrawn as not present in the web results and does "
         "not count as verified evidence."
     )
-    EVIDENCE_RETRY_INSTRUCTION: Final = (
+    EVIDENCE_RETRY_COMPARE_INSTRUCTION: Final = (
         "Compare any non-exact evidence item character-for-character with the "
-        "originating web-tool output, resolve every retry-contract violation above, "
-        "and resubmit the complete payload. Change only items that the guidance "
+        "originating web-tool output."
+    )
+    EVIDENCE_RETRY_RESOLVE_INSTRUCTION: Final = (
+        "Resolve every retry-contract violation above."
+    )
+    EVIDENCE_RETRY_RESUBMIT_INSTRUCTION: Final = (
+        "Resubmit the complete payload. Change only items that the guidance "
         "explicitly permits changing."
     )
     EVIDENCE_RETRY_STANDARDIZED_VALUES: Final = (
@@ -584,10 +591,18 @@ class Locale:
         "stored retry state does not match the configured namekey/session identity"
     )
     EVIDENCE_AUDIT_REPLAY_FAILED: Final = (
-        "stored evidence assessment audit cannot be replayed from its immutable baseline"
+        "stored evidence audit cannot be replayed from its immutable baseline"
     )
     EVIDENCE_SUBMISSION_REJECTED: Final = (
         "submission contains evidence that is not yet exactly verified"
+    )
+    AGE_EVIDENCE_AS_OF_MISMATCH_LOG: Final = (
+        "age evidence as_of mismatch: submitted=%s push_utc_date=%s "
+        "push_received_at_unix_usec=%s"
+    )
+    AGE_EVIDENCE_REPORTED_NOT_FOUND_LOG: Final = (
+        "age reported numeral absent from submitted age excerpts: "
+        "reported=%r excerpts=%r"
     )
 
     REPLAY_LOG_UNREADABLE: Final = "authoritative replay log is unreadable"

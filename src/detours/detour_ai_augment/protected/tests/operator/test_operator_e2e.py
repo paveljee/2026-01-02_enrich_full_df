@@ -57,7 +57,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import (
     Locale as BackendLocale,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
-    AI_AUGMENT_STANDARDIZED_COLUMNS,
+    AI_AUGMENT_EVIDENCE_COLUMNS,
     AIVM_AUDIT_USER,
     AIVM_IDENTITY_FILE,
     AIVM_INSTANCE,
@@ -82,7 +82,8 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     LIMA_SSH_CONFIG_PATH,
     LOCATION_HEADER,
     POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL,
-    POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE,
+    POST_COMMIT_VALIDATION_FIELD_AUDIT_COL,
+    POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE,
     PULL_PATH,
     PUSH_PATH,
     REPLAY_LOG_KEY,
@@ -92,7 +93,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     SSH_EXECUTABLE,
     SSH_TIMEOUT_SECONDS,
     STANDARDIZED_SUBMISSION_TYPE,
-    SUBMISSION_TYPE,
     TEXT_ENCODING,
     VALIDATION_REQUEST_RECORD_ID_COLUMN,
     AiAugmentCohort,
@@ -1612,16 +1612,13 @@ def validate_workflow_artifacts(
             submission_type = post_commit_validation[
                 nameof(lambda: PostCommitValidation.submission_type)
             ]
-            assert submission_type in (SUBMISSION_TYPE, STANDARDIZED_SUBMISSION_TYPE)
+            assert submission_type == STANDARDIZED_SUBMISSION_TYPE
             submission = post_commit_validation[
                 nameof(lambda: PostCommitValidation.submission)
             ]
             assert isinstance(submission, dict)
 
-            expected_null_columns = (
-                set(AI_AUGMENT_STANDARDIZED_COLUMNS)
-                if submission_type == SUBMISSION_TYPE else set()
-            )
+            expected_null_columns: set[str] = set()
             if submission.get(KTP_AI_AUGMENT_COMMENTS_COL) is None:
                 expected_null_columns.add(KTP_AI_AUGMENT_COMMENTS_COL)
 
@@ -1631,14 +1628,18 @@ def validate_workflow_artifacts(
             assert output == projected.innerdict.data
             _operator_log(f"completed output: {len(output)} populated fields")
             audits = backend_store._query_mappings(
-                f"SELECT * FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}"
+                f"SELECT * FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}"
             )
-            accepted_audits = tuple(audit for audit in audits if audit["accepted"] is True)
-            assert len(accepted_audits) == 1
-            assert accepted_audits[0]["applied"] is True
-            assert (
-                accepted_audits[0][POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL]
+            accepted_audits = tuple(
+                audit for audit in audits
+                if audit[POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL]
                 == str(commit_request_record.record_id)
+            )
+            assert len(accepted_audits) == len(AI_AUGMENT_EVIDENCE_COLUMNS)
+            assert all(
+                json.loads(audit[POST_COMMIT_VALIDATION_FIELD_AUDIT_COL])["state"]["pins"]
+                == 7
+                for audit in accepted_audits
             )
             _operator_log(
                 f"evidence audits: {len(audits)} total, "

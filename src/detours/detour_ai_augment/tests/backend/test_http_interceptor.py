@@ -40,6 +40,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.sto
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AI_AUGMENT_EVIDENCE_COLUMNS,
     AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
     AI_AUGMENT_STANDARDIZED_COLUMNS,
     ASGI_BODY_KEY,
@@ -67,9 +68,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     NANOSECONDS_PER_MICROSECOND,
     NOT_REPORTED_VALUE,
-    POST_COMMIT_VALIDATION_ACCEPTED_COL,
-    POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE,
-    POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE,
+    POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE,
     PULL_PATH,
     PUSH_PATH,
     ROLLOUT_LINE_FRAGMENT_TYPE,
@@ -712,7 +711,7 @@ def test_web_argument_eligibility_drives_retry_and_replays_identically(
             BackendLifecycle.ACCEPTED if accepted else BackendLifecycle.REJECTED
         )
         assert validation.stage is (
-            BackendLifecycle.ACCEPTED if accepted else BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION
+            BackendLifecycle.ACCEPTED if accepted else BackendLifecycle.FIELD_VALIDATION
         )
         api.update_pull_state(result)
 
@@ -730,14 +729,16 @@ def test_web_argument_eligibility_drives_retry_and_replays_identically(
             assert response.headers["content-type"].startswith(ContentType.MARKDOWN)
             assert validation.detail is not None
             assert response.text.strip() == validation.detail.strip()
-            assert Locale.EVIDENCE_RETRY_INSTRUCTION in response.text
+            assert "Compare any non-exact evidence item" in response.text
+            assert "resolve every retry-contract violation above" not in response.text
             assert store._execute(
-                f"SELECT count(*) FROM {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}"
-            ).fetchone() == (1,)
+                f"SELECT count(DISTINCT commit_record_id) "
+                f"FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}"
+            ).fetchone() == (2,)
             assert store._execute(
-                f"SELECT {POST_COMMIT_VALIDATION_ACCEPTED_COL} "
-                f"FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}"
-            ).fetchall() == [(False,), (False,)]
+                f"SELECT count(*) "
+                f"FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}"
+            ).fetchone() == (2 * len(AI_AUGMENT_EVIDENCE_COLUMNS),)
         snapshot = query_snapshot(store).model_dump_json()
     log_bytes = Path(store._replay_log).read_bytes()
     live_database = fixtures.logical_database_snapshot(store._detour_db_path)
