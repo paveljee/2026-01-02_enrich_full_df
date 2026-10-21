@@ -10,7 +10,7 @@ import threading
 import time
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Literal, Self, overload
@@ -37,12 +37,13 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
     AiAugmentDetourDB,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
-    _AppliedRetryAuditRow,
     _CommitConfigFacts,
     _CommitEvaluationInputs,
     _DetourDbValidationReads,
-    _RetryBaselineRow,
+    _EvidenceSubmissionColumn,
+    _FieldAudit,
     _RolloutIndex,
+    _ValidationPreparationError,
     _ValidationProjection,
     evaluate_commit,
 )
@@ -103,21 +104,16 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     ISO_8601_UTC_SUFFIX,
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
-    MILLISECONDS_PER_SECOND,
     NANOSECONDS_PER_MICROSECOND,
-    POST_COMMIT_VALIDATION_ACCEPTED_COL,
-    POST_COMMIT_VALIDATION_APPLIED_COL,
-    POST_COMMIT_VALIDATION_ASSESSMENT_COL,
     POST_COMMIT_VALIDATION_AUDIT_ID_COL,
-    POST_COMMIT_VALIDATION_BASELINE_COL,
     POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL,
     POST_COMMIT_VALIDATION_CREATED_AT_COL,
-    POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE,
+    POST_COMMIT_VALIDATION_FIELD_AUDIT_COL,
+    POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE,
+    POST_COMMIT_VALIDATION_FIELD_COL,
     POST_COMMIT_VALIDATION_NAMEKEY_COL,
     POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL,
-    POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE,
     POST_COMMIT_VALIDATION_SESSION_ID_COL,
-    POST_COMMIT_VALIDATION_SUBMISSION_COL,
     PULL_PATH,
     PUSH_PATH,
     ROLLOUT_LINE_FRAGMENT_TYPE,
@@ -137,6 +133,8 @@ from src.detours.detour_ai_augment.protected.src.shared import (
     pydantic_diagnostic_json,
     source_key_from_header_value,
     source_key_header_value,
+    unix_usec_from_uuidv7,
+    utc_datetime_from_unix_usec,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
@@ -557,7 +555,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                         validation.result is not BackendLifecycle.REJECTED
                         or validation.stage not in {
                         BackendLifecycle.PYDANTIC_VALIDATION,
-                        BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
+                        BackendLifecycle.FIELD_VALIDATION,
                         BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED,
                         }
                     ):
@@ -1200,13 +1198,12 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 http = ModelHttpInterceptor(record_get=self._recorded_model_http)
                 try:
                     with submission_http_context(http):
-                        inputs, db_reads = self._validated_commit_inputs(
+                        inputs, db_reads, _ = self._validated_commit_inputs(
                             commit,
                             initial_validation_request_record=initial_ref,
                         )
                         evaluated, projection = evaluate_commit(
                             commit,
-                            initial_validation_request_record=initial_ref,
                             inputs=inputs,
                             db_reads=db_reads,
                         )
@@ -1994,7 +1991,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         commit_request_record: BackendCommitRequestRecord,
         *,
         initial_validation_request_record: BackendValidationRequestRecord | None,
-    ) -> tuple[_CommitEvaluationInputs, _DetourDbValidationReads]:
+    ) -> tuple[_CommitEvaluationInputs, _DetourDbValidationReads, PullResponseRecord]:
         if self._current_replayed_record is not commit_request_record:
             raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
                 message=Locale.REPLAY_COMMIT_LINK_INVALID,
@@ -2037,12 +2034,13 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 message=Locale.REPLAY_COMMIT_NAME_KEY_INVALID,
                 detail=Locale.REPLAY_COMMIT_ORIGINAL_PULL_NAMEKEY_DETAIL,
             ))
-        if self._init_request_record is None:
+        init_request_record = self._init_request_record
+        if init_request_record is None:
             raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
                 message=Locale.REPLAY_COMMIT_NAME_KEY_INVALID,
                 detail=Locale.REPLAY_COMMIT_INIT_MISSING_DETAIL,
             ))
-        if namekey != self._init_request_record.namekey:
+        if namekey != init_request_record.namekey:
             raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
                 message=Locale.REPLAY_COMMIT_NAME_KEY_INVALID,
                 detail=Locale.REPLAY_COMMIT_INIT_NAMEKEY_DETAIL,
@@ -2065,8 +2063,6 @@ class AiAugmentBackendStore(FrozenStrictModel):
         assert push.pull_response_record is pull
         context = self.context
         config = context.pipeline_config
-        session_id = body.codex_session_record.session_id
-        assert session_id is not None
 
         def draw_number() -> tuple[str | None, Exception | None]:
             try:
@@ -2091,48 +2087,17 @@ class AiAugmentBackendStore(FrozenStrictModel):
             except Exception as exc:
                 return None, exc
 
-        def retry_baseline_exists() -> tuple[bool | None, Exception | None]:
+        def field_audits() -> tuple[tuple[_FieldAudit, ...] | None, Exception | None]:
             try:
-                return self._retry_baseline_exists(
-                    original_pull=original_pull_response_record,
-                    namekey=namekey,
-                    session_id=session_id,
-                ), None
-            except Exception as exc:
-                return None, exc
-
-        def retry_baseline_row() -> tuple[_RetryBaselineRow | None, Exception | None]:
-            try:
-                row = self._retry_baseline_row(original_pull_response_record.record_id)
-                return (None if row is None else _RetryBaselineRow(
-                    namekey_json=row[0],
-                    session_id_text=row[1],
-                    commit_record_id_text=row[2],
-                    obligations_json=row[3],
-                )), None
-            except Exception as exc:
-                return None, exc
-
-        def applied_retry_audit_rows(
-            baseline_commit_record_id: UUID,
-        ) -> tuple[tuple[_AppliedRetryAuditRow, ...] | None, Exception | None]:
-            try:
-                return tuple(
-                    _AppliedRetryAuditRow(
-                        submission_json=submission_json,
-                        assessment_json=assessment_json,
-                    )
-                    for submission_json, assessment_json in self._applied_retry_audit_rows(
-                        original_pull_record_id=original_pull_response_record.record_id,
-                        baseline_commit_record_id=baseline_commit_record_id,
-                    )
+                return self._field_audits(
+                    commit_request_record,
+                    original_pull_response_record=original_pull_response_record,
+                    init_request_record=init_request_record,
                 ), None
             except Exception as exc:
                 return None, exc
 
         inputs = _CommitEvaluationInputs(
-            original_pull_response_record=original_pull_response_record,
-            namekey=namekey,
             config_facts=_CommitConfigFacts(
                 timezone_name=config.timezone,
                 sample_seed=config.sample_seed,
@@ -2141,11 +2106,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
             draw_number=draw_number,
             cas_codex_rollout_record=cas_rollout,
         )
-        assert inputs.original_pull_response_record is original_pull_response_record
-        return inputs, _DetourDbValidationReads(
-            retry_baseline_exists=retry_baseline_exists,
-            retry_baseline_row=retry_baseline_row,
-            applied_retry_audit_rows=applied_retry_audit_rows,
+        return (
+            inputs,
+            _DetourDbValidationReads(field_audits=field_audits),
+            original_pull_response_record,
         )
 
     def _cursor_commit_validation(
@@ -2248,13 +2212,14 @@ class AiAugmentBackendStore(FrozenStrictModel):
             inputs.append(http_record)
         http = ModelHttpInterceptor.from_records(inputs)
         with submission_http_context(http):
-            evaluation_inputs, db_reads = self._validated_commit_inputs(
+            evaluation_inputs, db_reads, original_pull_response_record = (
+                self._validated_commit_inputs(
                 commit_ref,
                 initial_validation_request_record=initial_ref,
+                )
             )
             evaluated, projection = evaluate_commit(
                 commit_ref,
-                initial_validation_request_record=initial_ref,
                 inputs=evaluation_inputs,
                 db_reads=db_reads,
             )
@@ -2317,7 +2282,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         self._project_validation(
             commit_ref,
             projection,
-            original_pull_response_record=evaluation_inputs.original_pull_response_record,
+            original_pull_response_record=original_pull_response_record,
             accepted=observed.result is BackendLifecycle.ACCEPTED,
         )
 
@@ -2338,28 +2303,18 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 index,
                 codex_match_version=self._context.pipeline_config.match_rule_version.codex_match,
             )
-        if projection.submission_json is not None:
+        if projection.field_audits:
             if index is None:
                 raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
                     message=Locale.VALIDATION_REPLAY_MISMATCH,
                     detail=Locale.REPLAY_VALIDATION_INDEX_DETAIL,
                 ))
-            namekey = name_key_from_header_value(commit.request_headers.get(NAME_KEY_HEADER))
-            commit_request_timestamp = datetime.fromtimestamp(
-                commit.record_id.time / MILLISECONDS_PER_SECOND,
-                tz=timezone.utc,
-            )
-            self._project_retry_evidence(
+            self._project_field_audits(
                 commit,
-                projection,
+                projection.field_audits,
                 original_pull_response_record=original_pull_response_record,
-                namekey=namekey,
-                commit_request_timestamp=commit_request_timestamp,
             )
-        elif (
-            projection.assessment_json is not None or projection.applied is not None
-            or projection.accepted is not None or projection.baseline_obligations_json is not None
-        ):
+        elif projection.accepted is not None:
             raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
                 message=Locale.VALIDATION_REPLAY_MISMATCH,
                 detail=Locale.REPLAY_VALIDATION_UNEXPECTED_AUDIT_DETAIL,
@@ -2377,56 +2332,44 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 detail=Locale.REPLAY_VALIDATION_OUTPUT_MISSING_DETAIL,
             ))
 
-    def _project_retry_evidence(
+    def _project_field_audits(
         self,
         commit: BackendCommitRequestRecord,
-        projection: _ValidationProjection,
+        audits: tuple[_FieldAudit, ...],
         *,
         original_pull_response_record: PullResponseRecord,
-        namekey: NameKey,
-        commit_request_timestamp: datetime,
     ) -> None:
-        assert projection.commit_request_record is commit
-        submission_json = projection.submission_json
-        assessment_json = projection.assessment_json
-        applied = projection.applied
-        accepted = projection.accepted
-        if (
-            submission_json is None or assessment_json is None
-            or applied is None or accepted is None
-        ):
-            raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
-                message=Locale.VALIDATION_REPLAY_MISMATCH,
-                detail=Locale.REPLAY_VALIDATION_RETRY_FIELDS_DETAIL,
-            ))
-        body = commit.commit_request_body
-        pull = body.pull_response_record
-        push = body.push_response_record
-        assert isinstance(pull, PullResponseRecord)
-        assert isinstance(push, PushResponseRecord)
-        assert push.pull_response_record is pull
-        session_id = body.codex_session_record.session_id
-        assert session_id is not None
-        if projection.baseline_obligations_json is not None and not self._insert_retry_baseline(
-            original_pull_record_id=original_pull_response_record.record_id,
-            namekey=namekey,
-            session_id=session_id,
-            commit_record_id=commit.record_id,
-            commit_request_timestamp=commit_request_timestamp,
-            obligations_json=projection.baseline_obligations_json,
-        ):
-            raise _ReplayProjectionConflictError
-        self._append_evidence_audit(
-            commit_record_id=commit.record_id,
-            original_pull_record_id=original_pull_response_record.record_id,
-            namekey=namekey,
-            session_id=session_id,
-            commit_request_timestamp=commit_request_timestamp,
-            submission_json=submission_json,
-            assessment_json=assessment_json,
-            applied=applied,
-            accepted=accepted,
+        namekey = name_key_from_header_value(commit.request_headers.get(NAME_KEY_HEADER))
+        commit_request_timestamp = utc_datetime_from_unix_usec(
+            unix_usec_from_uuidv7(commit.record_id)
         )
+        session_id = commit.commit_request_body.codex_session_record.session_id
+        assert session_id is not None
+        for audit in audits:
+            self._execute(
+                f"""
+                INSERT INTO {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE} (
+                    {duckdb_quote_identifier(POST_COMMIT_VALIDATION_AUDIT_ID_COL)},
+                    {duckdb_quote_identifier(POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL)},
+                    {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL)},
+                    {duckdb_quote_identifier(POST_COMMIT_VALIDATION_NAMEKEY_COL)},
+                    {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SESSION_ID_COL)},
+                    {duckdb_quote_identifier(POST_COMMIT_VALIDATION_CREATED_AT_COL)},
+                    {duckdb_quote_identifier(POST_COMMIT_VALIDATION_FIELD_COL)},
+                    {duckdb_quote_identifier(POST_COMMIT_VALIDATION_FIELD_AUDIT_COL)}
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    self._next_projected_row_id(POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE),
+                    str(commit.record_id),
+                    str(original_pull_response_record.record_id),
+                    namekey.to_json_key(),
+                    str(session_id),
+                    commit_request_timestamp,
+                    audit.submission_column.value,
+                    audit.model_dump_json(),
+                ],
+            )
 
     def _next_projected_row_id(self, table_name: str) -> int:
         """Allocate from the maximum projected row ID in the active transaction."""
@@ -2473,143 +2416,42 @@ class AiAugmentBackendStore(FrozenStrictModel):
     def _datetime_value(timestamp: str) -> datetime:
         return datetime.fromisoformat(timestamp.replace(ISO_8601_UTC_SUFFIX, ISO_8601_UTC_OFFSET))
 
-    def _retry_baseline_exists(
+    def _field_audits(
         self,
+        commit: BackendCommitRequestRecord,
         *,
-        original_pull: PullResponseRecord,
-        namekey: NameKey,
-        session_id: UUID,
-    ) -> bool:
-        row = self._execute(
+        original_pull_response_record: PullResponseRecord,
+        init_request_record: BackendInitRequestRecord,
+    ) -> tuple[_FieldAudit, ...]:
+        session_id = commit.commit_request_body.codex_session_record.session_id
+        assert session_id is not None
+        rows = self._execute(
             f"""
             SELECT
                 {duckdb_quote_identifier(POST_COMMIT_VALIDATION_NAMEKEY_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SESSION_ID_COL)}
-            FROM {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SESSION_ID_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_FIELD_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_FIELD_AUDIT_COL)}
+            FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}
             WHERE {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL)} = ?
-            """,
-            [str(original_pull.record_id)],
-        ).fetchone()
-        if row is None:
-            return False
-        if row != (namekey.to_json_key(), str(session_id)):
-            raise ReplayInputMissing(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
-        return True
-
-    def _applied_retry_audit_rows(
-        self,
-        *,
-        original_pull_record_id: UUID,
-        baseline_commit_record_id: UUID,
-    ) -> tuple[tuple[str, str], ...]:
-        rows: list[tuple[str, str]] = self._execute(
-            f"""
-            SELECT
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SUBMISSION_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ASSESSMENT_COL)}
-            FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
-            WHERE {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL)} = ?
-              AND {duckdb_quote_identifier(POST_COMMIT_VALIDATION_APPLIED_COL)}
-              AND {duckdb_quote_identifier(POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL)} <> ?
             ORDER BY {duckdb_quote_identifier(POST_COMMIT_VALIDATION_AUDIT_ID_COL)}
             """,
-            [str(original_pull_record_id), str(baseline_commit_record_id)],
+            [str(original_pull_response_record.record_id)],
         ).fetchall()
-        return tuple(rows)
-
-    def _insert_retry_baseline(
-        self,
-        *,
-        original_pull_record_id: UUID,
-        namekey: NameKey,
-        session_id: UUID,
-        commit_record_id: UUID,
-        commit_request_timestamp: datetime,
-        obligations_json: str,
-    ) -> bool:
-        return self._execute(
-            f"""
-            INSERT INTO {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE} (
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_NAMEKEY_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SESSION_ID_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_CREATED_AT_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_BASELINE_COL)}
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT DO NOTHING
-            RETURNING {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL)}
-            """,
-            [
-                str(original_pull_record_id),
-                namekey.to_json_key(),
-                str(session_id),
-                str(commit_record_id),
-                commit_request_timestamp,
-                obligations_json,
-            ],
-        ).fetchone() is not None
-
-    def _retry_baseline_row(
-        self, original_pull_record_id: UUID,
-    ) -> tuple[str, str, str, str] | None:
-        row: tuple[str, str, str, str] | None = self._execute(
-            f"""
-            SELECT
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_NAMEKEY_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SESSION_ID_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_BASELINE_COL)}
-            FROM {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}
-            WHERE {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL)} = ?
-            """,
-            [str(original_pull_record_id)],
-        ).fetchone()
-        return row
-
-    def _append_evidence_audit(
-        self,
-        *,
-        commit_record_id: UUID,
-        original_pull_record_id: UUID,
-        namekey: NameKey,
-        session_id: UUID,
-        commit_request_timestamp: datetime,
-        submission_json: str,
-        assessment_json: str,
-        applied: bool,
-        accepted: bool,
-    ) -> None:
-        self._execute(
-            f"""
-            INSERT INTO {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE} (
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_AUDIT_ID_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_NAMEKEY_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SESSION_ID_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_CREATED_AT_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SUBMISSION_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ASSESSMENT_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_APPLIED_COL)},
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ACCEPTED_COL)}
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                self._next_projected_row_id(POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE),
-                str(commit_record_id),
-                str(original_pull_record_id),
-                namekey.to_json_key(),
-                str(session_id),
-                commit_request_timestamp,
-                submission_json,
-                assessment_json,
-                applied,
-                accepted,
-            ],
-        )
+        latest: dict[_EvidenceSubmissionColumn, _FieldAudit] = {}
+        for row_namekey, row_session_id, column, audit_json in rows:
+            if (row_namekey, row_session_id) != (
+                init_request_record.namekey.to_json_key(), str(session_id)
+            ):
+                raise ReplayInputMissing(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
+            try:
+                audit = _FieldAudit.model_validate_json(audit_json)
+            except ValidationError as exc:
+                raise _ValidationPreparationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED) from exc
+            if audit.submission_column.value != column:
+                raise ReplayInputMissing(Locale.EVIDENCE_AUDIT_REPLAY_FAILED)
+            latest[audit.submission_column] = audit
+        return tuple(latest.values())
 
     def _persist_rollout_index(
         self,
@@ -2864,48 +2706,26 @@ class AiAugmentBackendStore(FrozenStrictModel):
         )
         self._execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE} (
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL)}
-                    VARCHAR PRIMARY KEY,
-                {duckdb_quote_identifier(
-                    POST_COMMIT_VALIDATION_NAMEKEY_COL
-                )} VARCHAR NOT NULL,
-                {duckdb_quote_identifier(
-                    POST_COMMIT_VALIDATION_SESSION_ID_COL
-                )} VARCHAR NOT NULL,
-                {duckdb_quote_identifier(
-                    POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL
-                )} VARCHAR NOT NULL,
-                {duckdb_quote_identifier(
-                    POST_COMMIT_VALIDATION_CREATED_AT_COL
-                )} TIMESTAMPTZ NOT NULL,
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_BASELINE_COL)} JSON NOT NULL
-            )
-            """
-        )
-        self._execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE} (
+            CREATE TABLE IF NOT EXISTS {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE} (
                 {duckdb_quote_identifier(POST_COMMIT_VALIDATION_AUDIT_ID_COL)} BIGINT PRIMARY KEY,
-                {duckdb_quote_identifier(
-                    POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL
-                )} VARCHAR NOT NULL UNIQUE,
-                {duckdb_quote_identifier(
-                    POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL
-                )} VARCHAR NOT NULL,
-                {duckdb_quote_identifier(
-                    POST_COMMIT_VALIDATION_NAMEKEY_COL
-                )} VARCHAR NOT NULL,
-                {duckdb_quote_identifier(
-                    POST_COMMIT_VALIDATION_SESSION_ID_COL
-                )} VARCHAR NOT NULL,
-                {duckdb_quote_identifier(
-                    POST_COMMIT_VALIDATION_CREATED_AT_COL
-                )} TIMESTAMPTZ NOT NULL,
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SUBMISSION_COL)} JSON NOT NULL,
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ASSESSMENT_COL)} JSON NOT NULL,
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_APPLIED_COL)} BOOLEAN NOT NULL,
-                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ACCEPTED_COL)} BOOLEAN NOT NULL
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL)}
+                    VARCHAR NOT NULL,
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL)}
+                    VARCHAR NOT NULL,
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_NAMEKEY_COL)}
+                    VARCHAR NOT NULL,
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SESSION_ID_COL)}
+                    VARCHAR NOT NULL,
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_CREATED_AT_COL)}
+                    TIMESTAMPTZ NOT NULL,
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_FIELD_COL)}
+                    VARCHAR NOT NULL,
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_FIELD_AUDIT_COL)}
+                    JSON NOT NULL,
+                UNIQUE (
+                    {duckdb_quote_identifier(POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL)},
+                    {duckdb_quote_identifier(POST_COMMIT_VALIDATION_FIELD_COL)}
+                )
             )
             """
         )

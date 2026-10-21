@@ -19,6 +19,7 @@ from typing import (
     Literal,
     Self,
     TypeAlias,
+    TypeAliasType,
     TypeVar,
     cast,
     get_args,
@@ -32,7 +33,6 @@ from pydantic import (
     ConfigDict,
     Field,
     HttpUrl,
-    PositiveInt,
     StrictStr,
     StringConstraints,
     model_validator,
@@ -76,8 +76,10 @@ MAX_EXCERPT_CHARACTERS = MAX_PUSH_BODY_BYTES
 MAX_URL_CHARACTERS = MAX_PUSH_BODY_BYTES
 MAX_EXCERPTS_PER_FIELD = MAX_PUSH_BODY_BYTES
 
+HUMAN_LIFESPAN = (1, 200)
 EARLIEST_YEAR = 1900
 LATEST_BIRTH_YEAR = 2010  # 2026 minus 16
+HCR_CUTOFF_YEAR = 2024    # latest HCR award available
 
 DEFAULT_TARGET_WEB_SEARCH_QUERY_LANGUAGE = "eng"
 
@@ -203,21 +205,127 @@ GenderStandardized: TypeAlias = SubmissionValueRequired[
 
 
 # KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL
-Year = Annotated[int, Field(ge=EARLIEST_YEAR)]
-CurrentAge: TypeAlias = PositiveInt
-YearOfBirth: TypeAlias = Annotated[
+Year: TypeAlias = Annotated[int, Field(ge=EARLIEST_YEAR)]
+CurrentAge: TypeAlias = Annotated[
     int,
-    Field(ge=EARLIEST_YEAR, le=LATEST_BIRTH_YEAR),
+    Field(ge=HUMAN_LIFESPAN[0]),
+    Field(le=HUMAN_LIFESPAN[1]),
 ]
-DateOfBirth: TypeAlias = date
-YearOfFirstPublication: TypeAlias = Year
-DateOfFirstPublication: TypeAlias = date
-AgeStandardized: TypeAlias = SubmissionValueRequired[
-    CurrentAge
-    | YearOfBirth
-    | DateOfBirth
-    | YearOfFirstPublication
+YearOfFirstPublication: TypeAlias = Annotated[
+    Year,
+    Field(le=HCR_CUTOFF_YEAR),
+]
+DateOfFirstPublication: TypeAlias = Annotated[
+    date,
+    Field(
+        ge=date(EARLIEST_YEAR, 1, 1),
+        le=date(HCR_CUTOFF_YEAR, 12, 31),
+    ),
+]
+YearOfBirth: TypeAlias = Annotated[
+    Year,
+    Field(le=LATEST_BIRTH_YEAR),
+]
+DateOfBirth: TypeAlias = Annotated[
+    date,
+    Field(
+        ge=date(EARLIEST_YEAR, 1, 1),
+        le=date(LATEST_BIRTH_YEAR, 12, 31),
+    ),
+]
+
+AgeFromFirstPublicationNumeral: TypeAlias = (
+    YearOfFirstPublication
     | DateOfFirstPublication
+)
+AgeFromBirthNumeral: TypeAlias = (
+    YearOfBirth
+    | DateOfBirth
+)
+AgeNumeral: TypeAlias = (
+    CurrentAge
+    | AgeFromFirstPublicationNumeral
+    | AgeFromBirthNumeral
+)
+AgeNumeralT = TypeVar("AgeNumeralT", bound=AgeNumeral)
+
+class ReportedAgeNumeral[N: AgeNumeral](StrictModel):
+    provenance: Literal["reported"] = "reported"
+    age_numeral: N
+class ComputedAgeNumeral[N: AgeNumeral](StrictModel):
+    provenance: Literal["computed"] = "computed"
+    age_numeral: N
+
+AgeNumeralWithProvenance = TypeAliasType(
+    "AgeNumeralWithProvenance",
+    Annotated[
+        ReportedAgeNumeral[AgeNumeralT] | ComputedAgeNumeral[AgeNumeralT],
+        Field(discriminator="provenance"),
+    ],
+    type_params=(AgeNumeralT,),
+)
+
+class _AgeWithProvenance[N: AgeNumeral](StrictModel):
+    as_of: date
+    age: ComputedAgeNumeral[CurrentAge]
+
+    def _counterpart(
+        self,
+    ) -> ReportedAgeNumeral[N]:
+        raise NotImplementedError
+
+    @model_validator(mode="after")
+    def validate_pair(self) -> Self:
+        other = self._counterpart()
+
+        numeral = other.age_numeral
+
+        if isinstance(numeral, date):
+            expected_age = self.as_of.year - numeral.year - (
+                (self.as_of.month, self.as_of.day)
+                < (numeral.month, numeral.day)
+            )
+        else:
+            expected_age = self.as_of.year - numeral
+
+        if self.age.age_numeral != expected_age:
+            raise ValueError(
+                Locale.AGE_EXPECTED_TEMPLATE.format(
+                    expected_age=expected_age,
+                    actual_age=self.age.age_numeral,
+                )
+            )
+
+        return self
+
+
+class AgeFromBirth(_AgeWithProvenance[AgeFromBirthNumeral]):
+    basis: Literal["birth"] = "birth"
+    birth: ReportedAgeNumeral[AgeFromBirthNumeral]
+
+    def _counterpart(
+        self,
+    ) -> ReportedAgeNumeral[AgeFromBirthNumeral]:
+        return self.birth
+
+
+class AgeFromFirstPublication(_AgeWithProvenance[AgeFromFirstPublicationNumeral]):
+    basis: Literal["first_publication"] = "first_publication"
+    first_publication: ReportedAgeNumeral[
+        AgeFromFirstPublicationNumeral
+    ]
+
+    def _counterpart(
+        self,
+    ) -> ReportedAgeNumeral[AgeFromFirstPublicationNumeral]:
+        return self.first_publication
+
+
+AgeStandardized: TypeAlias = SubmissionValueRequired[
+    Annotated[
+        AgeFromBirth | AgeFromFirstPublication,
+        Field(discriminator="basis"),
+    ]
 ]
 
 

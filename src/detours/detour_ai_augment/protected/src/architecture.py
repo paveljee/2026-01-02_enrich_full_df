@@ -562,7 +562,7 @@ class BackendComponent(
             "appendwatch_report_validation",
             "rollout_index",
             "pydantic_validation",
-            "duckdb_evidence_validation",
+            "field_validation",
             "researcher_resolution",
             "standardized_submission_required",
             "innerdict_and_card",

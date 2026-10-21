@@ -129,6 +129,7 @@ from src.detours.detour_ai_augment.protected.src.shared import (
     parse_appendwatch_report_bytes,
     pydantic_diagnostic_json,
     source_key_from_header_value,
+    utc_datetime_from_unix_usec,
 )
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.cards import (
@@ -531,7 +532,7 @@ class _RunAttemptView(FrozenStrictModel):
         assert self.run_outcome_response_record is not None
         ready_at = self.run_outcome_response_record.ready_to_respond_at_unix_usec
         assert ready_at is not None
-        return datetime.fromtimestamp(ready_at / 1_000_000, tz=timezone.utc)
+        return utc_datetime_from_unix_usec(ready_at)
 
     @property
     def failure_detail(self) -> str | None:

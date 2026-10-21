@@ -83,7 +83,12 @@
         "url": "https://www.researchgate.net/publication/6582383_Should_Muslims_have_faith_based_health_services"
       }
     ],
-    "standardized_value": 1968
+    "standardized_value": {
+      "basis": "birth",
+      "as_of": "2026-10-19",
+      "age": {"provenance": "computed", "age_numeral": 58},
+      "birth": {"provenance": "reported", "age_numeral": 1968}
+    }
   },
   "ktp.ai_augment_education": {
     "value": "BSc Physiology, University College London (1990); MBBS Medicine, University College London (1993).",

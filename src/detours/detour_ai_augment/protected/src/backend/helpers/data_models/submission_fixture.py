@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Final, Generic, TypeVar
 
 from pydantic import BaseModel, HttpUrl
@@ -14,8 +15,12 @@ from .pydantic_to_paste import (
     AcademicInstitution,
     AcademicPositionsSubmission,
     AgeFirstPublicationSubmission,
+    AgeFromBirth,
+    AgeFromBirthNumeral,
     CommentsSubmission,
+    ComputedAgeNumeral,
     CurrentAcademicPosition,
+    CurrentAge,
     EducationRecord,
     EducationSubmission,
     FieldSubmission,
@@ -26,6 +31,7 @@ from .pydantic_to_paste import (
     PlaceOfResidenceSubmission,
     RaceEthnicityLanguageCultureStandardized,
     RaceEthnicityLanguageCultureSubmission,
+    ReportedAgeNumeral,
     ResearcherAuthorStandardized,
     ResearcherAuthorSubmission,
     ResearcherLink,
@@ -50,6 +56,7 @@ EVIDENCE_DEF: Final[Callable[[str], WebSearchExcerpt]] = lambda claim: WebSearch
     excerpt=Locale.EXAMPLE_EXCERPT_TEMPLATE.format(claim=claim),
     url=Locale.EXAMPLE_RESULT_URL,
 )
+AGE_EXAMPLE_AS_OF: Final = datetime.now(timezone.utc).date()
 
 # Note: originally generated via chatgpt.com
 # on 2026-07-27 UTC, using GPT-5.6-Sol-High
@@ -113,7 +120,7 @@ L_FEI_FEI_INITIAL_FIXTURE: Final[SubmissionFixture[Submission]] = SubmissionFixt
                 "profile dated 2005."
             ),
             web_search_excerpts=[
-                EVIDENCE_DEF("the age/year of birth"),
+                EVIDENCE_DEF("1976"),
                 EVIDENCE_DEF("the earliest visible publication date"),
             ],
         ),
@@ -272,7 +279,11 @@ L_FEI_FEI_RETRY_FIXTURE.submission.race_ethnicity_language_culture.standardized_
     )
 )
 L_FEI_FEI_RETRY_FIXTURE.submission.gender.standardized_value = "Woman"
-L_FEI_FEI_RETRY_FIXTURE.submission.age_first_publication.standardized_value = 1976
+L_FEI_FEI_RETRY_FIXTURE.submission.age_first_publication.standardized_value = AgeFromBirth(
+    as_of=AGE_EXAMPLE_AS_OF,
+    age=ComputedAgeNumeral[CurrentAge](age_numeral=AGE_EXAMPLE_AS_OF.year - 1976),
+    birth=ReportedAgeNumeral[AgeFromBirthNumeral](age_numeral=1976),
+)
 L_FEI_FEI_RETRY_FIXTURE.submission.education.standardized_value = [
     EducationRecord.model_construct(
         degree_conferred="B.A. Physics",

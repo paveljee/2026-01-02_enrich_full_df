@@ -10,10 +10,11 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from enum import IntFlag, StrEnum
 from pathlib import Path, PurePosixPath
 from random import Random
 from string import Formatter
-from typing import TYPE_CHECKING, Callable, Final, Literal, Self
+from typing import Callable, Final, Literal, NewType, Self
 from unicodedata import normalize
 from urllib.parse import unquote
 from uuid import UUID
@@ -30,15 +31,21 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
+from pydantic_core import to_jsonable_python
 
 from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
 from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
+    AgeFirstPublicationSubmission,
+    AgeFromBirth,
+    AgeFromFirstPublication,
+    CommentsSubmission,
     EvidenceSubmission,
     EvidenceWithdrawal,
     FieldSubmission,
     StandardizedFieldSubmission,
     StandardizedSubmission,
+    StandardizedValue,
     WebSearchExcerpt,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_fixture import (  # noqa: E501
@@ -46,6 +53,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.sub
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E501
     Submission,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_mixin import (  # noqa: E501
+    submission_http_context,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
@@ -66,12 +76,21 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     HAS_CONTROL_CHARACTER,
     ISO_8601_UTC_OFFSET,
     ISO_8601_UTC_SUFFIX,
+    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
+    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
     KTP_AI_AUGMENT_COMMENTS_COL,
+    KTP_AI_AUGMENT_EDUCATION_COL,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
+    KTP_AI_AUGMENT_GENDER_COL,
+    KTP_AI_AUGMENT_LINKS_COL,
+    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
+    KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
+    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
-    MILLISECONDS_PER_SECOND,
+    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
+    NAME_KEY_HEADER,
     ROLLOUT_FILENAME_PREFIX,
     ROLLOUT_FILENAME_SUFFIX,
     SOURCE_KEY_HEADER,
@@ -81,15 +100,19 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
 )
 from src.detours.detour_ai_augment.protected.src.shared import (
     AppendwatchReportError,
+    name_key_from_header_value,
     parse_appendwatch_report,
     pydantic_diagnostic_json,
     require_nonblank_text,
     source_key_from_header_value,
+    unix_usec_from_uuidv7,
+    utc_datetime_from_unix_usec,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
     BackendLifecycle,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.model_http_interceptor import (  # noqa: E501
+    ModelHttpInterceptor,
     ModelHttpRequired,
     ReplayInputMissing,
 )
@@ -107,11 +130,6 @@ from src.helpers.vars import (
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
 )
-
-if TYPE_CHECKING:
-    from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (  # noqa: E501
-        BackendValidationRequestRecord,
-    )
 
 logger = logging.getLogger(__name__)
 
@@ -131,31 +149,13 @@ class _CommitConfigFacts(FrozenStrictModel):
 
 
 class _CommitEvaluationInputs(FrozenStrictModel):
-    original_pull_response_record: PullResponseRecord
-    namekey: NameKey
     config_facts: _CommitConfigFacts
     draw_number: LazyResultFactory[[], str, Exception]
     cas_codex_rollout_record: LazyResultFactory[[], CASCodexRolloutRecord, Exception]
 
 
-class _RetryBaselineRow(FrozenStrictModel):
-    namekey_json: StrictStr
-    session_id_text: StrictStr
-    commit_record_id_text: StrictStr
-    obligations_json: StrictStr
-
-
-class _AppliedRetryAuditRow(FrozenStrictModel):
-    submission_json: StrictStr
-    assessment_json: StrictStr
-
-
 class _DetourDbValidationReads(FrozenStrictModel):
-    retry_baseline_exists: LazyResultFactory[[], bool, Exception]
-    retry_baseline_row: LazyResultFactory[[], _RetryBaselineRow, Exception]
-    applied_retry_audit_rows: LazyResultFactory[
-        [UUID], tuple[_AppliedRetryAuditRow, ...], Exception
-    ]
+    field_audits: LazyResultFactory[[], tuple[_FieldAudit, ...], Exception]
 
 
 RETRY_EVIDENCE_SUBMISSION_EXAMPLE = L_FEI_FEI_RETRY_FIXTURE.submission.model_dump(
@@ -257,29 +257,17 @@ STANDARDIZED_VALUE_FIELD = next(
     for field in StandardizedFieldSubmission.model_fields
     if field not in FieldSubmission.model_fields
 )
+STANDARDIZED_FIELD_MODELS = {
+    field.alias: field.annotation
+    for field in StandardizedSubmission.model_fields.values()
+    if field.alias in AI_AUGMENT_EVIDENCE_COLUMNS
+}
 DRAW_NUMBER_COLUMN = DRAW_LABEL
 FRAGMENT_TYPE_COLUMN = KTP_FRAGMENT_TYPE_COL
 DOCX_ROW_FRAGMENT_TYPE = FragmentType.DOCX_ROW.value
 
 
-class _RetryEvidenceObligation(FrozenStrictModel):
-    outcome: EvidenceOutcome
-    excerpt: StrictStr | None = None
-    url: StrictStr | None = None
-    normalized_tokens: list[StrictStr] = Field(default_factory=list)
-
-
-class _RetryFieldObligation(FrozenStrictModel):
-    value: StrictStr
-    evidence: list[_RetryEvidenceObligation]
-    accepted: bool
-
-
-class _RetryObligations(FrozenStrictModel):
-    fields: dict[StrictStr, _RetryFieldObligation]
-
-
-class _EvidenceCandidateAudit(FrozenStrictModel):
+class _EvidenceAuditCandidate(FrozenStrictModel):
     ref_id: StrictStr
     call_id: StrictStr
     cite_text: StrictStr
@@ -287,18 +275,84 @@ class _EvidenceCandidateAudit(FrozenStrictModel):
     url: StrictStr
 
 
-class _EvidenceItemAudit(FrozenStrictModel):
+class _EvidenceAuditItem(FrozenStrictModel):
     field: StrictStr
     index: int
     outcome: EvidenceOutcome
     excerpt: StrictStr | None
     url: StrictStr | None
     normalized_tokens: list[StrictStr]
-    candidates: list[_EvidenceCandidateAudit]
+    candidates: list[_EvidenceAuditCandidate]
 
 
-class _EvidenceAssessmentAudit(FrozenStrictModel):
-    items: list[_EvidenceItemAudit]
+class _EvidenceSubmissionColumn(StrEnum):
+    RESEARCHER_AUTHOR = KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL
+    PLACE_OF_RESIDENCE = KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL
+    RACE_ETHNICITY_LANGUAGE_CULTURE = KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
+    GENDER = KTP_AI_AUGMENT_GENDER_COL
+    AGE_FIRST_PUBLICATION = KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL
+    EDUCATION = KTP_AI_AUGMENT_EDUCATION_COL
+    ACADEMIC_POSITIONS = KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL
+    SOCIAL_CAPITAL = KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL
+    LINKS = KTP_AI_AUGMENT_LINKS_COL
+
+
+_EvidenceNumberOffset = NewType("_EvidenceNumberOffset", int)
+
+
+class _RetryViolation(FrozenStrictModel):
+    submission_column: _EvidenceSubmissionColumn
+    message: StrictStr
+
+
+class _FieldPin(IntFlag):
+    NARRATIVE = 1
+    EVIDENCE = 2
+    STANDARDIZED = 4
+
+
+class _EvidenceObligation(FrozenStrictModel):
+    outcome: EvidenceOutcome
+    submission: EvidenceSubmission
+
+
+class _StandardizedPin(FrozenStrictModel):
+    canonical_json: StrictStr
+
+    @classmethod
+    def from_value(cls, value: StandardizedValue) -> Self:
+        return cls(canonical_json=json.dumps(
+            to_jsonable_python(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=COMPACT_JSON_SEPARATORS,
+        ))
+
+
+class _FieldPinState(FrozenStrictModel):
+    pins: _FieldPin = _FieldPin(0)
+    narrative_value: StrictStr | None = None
+    evidence_obligations: tuple[_EvidenceObligation, ...] = ()
+    standardized_value: _StandardizedPin | None = None
+
+
+class _FieldAudit(FrozenStrictModel):
+    submission_column: _EvidenceSubmissionColumn
+    state: _FieldPinState
+    items: tuple[_EvidenceAuditItem, ...]
+    violations: tuple[_RetryViolation, ...]
+
+
+class _FinalSubmission(FrozenStrictModel):
+    fields: dict[_EvidenceSubmissionColumn, _FieldPinState]
+
+    @property
+    def complete(self) -> bool:
+        required = _FieldPin.NARRATIVE | _FieldPin.EVIDENCE | _FieldPin.STANDARDIZED
+        return all(
+            self.fields.get(column, _FieldPinState()).pins == required
+            for column in _EvidenceSubmissionColumn
+        )
 
 
 class _CodexTextResult(BaseModel):
@@ -947,126 +1001,112 @@ def _candidate_match(
     )
 
 
+def _assess_field_evidence(
+    rollout_index: _RolloutIndex,
+    field: _EvidenceSubmissionColumn,
+    field_submission: FieldSubmission,
+    *,
+    config_facts: _CommitConfigFacts,
+    evidence_number_offset: _EvidenceNumberOffset,
+) -> _EvidenceAssessment:
+    assessments: list[_EvidenceItemAssessment] = []
+    for index, evidence in enumerate(field_submission.web_search_excerpts):
+        evidence_number = evidence_number_offset + index + 1
+        if isinstance(evidence, EvidenceWithdrawal):
+            assessments.append(
+                _EvidenceItemAssessment(
+                    field=field.value,
+                    index=index,
+                    evidence_number=evidence_number,
+                    submission=evidence,
+                    outcome=EVIDENCE_OUTCOME_WITHDRAWN,
+                    match=None,
+                )
+            )
+            continue
+
+        exact_candidates = _exact_evidence_candidates(
+            rollout_index,
+            excerpt=evidence.excerpt,
+        )
+        exact_url_candidates = tuple(
+            candidate for candidate in exact_candidates
+            if evidence_urls_match(evidence.url, candidate.url)
+        )
+        if exact_url_candidates:
+            if len(exact_url_candidates) > 1 and not ALLOW_MULTIPLE_EVIDENCE_MATCHES:
+                raise _MultipleEvidenceMatches(evidence.excerpt)
+            candidate = (
+                EVIDENCE_RANDOM.choice(exact_url_candidates)
+                if len(exact_url_candidates) > 1
+                else exact_url_candidates[0]
+            )
+            assessments.append(
+                _EvidenceItemAssessment(
+                    field=field.value,
+                    index=index,
+                    evidence_number=evidence_number,
+                    submission=evidence,
+                    outcome=EVIDENCE_OUTCOME_V1_EXACT,
+                    match=_candidate_match(
+                        candidate,
+                        field=field.value,
+                        evidence_number=evidence_number,
+                        evidence=evidence,
+                    ),
+                    candidates=exact_url_candidates,
+                )
+            )
+            continue
+
+        normalized_tokens: tuple[str, ...] = ()
+        near_candidates: tuple[_EvidenceCandidate, ...] = ()
+        if config_facts.codex_match_version == 2:
+            normalized_tokens = _normalized_evidence_tokens(evidence.excerpt)
+            near_candidates = _near_evidence_candidates(
+                rollout_index,
+                url=evidence.url,
+                submitted_tokens=normalized_tokens,
+            )
+        assessments.append(
+            _EvidenceItemAssessment(
+                field=field.value,
+                index=index,
+                evidence_number=evidence_number,
+                submission=evidence,
+                outcome=(
+                    EVIDENCE_OUTCOME_V2_NEAR if near_candidates else EVIDENCE_OUTCOME_UNMATCHED
+                ),
+                match=None,
+                normalized_tokens=normalized_tokens,
+                candidates=near_candidates or exact_candidates,
+            )
+        )
+    return _EvidenceAssessment(items=tuple(assessments))
+
+
 def assess_submission_evidence(
     rollout_index: _RolloutIndex,
     submission_payload: Submission | StandardizedSubmission,
     *,
-    codex_match_version: int,
+    config_facts: _CommitConfigFacts,
 ) -> _EvidenceAssessment:
-    assessments: list[_EvidenceItemAssessment] = []
-    evidence_number = 0
-    for field, field_submission in submission_payload.evidence_items():
-        for index, evidence in enumerate(field_submission.web_search_excerpts):
-            evidence_number += 1
-            if isinstance(evidence, EvidenceWithdrawal):
-                assessments.append(
-                    _EvidenceItemAssessment(
-                        field=field,
-                        index=index,
-                        evidence_number=evidence_number,
-                        submission=evidence,
-                        outcome=EVIDENCE_OUTCOME_WITHDRAWN,
-                        match=None,
-                    )
-                )
-                continue
-
-            exact_candidates = _exact_evidence_candidates(
-                rollout_index,
-                excerpt=evidence.excerpt,
-            )
-            exact_url_candidates = tuple(
-                candidate for candidate in exact_candidates
-                if evidence_urls_match(evidence.url, candidate.url)
-            )
-            if exact_url_candidates:
-                if len(exact_url_candidates) > 1 and not ALLOW_MULTIPLE_EVIDENCE_MATCHES:
-                    raise _MultipleEvidenceMatches(evidence.excerpt)
-                candidate = (
-                    EVIDENCE_RANDOM.choice(exact_url_candidates)
-                    if len(exact_url_candidates) > 1
-                    else exact_url_candidates[0]
-                )
-                assessments.append(
-                    _EvidenceItemAssessment(
-                        field=field,
-                        index=index,
-                        evidence_number=evidence_number,
-                        submission=evidence,
-                        outcome=EVIDENCE_OUTCOME_V1_EXACT,
-                        match=_candidate_match(
-                            candidate,
-                            field=field,
-                            evidence_number=evidence_number,
-                            evidence=evidence,
-                        ),
-                        candidates=exact_url_candidates,
-                    )
-                )
-                continue
-
-            normalized_tokens: tuple[str, ...] = ()
-            near_candidates: tuple[_EvidenceCandidate, ...] = ()
-            if codex_match_version == 2:
-                normalized_tokens = _normalized_evidence_tokens(evidence.excerpt)
-                near_candidates = _near_evidence_candidates(
-                    rollout_index,
-                    url=evidence.url,
-                    submitted_tokens=normalized_tokens,
-                )
-            assessments.append(
-                _EvidenceItemAssessment(
-                    field=field,
-                    index=index,
-                    evidence_number=evidence_number,
-                    submission=evidence,
-                    outcome=(
-                        EVIDENCE_OUTCOME_V2_NEAR if near_candidates else EVIDENCE_OUTCOME_UNMATCHED
-                    ),
-                    match=None,
-                    normalized_tokens=normalized_tokens,
-                    candidates=near_candidates or exact_candidates,
-                )
-            )
-    return _EvidenceAssessment(items=tuple(assessments))
+    items: list[_EvidenceItemAssessment] = []
+    for field_name, field_submission in submission_payload.evidence_items():
+        items.extend(_assess_field_evidence(
+            rollout_index,
+            _EvidenceSubmissionColumn(field_name),
+            field_submission,
+            config_facts=config_facts,
+            evidence_number_offset=_EvidenceNumberOffset(len(items)),
+        ).items)
+    return _EvidenceAssessment(items=tuple(items))
 
 
-def _retry_evidence_obligation(
-    item: _EvidenceItemAssessment,
-) -> _RetryEvidenceObligation:
-    if isinstance(item.submission, WebSearchExcerpt):
-        excerpt = item.submission.excerpt
-        url = item.submission.url
-    else:
-        excerpt = None
-        url = None
-    return _RetryEvidenceObligation(
-        outcome=item.outcome,
-        excerpt=excerpt,
-        url=url,
-        normalized_tokens=list(item.normalized_tokens),
-    )
-
-
-def _retry_obligations_from_assessment(
-    submission_payload: Submission | StandardizedSubmission,
+def _evidence_audit(
     assessment: _EvidenceAssessment,
-) -> _RetryObligations:
-    fields: dict[str, _RetryFieldObligation] = {}
-    for field, field_submission in submission_payload.evidence_items():
-        evidence = [
-            _retry_evidence_obligation(item) for item in assessment.items if item.field == field
-        ]
-        fields[field] = _RetryFieldObligation(
-            value=field_submission.value,
-            evidence=evidence,
-            accepted=EVIDENCE_ITEMS_ACCEPTED_DEF(tuple(item.outcome for item in evidence)),
-        )
-    return _RetryObligations(fields=fields)
-
-
-def _assessment_audit(assessment: _EvidenceAssessment) -> _EvidenceAssessmentAudit:
-    items: list[_EvidenceItemAudit] = []
+) -> tuple[_EvidenceAuditItem, ...]:
+    items: list[_EvidenceAuditItem] = []
     for item in assessment.items:
         if isinstance(item.submission, WebSearchExcerpt):
             excerpt = item.submission.excerpt
@@ -1075,7 +1115,7 @@ def _assessment_audit(assessment: _EvidenceAssessment) -> _EvidenceAssessmentAud
             excerpt = None
             url = None
         items.append(
-            _EvidenceItemAudit(
+            _EvidenceAuditItem(
                 field=item.field,
                 index=item.index,
                 outcome=item.outcome,
@@ -1083,7 +1123,7 @@ def _assessment_audit(assessment: _EvidenceAssessment) -> _EvidenceAssessmentAud
                 url=url,
                 normalized_tokens=list(item.normalized_tokens),
                 candidates=[
-                    _EvidenceCandidateAudit(
+                    _EvidenceAuditCandidate(
                         ref_id=candidate.ref_id,
                         call_id=candidate.call_id,
                         cite_text=candidate.cite_text,
@@ -1094,7 +1134,7 @@ def _assessment_audit(assessment: _EvidenceAssessment) -> _EvidenceAssessmentAud
                 ],
             )
         )
-    return _EvidenceAssessmentAudit(items=items)
+    return tuple(items)
 
 
 def _log_evidence_assessment(
@@ -1166,12 +1206,12 @@ def _validate_progress_template(template: str) -> str:
 def _assessment_public_detail(
     assessment: _EvidenceAssessment,
     *,
-    progress_template: str,
-    violations: Sequence[str] = (),
+    progress_template: str | None,
+    violations: Sequence[_RetryViolation] = (),
     include_retry_contract: bool = False,
 ) -> str:
     total = len(assessment.items)
-    lines = [
+    lines = [] if progress_template is None else [
         _validate_progress_template(progress_template).format(
             exact=assessment.exact_count,
             total=total,
@@ -1196,299 +1236,311 @@ def _assessment_public_detail(
             if len(violations) == 1
             else Locale.EVIDENCE_RETRY_VIOLATIONS_HEADER_TEMPLATE.format(count=len(violations))
         )
-        lines.extend(f"- {violation}" for violation in violations)
-    lines.append(Locale.EVIDENCE_RETRY_INSTRUCTION)
+        lines.extend(f"- {violation.message}" for violation in violations)
+    if non_exact_items:
+        lines.append(Locale.EVIDENCE_RETRY_COMPARE_INSTRUCTION)
+    if violations:
+        lines.append(Locale.EVIDENCE_RETRY_RESOLVE_INSTRUCTION)
+    if non_exact_items or violations:
+        lines.append(Locale.EVIDENCE_RETRY_RESUBMIT_INSTRUCTION)
     if include_retry_contract:
         lines.append(RETRY_SUBMISSION_PUBLIC_GUIDANCE)
     return "\n".join(lines)
 
 
+def _age_evidence_check_failed(
+    age_standardized_submission: AgeFirstPublicationSubmission,
+    *,
+    push_response_record: PushResponseRecord,
+) -> bool:
+    age_value = age_standardized_submission.standardized_value
+    if not isinstance(age_value, (AgeFromBirth, AgeFromFirstPublication)):
+        return False
+    failed = False
+    push_received_at_unix_usec = (
+        push_response_record.ready_to_respond_at_unix_usec
+        - push_response_record.duration_usec
+    )
+    push_date = utc_datetime_from_unix_usec(push_received_at_unix_usec).date()
+    if age_value.as_of != push_date:
+        logger.warning(
+            Locale.AGE_EVIDENCE_AS_OF_MISMATCH_LOG,
+            age_value.as_of,
+            push_date,
+            push_received_at_unix_usec,
+        )
+        failed = True
+    reported = (
+        age_value.birth
+        if isinstance(age_value, AgeFromBirth)
+        else age_value.first_publication
+    )
+    reported_text = str(reported.age_numeral)
+    if not any(
+        reported_text in item.excerpt
+        for item in age_standardized_submission.web_search_excerpts
+        if isinstance(item, WebSearchExcerpt)
+    ):
+        logger.warning(
+            Locale.AGE_EVIDENCE_REPORTED_NOT_FOUND_LOG,
+            reported_text,
+            tuple(
+                item.excerpt
+                for item in age_standardized_submission.web_search_excerpts
+                if isinstance(item, WebSearchExcerpt)
+            ),
+        )
+        failed = True
+    return failed
+
+
 def _obligation_item_is_unchanged(
-    previous: _RetryEvidenceObligation,
+    previous: _EvidenceObligation,
     current: EvidenceSubmission,
 ) -> bool:
-    if previous.outcome == EVIDENCE_OUTCOME_V1_EXACT:
-        return (
-            isinstance(current, WebSearchExcerpt)
-            and current.excerpt == previous.excerpt
-            and current.url == previous.url
-        )
-    return previous.outcome == EVIDENCE_OUTCOME_WITHDRAWN and isinstance(
-        current, EvidenceWithdrawal
-    )
+    return previous.submission == current
 
 
 def _apply_retry_obligations(
-    submission: StandardizedSubmission,
+    field: _EvidenceSubmissionColumn,
+    submission: FieldSubmission,
     assessment: _EvidenceAssessment,
-    previous: _RetryObligations,
-) -> tuple[_RetryObligations, tuple[str, ...]]:
-    next_fields: dict[str, _RetryFieldObligation] = {}
-    violations: list[str] = []
-    assessed_items = {(item.field, item.index): item for item in assessment.items}
-    for field, field_submission in submission.evidence_items():
-        previous_field = previous.fields[field]
-        current_evidence = field_submission.web_search_excerpts
-        if previous_field.accepted:
-            unchanged = (
-                field_submission.value == previous_field.value
-                and len(current_evidence) == len(previous_field.evidence)
-                and all(
-                    _obligation_item_is_unchanged(previous_item, current_item)
-                    for previous_item, current_item in zip(
-                        previous_field.evidence,
-                        current_evidence,
-                        strict=True,
-                    )
-                )
-            )
-            if not unchanged:
-                violations.append(
-                    Locale.EVIDENCE_ACCEPTED_FIELD_IMMUTABLE_TEMPLATE.format(immutable=field)
-                )
-            next_fields[field] = previous_field
+    previous: _FieldPinState,
+) -> tuple[tuple[_EvidenceObligation, ...], tuple[_RetryViolation, ...], bool]:
+    current_evidence = submission.web_search_excerpts
+    prior_evidence = previous.evidence_obligations
+    violations: list[_RetryViolation] = []
+    next_evidence: list[_EvidenceObligation] = []
+    changed = tuple(current_evidence) != tuple(
+        obligation.submission for obligation in prior_evidence
+    )
+
+    if previous.pins & _FieldPin.EVIDENCE:
+        if changed:
+            violations.append(_RetryViolation(
+                submission_column=field,
+                message=Locale.EVIDENCE_ACCEPTED_FIELD_IMMUTABLE_TEMPLATE.format(
+                    immutable=field.value,
+                ),
+            ))
+        return prior_evidence, tuple(violations), False
+
+    if len(current_evidence) < len(prior_evidence):
+        violations.append(_RetryViolation(
+            submission_column=field,
+            message=Locale.EVIDENCE_COUNT_DECREASED_TEMPLATE.format(field=field.value),
+        ))
+
+    withdrawn_indices: list[int] = []
+    for index, item in enumerate(assessment.items):
+        current = item.submission
+        location = EVIDENCE_LOCATION_DEF(field.value, index)
+        if index >= len(prior_evidence):
+            if isinstance(current, EvidenceWithdrawal):
+                violations.append(_RetryViolation(
+                    submission_column=field,
+                    message=Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE,
+                ))
+                # Keep the exact items in this field pinned. This invalid withdrawal
+                # may be replaced by evidence, but cannot authorize a withdrawal.
+                next_evidence.append(_EvidenceObligation(
+                    outcome=EVIDENCE_OUTCOME_UNMATCHED,
+                    submission=current,
+                ))
+            else:
+                next_evidence.append(_EvidenceObligation(
+                    outcome=item.outcome, submission=current,
+                ))
             continue
 
-        if len(current_evidence) < len(previous_field.evidence):
-            violations.append(Locale.EVIDENCE_COUNT_DECREASED_TEMPLATE.format(field=field))
-
-        next_evidence: list[_RetryEvidenceObligation] = []
-        withdrew_item = False
-        for index, previous_item in enumerate(previous_field.evidence):
-            if index >= len(current_evidence):
-                next_evidence.append(previous_item)
+        prior = prior_evidence[index]
+        if prior.outcome == EVIDENCE_OUTCOME_V1_EXACT:
+            if not _obligation_item_is_unchanged(prior, current):
+                violations.append(_RetryViolation(
+                    submission_column=field,
+                    message=Locale.EVIDENCE_EXACT_IMMUTABLE_TEMPLATE.format(
+                        immutable=location,
+                    ),
+                ))
+            next_evidence.append(prior)
+            continue
+        if prior.outcome == EVIDENCE_OUTCOME_V2_NEAR:
+            if isinstance(current, EvidenceWithdrawal):
+                violations.append(_RetryViolation(
+                    submission_column=field,
+                    message=Locale.EVIDENCE_WITHDRAWAL_NOT_ALLOWED_TEMPLATE.format(
+                        location=location,
+                    ),
+                ))
+                next_evidence.append(prior)
                 continue
-            current_item = current_evidence[index]
-            assessment_item = assessed_items[(field, index)]
-            location = EVIDENCE_LOCATION_DEF(field, index)
-            if previous_item.outcome == EVIDENCE_OUTCOME_V1_EXACT:
-                if not _obligation_item_is_unchanged(previous_item, current_item):
-                    violations.append(
-                        Locale.EVIDENCE_EXACT_IMMUTABLE_TEMPLATE.format(immutable=location)
-                    )
-                next_evidence.append(previous_item)
-                continue
-            if previous_item.outcome == EVIDENCE_OUTCOME_V2_NEAR:
-                if isinstance(current_item, EvidenceWithdrawal):
-                    violations.append(
-                        Locale.EVIDENCE_WITHDRAWAL_NOT_ALLOWED_TEMPLATE.format(location=location)
-                    )
-                    next_evidence.append(previous_item)
+            if (
+                not isinstance(prior.submission, WebSearchExcerpt)
+                or current.url != prior.submission.url
+                or _normalized_evidence_tokens(current.excerpt)
+                != _normalized_evidence_tokens(prior.submission.excerpt)
+                or item.outcome not in {
+                    EVIDENCE_OUTCOME_V1_EXACT, EVIDENCE_OUTCOME_V2_NEAR,
+                }
+            ):
+                violations.append(_RetryViolation(
+                    submission_column=field,
+                    message=Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(
+                        location=location,
+                    ),
+                ))
+                next_evidence.append(prior)
+            else:
+                next_evidence.append(_EvidenceObligation(
+                    outcome=item.outcome, submission=current,
+                ))
+            continue
+        if prior.outcome == EVIDENCE_OUTCOME_UNMATCHED:
+            if isinstance(current, EvidenceWithdrawal):
+                if isinstance(prior.submission, EvidenceWithdrawal):
+                    violations.append(_RetryViolation(
+                        submission_column=field,
+                        message=Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE,
+                    ))
+                    next_evidence.append(prior)
                     continue
-                current_tokens = assessment_item.normalized_tokens
-                if assessment_item.outcome == EVIDENCE_OUTCOME_V1_EXACT:
-                    current_tokens = _normalized_evidence_tokens(current_item.excerpt)
-                if (
-                    current_item.url != previous_item.url
-                    or list(current_tokens) != previous_item.normalized_tokens
-                ):
-                    violations.append(
-                        Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(location=location)
-                    )
-                    next_evidence.append(previous_item)
-                    continue
-                if assessment_item.outcome not in {
-                    EVIDENCE_OUTCOME_V1_EXACT,
-                    EVIDENCE_OUTCOME_V2_NEAR,
-                }:
-                    violations.append(
-                        Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(location=location)
-                    )
-                    next_evidence.append(previous_item)
-                    continue
-                next_evidence.append(_retry_evidence_obligation(assessment_item))
-                continue
-            if previous_item.outcome == EVIDENCE_OUTCOME_UNMATCHED:
-                if isinstance(current_item, EvidenceWithdrawal):
-                    withdrew_item = True
-                next_evidence.append(_retry_evidence_obligation(assessment_item))
-                continue
-            if not isinstance(current_item, EvidenceWithdrawal):
-                violations.append(
-                    Locale.EVIDENCE_WITHDRAWAL_NOT_ALLOWED_TEMPLATE.format(location=location)
-                )
-            next_evidence.append(previous_item)
+                withdrawn_indices.append(index)
+            next_evidence.append(_EvidenceObligation(
+                outcome=item.outcome, submission=current,
+            ))
+            continue
+        if not isinstance(current, EvidenceWithdrawal):
+            violations.append(_RetryViolation(
+                submission_column=field,
+                message=Locale.EVIDENCE_WITHDRAWAL_NOT_ALLOWED_TEMPLATE.format(
+                    location=location,
+                ),
+            ))
+        next_evidence.append(prior)
 
-        for index in range(len(previous_field.evidence), len(current_evidence)):
-            assessment_item = assessed_items[(field, index)]
-            if isinstance(assessment_item.submission, EvidenceWithdrawal):
-                violations.append(Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE)
-            next_evidence.append(_retry_evidence_obligation(assessment_item))
-
-        if withdrew_item and field_submission.value == previous_field.value:
-            violations.append(
-                Locale.EVIDENCE_WITHDRAWAL_VALUE_UNCHANGED_TEMPLATE.format(field=field)
-            )
-        next_fields[field] = _RetryFieldObligation(
-            value=field_submission.value,
-            evidence=next_evidence,
-            accepted=EVIDENCE_ITEMS_ACCEPTED_DEF(tuple(item.outcome for item in next_evidence)),
-        )
-    return _RetryObligations(fields=next_fields), tuple(violations)
-
-
-def _assessment_from_audit(
-    submission: StandardizedSubmission,
-    audit: _EvidenceAssessmentAudit,
-) -> _EvidenceAssessment:
-    submission_fields = dict(submission.evidence_items())
-    items: list[_EvidenceItemAssessment] = []
-    for evidence_number, audit_item in enumerate(audit.items, start=1):
-        evidence = submission_fields[audit_item.field].web_search_excerpts[audit_item.index]
-        items.append(
-            _EvidenceItemAssessment(
-                field=audit_item.field,
-                index=audit_item.index,
-                evidence_number=evidence_number,
-                submission=evidence,
-                outcome=audit_item.outcome,
-                match=None,
-                normalized_tokens=tuple(audit_item.normalized_tokens),
-            )
-        )
-    return _EvidenceAssessment(items=tuple(items))
-
-
-def _derive_retry_obligations(
-    *,
-    baseline_json: str,
-    baseline_commit_record_id: UUID,
-    db_reads: _DetourDbValidationReads,
-) -> _RetryObligations:
-    try:
-        obligations = _RetryObligations.model_validate_json(baseline_json)
-        rows, error = db_reads.applied_retry_audit_rows(baseline_commit_record_id)
-        if error is not None:
-            assert rows is None
-            raise error
-        assert rows is not None
-        for row in rows:
-            submission = StandardizedSubmission.model_validate_with_http_records(
-                row.submission_json
-            )
-            assessment = _assessment_from_audit(
-                submission,
-                _EvidenceAssessmentAudit.model_validate_json(row.assessment_json),
-            )
-            obligations, violations = _apply_retry_obligations(
-                submission,
-                assessment,
-                obligations,
-            )
-            if violations:
-                raise _ValidationPreparationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED)
-        return obligations
-    except (IndexError, KeyError, ValidationError) as exc:
-        if isinstance(exc, ValidationError):
-            logger.error(Locale.PYDANTIC_VALIDATION_DETAILS_LOG, pydantic_diagnostic_json(exc))
-        raise _ValidationPreparationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED) from exc
-
-
-def _evaluate_retry_submission(
-    *,
-    commit_request_record: BackendCommitRequestRecord,
-    namekey: NameKey,
-    submission_payload: Submission | StandardizedSubmission,
-    assessment: _EvidenceAssessment,
-    db_reads: _DetourDbValidationReads,
-) -> tuple[tuple[str, ...], _ValidationProjection]:
-    session_id = commit_request_record.commit_request_body.codex_session_record.session_id
-    assert session_id is not None
-    session_id_text = str(session_id)
-    namekey_json = namekey.to_json_key()
-    initial_obligations = _retry_obligations_from_assessment(
-        submission_payload,
-        assessment,
+    next_evidence.extend(prior_evidence[len(current_evidence):])
+    if withdrawn_indices and submission.value == previous.narrative_value:
+        violations.append(_RetryViolation(
+            submission_column=field,
+            message=Locale.EVIDENCE_WITHDRAWAL_VALUE_UNCHANGED_TEMPLATE.format(
+                field=field.value,
+            ),
+        ))
+        for index in withdrawn_indices:
+            next_evidence[index] = prior_evidence[index]
+    accepted_change = any(
+        index >= len(prior_evidence)
+        or obligation.submission != prior_evidence[index].submission
+        for index, obligation in enumerate(next_evidence)
     )
-    submission_json = submission_payload.model_dump_json(by_alias=True)
-    assessment_json = _assessment_audit(assessment).model_dump_json()
-    baseline_row, error = db_reads.retry_baseline_row()
-    if error is not None:
-        assert baseline_row is None
-        raise error
+    return tuple(next_evidence), tuple(violations), accepted_change
 
-    violations: tuple[str, ...] = ()
-    baseline_obligations_json = None
-    if baseline_row is None:
-        baseline_obligations_json = initial_obligations.model_dump_json()
-        violations = tuple(
-            Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE
-            for item in assessment.items
-            if item.outcome == EVIDENCE_OUTCOME_WITHDRAWN
-        )
+
+def _review_field(
+    field: _EvidenceSubmissionColumn,
+    submission: FieldSubmission,
+    standardized_submission: StandardizedFieldSubmission | None,
+    previous: _FieldPinState,
+    *,
+    rollout_index: _RolloutIndex,
+    config_facts: _CommitConfigFacts,
+    evidence_number_offset: _EvidenceNumberOffset,
+    push_response_record: PushResponseRecord,
+) -> tuple[_FieldAudit, _EvidenceAssessment]:
+    assessment = _assess_field_evidence(
+        rollout_index,
+        field,
+        submission,
+        config_facts=config_facts,
+        evidence_number_offset=evidence_number_offset,
+    )
+    return _transition_field(
+        field,
+        submission,
+        standardized_submission,
+        previous,
+        assessment=assessment,
+        push_response_record=push_response_record,
+    ), assessment
+
+
+def _transition_field(
+    field: _EvidenceSubmissionColumn,
+    submission: FieldSubmission,
+    standardized_submission: StandardizedFieldSubmission | None,
+    previous: _FieldPinState,
+    *,
+    assessment: _EvidenceAssessment,
+    push_response_record: PushResponseRecord,
+) -> _FieldAudit:
+    obligations, evidence_violations, evidence_changed = _apply_retry_obligations(
+        field, submission, assessment, previous,
+    )
+    pins = previous.pins
+    narrative_value = previous.narrative_value
+    standardized_value = previous.standardized_value
+    violations = list(evidence_violations)
+
+    if evidence_changed:
+        pins &= ~(_FieldPin.NARRATIVE | _FieldPin.STANDARDIZED)
+        narrative_value = None
+        standardized_value = None
+
+    if pins & _FieldPin.NARRATIVE:
+        if submission.value != narrative_value:
+            violations.append(_RetryViolation(
+                submission_column=field,
+                message=Locale.EVIDENCE_ACCEPTED_FIELD_IMMUTABLE_TEMPLATE.format(
+                    immutable=field.value,
+                ),
+            ))
     else:
-        if (
-            baseline_row.namekey_json != namekey_json
-            or baseline_row.session_id_text != session_id_text
-        ):
-            raise _PushValidationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
-        try:
-            baseline_commit_record_id = UUID(baseline_row.commit_record_id_text)
-        except ValueError as exc:
-            raise _PushValidationError(
-                Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH
-            ) from exc
-        if str(baseline_commit_record_id) != baseline_row.commit_record_id_text:
-            raise _PushValidationError(
-                Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH
-            )
-        obligations = _derive_retry_obligations(
-            baseline_json=baseline_row.obligations_json,
-            baseline_commit_record_id=baseline_commit_record_id,
-            db_reads=db_reads,
-        )
-        if not isinstance(submission_payload, StandardizedSubmission):
-            raise _ValidationPreparationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED)
-        _next_obligations, violations = _apply_retry_obligations(
-            submission_payload,
-            assessment,
-            obligations,
-        )
-        # Pin durable JSON already produced by Pydantic and checked on replay.
-        # Rehydrating typed fields here would rerun OpenAlex/ROR validators.
-        pins: dict[str, JsonValue] = {}
-        prior = (
-            commit_request_record.commit_request_body.pull_response_record
-            .validation_request_record
-        )
-        # Follow each prior commit's pull back to its validation, newest first.
-        # Older values overwrite newer ones, leaving each field pinned to its
-        # first Pydantic-valid standardized value, even if that retry was unapplied.
-        while prior is not None:
-            validation = prior.validation_request_body.post_commit_validation
-            if validation.submission_type == STANDARDIZED_SUBMISSION_TYPE:
-                prior_submission = validation.submission
-                assert prior_submission is not None
-                for field in AI_AUGMENT_EVIDENCE_COLUMNS:
-                    prior_field = prior_submission[field]
-                    assert isinstance(prior_field, dict)
-                    pins[field] = prior_field[STANDARDIZED_VALUE_FIELD]
-            prior = (
-                prior.validation_request_body.commit_request_record.commit_request_body
-                .pull_response_record.validation_request_record
-            )
-        current_submission = submission_payload.model_dump(mode="json", by_alias=True)
-        pin_violations: list[str] = []
-        for field, pinned_value in pins.items():
-            current_field = current_submission[field]
-            assert isinstance(current_field, dict)
-            if current_field[STANDARDIZED_VALUE_FIELD] != pinned_value:
-                pin_violations.append(
-                    Locale.EVIDENCE_EXACT_IMMUTABLE_TEMPLATE.format(
-                        immutable=f"{field}.{STANDARDIZED_VALUE_FIELD}",
-                    )
-                )
-        violations = (*violations, *pin_violations)
+        narrative_value = submission.value
+        pins |= _FieldPin.NARRATIVE
 
-    applied = not violations
-    accepted = assessment.accepted and applied
-    return violations, _ValidationProjection(
-        commit_request_record=commit_request_record,
-        baseline_obligations_json=baseline_obligations_json,
-        submission_json=submission_json,
-        assessment_json=assessment_json,
-        applied=applied,
-        accepted=accepted,
+    if not evidence_violations and EVIDENCE_ITEMS_ACCEPTED_DEF(
+        tuple(obligation.outcome for obligation in obligations)
+    ):
+        pins |= _FieldPin.EVIDENCE
+
+    if standardized_submission is not None:
+        candidate = _StandardizedPin.from_value(
+            standardized_submission.standardized_value
+        )
+        if pins & _FieldPin.STANDARDIZED:
+            if candidate != standardized_value:
+                violations.append(_RetryViolation(
+                    submission_column=field,
+                    message=Locale.EVIDENCE_EXACT_IMMUTABLE_TEMPLATE.format(
+                        immutable=f"{field.value}.{STANDARDIZED_VALUE_FIELD}",
+                    ),
+                ))
+        elif (
+            isinstance(standardized_submission, AgeFirstPublicationSubmission)
+            and _age_evidence_check_failed(
+                standardized_submission,
+                push_response_record=push_response_record,
+            )
+        ):
+            violations.append(_RetryViolation(
+                submission_column=field,
+                message=f"{field.value}: {Locale.EVIDENCE_SUBMISSION_REJECTED}",
+            ))
+        elif submission.value == narrative_value:
+            standardized_value = candidate
+            pins |= _FieldPin.STANDARDIZED
+
+    state = _FieldPinState(
+        pins=pins,
+        narrative_value=narrative_value,
+        evidence_obligations=obligations,
+        standardized_value=standardized_value,
+    )
+    return _FieldAudit(
+        submission_column=field,
+        state=state,
+        items=_evidence_audit(assessment),
+        violations=tuple(violations),
     )
 
 
@@ -1509,12 +1561,12 @@ def validate_submission_evidence(
     rollout_index: _RolloutIndex,
     submission_payload: Submission | StandardizedSubmission,
     *,
-    codex_match_version: int = 1,
+    config_facts: _CommitConfigFacts,
 ) -> ValidatedEvidence:
     assessment = assess_submission_evidence(
         rollout_index,
         submission_payload,
-        codex_match_version=codex_match_version,
+        config_facts=config_facts,
     )
     if assessment.accepted:
         return assessment.validated
@@ -1659,6 +1711,135 @@ def _accepted_output_row(
     return tuple(output_row.items())
 
 
+def _schema_public_detail(issues: Sequence[tuple[tuple[object, ...], str]]) -> str:
+    corrections: dict[str, str] = {}
+    for location_items, error_type in issues:
+        location = (
+            EVIDENCE_LOCATION_DEF(str(location_items[0]), location_items[2])
+            if len(location_items) > 2
+            and location_items[1] == nameof(lambda: FieldSubmission.web_search_excerpts)
+            and isinstance(location_items[2], int)
+            else ".".join(str(item) for item in location_items[:2])
+            or Locale.SUBMISSION_SCHEMA_ROOT
+        )
+        if len(location_items) <= 2 and error_type == "extra_forbidden":
+            instruction = Locale.SUBMISSION_FIELD_REMOVE
+        elif len(location_items) <= 2 and error_type == PYDANTIC_MISSING_ERROR_TYPE:
+            instruction = Locale.SUBMISSION_FIELD_REQUIRED
+        else:
+            instruction = Locale.SUBMISSION_FIELD_INVALID
+        if location in corrections and corrections[location] != instruction:
+            corrections[location] = Locale.SUBMISSION_FIELD_INVALID
+        else:
+            corrections[location] = instruction
+    lines = [
+        Locale.SUBMISSION_ONE_ISSUE_HEADER
+        if len(corrections) == 1
+        else Locale.SUBMISSION_ISSUES_HEADER_TEMPLATE.format(count=len(corrections))
+    ]
+    lines.extend(
+        Locale.SUBMISSION_SCHEMA_ITEM_TEMPLATE.format(
+            location=location, instruction=instruction,
+        )
+        for location, instruction in corrections.items()
+    )
+    lines.append(Locale.SUBMISSION_RESUBMIT_INSTRUCTION)
+    return "\n".join(lines)
+
+
+def _validate_submission_fields(
+    push_request_body: str | bytes,
+    *,
+    standardized_required: bool,
+) -> tuple[
+    dict[_EvidenceSubmissionColumn, FieldSubmission],
+    dict[_EvidenceSubmissionColumn, StandardizedFieldSubmission],
+    Submission | StandardizedSubmission | None,
+    tuple[tuple[tuple[object, ...], str], ...],
+]:
+    try:
+        raw = json.loads(push_request_body)
+    except ValueError:
+        return {}, {}, None, (((), "json_invalid"),)
+    if not isinstance(raw, dict):
+        return {}, {}, None, (((), "model_type"),)
+    field_submissions: dict[_EvidenceSubmissionColumn, FieldSubmission] = {}
+    standardized_submissions: dict[
+        _EvidenceSubmissionColumn, StandardizedFieldSubmission
+    ] = {}
+    issues: list[tuple[tuple[object, ...], str]] = []
+    allowed = {column.value for column in _EvidenceSubmissionColumn}
+    allowed.add(KTP_AI_AUGMENT_COMMENTS_COL)
+    for key in raw:
+        if key not in allowed:
+            issues.append(((key,), "extra_forbidden"))
+    for column in _EvidenceSubmissionColumn:
+        if column.value not in raw:
+            issues.append(((column.value,), PYDANTIC_MISSING_ERROR_TYPE))
+            continue
+        field_data = raw[column.value]
+        base_data = (
+            {key: field_data[key] for key in FieldSubmission.model_fields if key in field_data}
+            if standardized_required and isinstance(field_data, dict)
+            else field_data
+        )
+        try:
+            field_submissions[column] = FieldSubmission.model_validate(base_data)
+        except ValidationError as exc:
+            issues.extend(
+                ((column.value, *issue[PYDANTIC_ERROR_LOCATION_KEY]),
+                 issue[PYDANTIC_ERROR_TYPE_KEY])
+                for issue in exc.errors(include_url=False, include_context=False,
+                                        include_input=False)
+            )
+            continue
+        if standardized_required:
+            model_type = STANDARDIZED_FIELD_MODELS[column.value]
+            assert isinstance(model_type, type) and issubclass(
+                model_type, StandardizedFieldSubmission
+            )
+            try:
+                standardized_submissions[column] = model_type.model_validate_json(
+                    json.dumps(field_data)
+                )
+            except ValidationError as exc:
+                issues.extend(
+                    ((column.value, *issue[PYDANTIC_ERROR_LOCATION_KEY]),
+                     issue[PYDANTIC_ERROR_TYPE_KEY])
+                    for issue in exc.errors(include_url=False, include_context=False,
+                                            include_input=False)
+                )
+    comments = None
+    if KTP_AI_AUGMENT_COMMENTS_COL in raw and raw[KTP_AI_AUGMENT_COMMENTS_COL] is not None:
+        try:
+            comments = CommentsSubmission.model_validate(raw[KTP_AI_AUGMENT_COMMENTS_COL])
+        except ValidationError as exc:
+            issues.extend(
+                ((KTP_AI_AUGMENT_COMMENTS_COL, *issue[PYDANTIC_ERROR_LOCATION_KEY]),
+                 issue[PYDANTIC_ERROR_TYPE_KEY])
+                for issue in exc.errors(include_url=False, include_context=False,
+                                        include_input=False)
+            )
+    payload: Submission | StandardizedSubmission | None = None
+    if not issues:
+        complete_fields = (
+            standardized_submissions if standardized_required else field_submissions
+        )
+        envelope = {column.value: complete_fields[column] for column in _EvidenceSubmissionColumn}
+        if KTP_AI_AUGMENT_COMMENTS_COL in raw:
+            envelope[KTP_AI_AUGMENT_COMMENTS_COL] = comments
+        model_type = StandardizedSubmission if standardized_required else Submission
+        try:
+            payload = model_type.model_validate(envelope)
+        except ValidationError as exc:
+            issues.extend(
+                (tuple(issue[PYDANTIC_ERROR_LOCATION_KEY]), issue[PYDANTIC_ERROR_TYPE_KEY])
+                for issue in exc.errors(include_url=False, include_context=False,
+                                        include_input=False)
+            )
+    return field_submissions, standardized_submissions, payload, tuple(issues)
+
+
 def _evaluate_submission_for_commit(
     *,
     commit_request_record: BackendCommitRequestRecord,
@@ -1679,9 +1860,8 @@ def _evaluate_submission_for_commit(
     assert session_id is not None
     assert appendwatch_report is not None
 
-    commit_request_timestamp = datetime.fromtimestamp(
-        commit_request_record.record_id.time / MILLISECONDS_PER_SECOND,
-        tz=timezone.utc,
+    commit_request_timestamp = utc_datetime_from_unix_usec(
+        unix_usec_from_uuidv7(commit_request_record.record_id)
     )
     retry_submission_expected = False
     stage = BackendLifecycle.APPENDWATCH_REPORT_VALIDATION
@@ -1754,106 +1934,98 @@ def _evaluate_submission_for_commit(
             if rollout_index.session.session_id != session_id:
                 raise _PushValidationError(Locale.CONFIGURED_SESSION_MISMATCH)
             stage = BackendLifecycle.PYDANTIC_VALIDATION
-            retry_baseline_exists, error = db_reads.retry_baseline_exists()
+            previous_audits, error = db_reads.field_audits()
             if error is not None:
-                assert retry_baseline_exists is None
+                assert previous_audits is None
                 raise error
-            assert retry_baseline_exists is not None
-            retry_submission_expected = retry_baseline_exists
-            try:
-                submission_payload = (
-                    StandardizedSubmission.model_validate_with_http_records(push_request_body)
-                    if retry_submission_expected
-                    else Submission.model_validate_with_http_records(push_request_body)
+            assert previous_audits is not None
+            retry_submission_expected = bool(previous_audits)
+            previous_states = {
+                audit.submission_column: audit.state for audit in previous_audits
+            }
+            with submission_http_context(ModelHttpInterceptor.current()):
+                (
+                    field_submissions,
+                    standardized_submissions,
+                    submission_payload,
+                    schema_issues,
+                ) = _validate_submission_fields(
+                    push_request_body,
+                    standardized_required=retry_submission_expected,
                 )
-            except ValidationError as exc:
-                corrections: dict[str, str] = {}
-                for issue in exc.errors(
-                    include_url=False, include_context=False, include_input=False,
-                ):
-                    location_items = issue[PYDANTIC_ERROR_LOCATION_KEY]
-                    # Deeper union paths can contain internal Pydantic branch names.
-                    location = (
-                        EVIDENCE_LOCATION_DEF(str(location_items[0]), location_items[2])
-                        if len(location_items) > 2
-                        and location_items[1] == nameof(
-                            lambda: FieldSubmission.web_search_excerpts
-                        )
-                        and isinstance(location_items[2], int)
-                        else ".".join(str(item) for item in location_items[:2])
-                        or Locale.SUBMISSION_SCHEMA_ROOT
-                    )
-                    if len(location_items) <= 2 and issue[PYDANTIC_ERROR_TYPE_KEY] == (
-                        "extra_forbidden"
-                    ):
-                        instruction = Locale.SUBMISSION_FIELD_REMOVE
-                    elif len(location_items) <= 2 and issue[PYDANTIC_ERROR_TYPE_KEY] == (
-                        PYDANTIC_MISSING_ERROR_TYPE
-                    ):
-                        instruction = Locale.SUBMISSION_FIELD_REQUIRED
-                    else:
-                        instruction = Locale.SUBMISSION_FIELD_INVALID
-                    if location in corrections and corrections[location] != instruction:
-                        corrections[location] = Locale.SUBMISSION_FIELD_INVALID
-                    else:
-                        corrections[location] = instruction
-                lines = [
-                    Locale.SUBMISSION_ONE_ISSUE_HEADER
-                    if len(corrections) == 1
-                    else Locale.SUBMISSION_ISSUES_HEADER_TEMPLATE.format(
-                        count=len(corrections),
-                    )
-                ]
-                lines.extend(
-                    Locale.SUBMISSION_SCHEMA_ITEM_TEMPLATE.format(
-                        location=location, instruction=instruction,
-                    )
-                    for location, instruction in corrections.items()
-                )
-                lines.append(Locale.SUBMISSION_RESUBMIT_INSTRUCTION)
-                return result(
-                    commit_request_record=commit_request_record,
-                    stage=stage,
-                    submission_payload=None,
-                    retry_projection=retry_projection,
-                    rollout_index=rollout_index,
-                    output_row=output_row,
-                    validation_result=BackendLifecycle.REJECTED,
-                    detail="\n".join(lines),
-                    error=exc,
-                )
-
-            stage = BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION
+            stage = BackendLifecycle.FIELD_VALIDATION
             _seed_evidence_random(inputs.config_facts.sample_seed)
-            evidence_assessment = assess_submission_evidence(
-                rollout_index,
-                submission_payload,
-                codex_match_version=inputs.config_facts.codex_match_version,
-            )
+            field_audits: list[_FieldAudit] = []
+            assessment_items: list[_EvidenceItemAssessment] = []
+            for field in _EvidenceSubmissionColumn:
+                field_submission = field_submissions.get(field)
+                if field_submission is None:
+                    continue
+                audit, field_assessment = _review_field(
+                    field,
+                    field_submission,
+                    standardized_submissions.get(field),
+                    previous_states.get(field, _FieldPinState()),
+                    rollout_index=rollout_index,
+                    config_facts=inputs.config_facts,
+                    evidence_number_offset=_EvidenceNumberOffset(len(assessment_items)),
+                    push_response_record=body.push_response_record,
+                )
+                field_audits.append(audit)
+                assessment_items.extend(field_assessment.items)
+            evidence_assessment = _EvidenceAssessment(items=tuple(assessment_items))
             _log_evidence_assessment(
                 evidence_assessment,
                 commit_request_record=commit_request_record,
             )
-            retry_violations, retry_projection = _evaluate_retry_submission(
-                commit_request_record=commit_request_record,
-                namekey=inputs.namekey,
-                submission_payload=submission_payload,
-                assessment=evidence_assessment,
-                db_reads=db_reads,
+            retry_projection = replace(
+                retry_projection,
+                field_audits=tuple(field_audits),
+                accepted=False if field_audits else None,
             )
-            assert retry_projection.commit_request_record is commit_request_record
+            field_states = dict(previous_states)
+            field_states.update({
+                audit.submission_column: audit.state for audit in field_audits
+            })
+            final_submission = _FinalSubmission(fields=field_states)
+            retry_violations = tuple(
+                violation
+                for audit in field_audits
+                for violation in audit.violations
+            )
+            progress_template = (
+                None if len(field_submissions) != len(_EvidenceSubmissionColumn)
+                else Locale.EVIDENCE_GOOD_PROGRESS_TEMPLATE
+                if EVIDENCE_PROGRESS_PRAISE_DEF(
+                    tuple(item.outcome for item in evidence_assessment.items)
+                )
+                else Locale.EVIDENCE_PROGRESS_TEMPLATE
+            )
+            if schema_issues:
+                schema_detail = _schema_public_detail(schema_issues)
+                assessment_detail = _assessment_public_detail(
+                    evidence_assessment,
+                    progress_template=progress_template,
+                    violations=retry_violations,
+                    include_retry_contract=bool(previous_audits or field_audits),
+                )
+                return result(
+                    commit_request_record=commit_request_record,
+                    stage=BackendLifecycle.PYDANTIC_VALIDATION,
+                    submission_payload=submission_payload,
+                    retry_projection=retry_projection,
+                    rollout_index=rollout_index,
+                    output_row=None,
+                    validation_result=BackendLifecycle.REJECTED,
+                    detail=f"{schema_detail}\n{assessment_detail}",
+                    error=None,
+                )
             if not evidence_assessment.accepted or retry_violations:
                 raise _EvidenceAssessmentError(
                     Locale.EVIDENCE_SUBMISSION_REJECTED,
                     public_detail=_assessment_public_detail(
                         evidence_assessment,
-                        progress_template=(
-                            Locale.EVIDENCE_GOOD_PROGRESS_TEMPLATE
-                            if EVIDENCE_PROGRESS_PRAISE_DEF(
-                                tuple(item.outcome for item in evidence_assessment.items)
-                            )
-                            else Locale.EVIDENCE_PROGRESS_TEMPLATE
-                        ),
+                        progress_template=progress_template,
                         violations=retry_violations,
                         include_retry_contract=True,
                     ),
@@ -1883,12 +2055,17 @@ def _evaluate_submission_for_commit(
                     ),
                     error=None,
                 )
+            if not final_submission.complete:
+                raise _ValidationPreparationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED)
 
             stage = BackendLifecycle.INNERDICT_AND_CARD
             output_row = _accepted_output_row(
                 submission=submission_payload,
                 evidence=evidence_assessment.validated,
-                namekey=inputs.namekey,
+                # Store already asserted this namekey matches the init record.
+                namekey=name_key_from_header_value(
+                    commit_request_record.request_headers.get(NAME_KEY_HEADER)
+                ),
                 draw_number=draw_number,
                 rollout_index=rollout_index,
                 commit_request_timestamp=commit_request_timestamp,
@@ -1898,7 +2075,7 @@ def _evaluate_submission_for_commit(
                 commit_request_record=commit_request_record,
                 stage=stage,
                 submission_payload=submission_payload,
-                retry_projection=retry_projection,
+                retry_projection=replace(retry_projection, accepted=True),
                 rollout_index=rollout_index,
                 output_row=output_row,
                 validation_result=BackendLifecycle.ACCEPTED,
@@ -2046,18 +2223,9 @@ def _log_post_commit_validation(
 def evaluate_commit(
     commit_request_record: BackendCommitRequestRecord,
     *,
-    initial_validation_request_record: BackendValidationRequestRecord | None,
     inputs: _CommitEvaluationInputs,
     db_reads: _DetourDbValidationReads,
 ) -> tuple[PostCommitValidation, _ValidationProjection]:
-    initial_commit = (
-        commit_request_record if initial_validation_request_record is None
-        else initial_validation_request_record.validation_request_body.commit_request_record
-    )
-    assert (
-        inputs.original_pull_response_record
-        is initial_commit.commit_request_body.pull_response_record
-    )
     commit = commit_request_record.commit_request_body
     session_id = commit.codex_session_record.session_id
     rollout = commit.codex_session_record.codex_rollout_record
@@ -2145,9 +2313,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.cod
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (  # noqa: E402, E501
     BackendCommitRequestRecord,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event import (  # noqa: E402, E501
-    PullResponseRecord,
-)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.push_event import (  # noqa: E402, E501
     PushResponseRecord,
 )
@@ -2209,9 +2374,6 @@ class _ValidationProjection:
 
     commit_request_record: BackendCommitRequestRecord
     rollout_index: _RolloutIndex | None = None
-    baseline_obligations_json: str | None = None
-    submission_json: str | None = None
-    assessment_json: str | None = None
-    applied: bool | None = None
+    field_audits: tuple[_FieldAudit, ...] = ()
     accepted: bool | None = None
     output_row: tuple[tuple[str, str | int | None], ...] | None = None
