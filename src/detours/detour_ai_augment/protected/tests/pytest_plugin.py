@@ -1416,7 +1416,9 @@ def operator_aivm(
             start_aivm = True
         else:
             try:
-                reply = input(OPERATOR_START_PROMPT).strip().casefold()
+                # A newline flushes the terminal behind pytest's tee-sys capture.
+                _operator_log(OPERATOR_START_PROMPT.rstrip())
+                reply = input().strip().casefold()
             except EOFError as exc:
                 raise pytest.UsageError(OPERATOR_AIVM_START_REFUSED) from exc
             start_aivm = reply in {"y", "yes"}
