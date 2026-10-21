@@ -7095,9 +7095,11 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
                         assert outcome.submission == StandardizedSubmission.model_validate_json(
                             json.dumps(standardized_rejected)
                         ).model_dump(mode="json", by_alias=True)
-                        assert api_store._execute(
+                        audit_count_row = api_store._execute(
                             f"SELECT count(*) FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}"
-                        ).fetchone()[0] >= len(AI_AUGMENT_EVIDENCE_COLUMNS)
+                        ).fetchone()
+                        assert audit_count_row is not None
+                        assert audit_count_row[0] >= len(AI_AUGMENT_EVIDENCE_COLUMNS)
                     pull = await client.get(PULL_PATH)
                     assert pull.status_code == expected_pull_status
                     if submission is rejected_evidence:

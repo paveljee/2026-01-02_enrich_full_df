@@ -4,9 +4,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models imp
     post_commit_validation,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
-    EVIDENCE_OUTCOME_UNMATCHED,
-    EVIDENCE_OUTCOME_V1_EXACT,
-    EVIDENCE_OUTCOME_WITHDRAWN,
     _apply_retry_obligations,
     _EvidenceAssessment,
     _EvidenceItemAssessment,
@@ -25,6 +22,11 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pyd
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_fixture import (  # noqa: E501
     L_FEI_FEI_RETRY_FIXTURE,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    EVIDENCE_OUTCOME_UNMATCHED,
+    EVIDENCE_OUTCOME_V1_EXACT,
+    EVIDENCE_OUTCOME_WITHDRAWN,
 )
 
 

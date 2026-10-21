@@ -1825,7 +1825,10 @@ def _validate_submission_fields(
         complete_fields = (
             standardized_submissions if standardized_required else field_submissions
         )
-        envelope = {column.value: complete_fields[column] for column in _EvidenceSubmissionColumn}
+        envelope: dict[str, BaseModel | None] = {
+            column.value: complete_fields[column]
+            for column in _EvidenceSubmissionColumn
+        }
         if KTP_AI_AUGMENT_COMMENTS_COL in raw:
             envelope[KTP_AI_AUGMENT_COMMENTS_COL] = comments
         model_type = StandardizedSubmission if standardized_required else Submission
