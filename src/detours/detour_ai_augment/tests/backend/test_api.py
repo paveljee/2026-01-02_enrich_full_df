@@ -172,6 +172,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     LOCATION_HEADER,
     MAP_SUBSET_0_TO_BATCH_KEY,
     MICROSECONDS_PER_SECOND,
+    MILLISECONDS_PER_SECOND,
     NAME_KEY_HEADER,
     NAMEKEY_ENV_NAME,
     NANOSECONDS_PER_MICROSECOND,
@@ -214,6 +215,8 @@ from src.detours.detour_ai_augment.protected.src.shared import (
     parse_appendwatch_report,
     source_key_from_header_value,
     source_key_header_value,
+    unix_usec_from_uuidv7,
+    utc_datetime_from_unix_usec,
 )
 from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (  # noqa: E501
     StartupFiles,
@@ -448,15 +451,26 @@ def persisted_http_record(
 
 
 def deterministic_uuid7(value: str) -> UUID:
-    return UUID(
-        bytes=hashlib.sha256(value.encode(TEXT_ENCODING)).digest()[:16],
-        version=7,
+    timestamp_msec = int(
+        TEST_COMMIT_REQUEST_TIMESTAMP.timestamp() * MILLISECONDS_PER_SECOND
+    )
+    entropy = hashlib.sha256(value.encode(TEXT_ENCODING)).digest()[:10]
+    return UUID(bytes=timestamp_msec.to_bytes(6, "big") + entropy, version=7)
+
+
+def test_deterministic_uuid7_has_valid_timestamp() -> None:
+    record_id = deterministic_uuid7("synthetic-commit")
+    assert record_id == deterministic_uuid7("synthetic-commit")
+    assert record_id != deterministic_uuid7("another-synthetic-commit")
+    assert utc_datetime_from_unix_usec(unix_usec_from_uuidv7(record_id)) == (
+        TEST_COMMIT_REQUEST_TIMESTAMP
     )
 
 
 def retry_commit_records(
     *,
     original_pull_record_id: UUID,
+    init_request_record: BackendInitRequestRecord,
     session_id: UUID,
     synthetic_record_id_seed: str,
 ) -> tuple[PullResponseRecord, BackendCommitRequestRecord]:
@@ -510,7 +524,7 @@ def retry_commit_records(
                 f"{ROLLOUT_FILENAME_PREFIX}{session_id}{ROLLOUT_FILENAME_SUFFIX}",
                 rollout.line_count,
             ),
-            NAME_KEY_HEADER: name_key_header_value(TEST_NAMEKEY_MODEL),
+            NAME_KEY_HEADER: name_key_header_value(init_request_record.namekey),
         },
         request_body=body.model_dump_json(),
         response_code=None,
@@ -538,6 +552,7 @@ def evaluate_retry_submission_for_test(
 ) -> tuple[str, ...]:
     original_pull, commit_request_record = retry_commit_records(
         original_pull_record_id=original_pull_record_id,
+        init_request_record=init_request_record,
         session_id=session_id,
         synthetic_record_id_seed=synthetic_record_id_seed,
     )
@@ -588,6 +603,7 @@ def test_age_evidence_validation_uses_push_utc_date_and_logs_privately(
     ) * MICROSECONDS_PER_SECOND
     _, commit = retry_commit_records(
         original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+        init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
         session_id=TEST_SESSION_ID,
         synthetic_record_id_seed="age-evidence-push",
     )
@@ -3532,6 +3548,7 @@ def test_evidence_percent_encoded_citation_url_matches_and_logs_raw_urls(
 
     _, commit_request_record = retry_commit_records(
         original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+        init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
         session_id=TEST_SESSION_ID,
         synthetic_record_id_seed="encoded-evidence-url",
     )
@@ -4522,6 +4539,7 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
             with operation_lock:
                 original_pull, commit_request_record = retry_commit_records(
                     original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+                    init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
                     session_id=TEST_SESSION_ID,
                     synthetic_record_id_seed=synthetic_record_id_seed,
                 )

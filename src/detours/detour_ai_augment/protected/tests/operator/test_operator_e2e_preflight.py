@@ -272,7 +272,9 @@ def _workflow_http_records(
     initial: BackendValidationRequestRecord | None = None
     for index in range(2 if with_initial else 1):
         pull, commit = api_fixtures.retry_commit_records(
-            original_pull_record_id=uuid7(), session_id=session_id,
+            original_pull_record_id=uuid7(),
+            init_request_record=init_request_record(STARTUP_NAMEKEY),
+            session_id=session_id,
             synthetic_record_id_seed=f"operator-history-{index}",
         )
         providers = tuple(

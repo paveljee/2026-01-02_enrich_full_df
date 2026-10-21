@@ -51,6 +51,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pos
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EXPORT_OPENALEX_API_KEY,
+    AgeFromBirth,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_fixture import (  # noqa: E501
     L_FEI_FEI_RETRY_FIXTURE,
@@ -3800,8 +3801,15 @@ def test_martin_standardized_serializer_formats_fixture_and_preserves_single_val
         ))
 
     assert control_ui.martin_serialize_standardized_cell(cell("gender")) == cell("gender")
+    age = submission.age_first_publication.standardized_value
+    assert isinstance(age, AgeFromBirth)
     assert control_ui.martin_serialize_standardized_cell(cell("age_first_publication")) == (
-        cell("age_first_publication")
+        f"{AI_GENERATED_TEXT_PREFIX}\n\n```\n"
+        f"{age.as_of.isoformat()}\n"
+        f"computed, {age.age.age_numeral}\n"
+        "birth\n"
+        f"reported, {age.birth.age_numeral}\n"
+        "```"
     )
     multiline_scalar = render_standardized_submission_value(json.dumps("line one\nline two"))
     assert control_ui.martin_serialize_standardized_cell(multiline_scalar) == multiline_scalar

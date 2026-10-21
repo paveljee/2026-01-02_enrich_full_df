@@ -175,7 +175,9 @@ backend_test_paths = fixtures.backend_test_paths
 @pytest.fixture
 def validation_http_record() -> BackendValidationRequestRecord:
     _pull, commit = fixtures.retry_commit_records(
-        original_pull_record_id=uuid7(), session_id=uuid7(),
+        original_pull_record_id=uuid7(),
+        init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+        session_id=uuid7(),
         synthetic_record_id_seed="validation-model",
     )
     body = ValidationRequestBody(
