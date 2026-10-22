@@ -643,6 +643,7 @@ def running_dashboard(runtime: OperatorRuntime) -> Generator[DashboardProcess]:
         stderr=subprocess.STDOUT,
         text=True,
         encoding=TEXT_ENCODING,
+        errors="backslashreplace",
         bufsize=1,
         start_new_session=True,
     )
