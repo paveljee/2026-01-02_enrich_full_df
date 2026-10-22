@@ -19,7 +19,6 @@ from typing import (
     Literal,
     Self,
     TypeAlias,
-    TypeAliasType,
     TypeVar,
     cast,
     get_args,
@@ -242,36 +241,39 @@ AgeFromBirthNumeral: TypeAlias = (
     YearOfBirth
     | DateOfBirth
 )
+
+class ReportedNumeral[T](StrictModel):
+    provenance: Literal["reported"] = "reported"
+    reported: SubmissionText = Field(
+        ...,
+        description=(
+            "Exactly as reported in the web-tool result "
+            "copied verbatim from the web search excerpt."
+        ),
+    )
+    age_numeral: T
+class ComputedNumeral[T, ComputationT](StrictModel):
+    provenance: Literal["computed"] = "computed"
+    computed: ComputationT
+    age_numeral: T
+
 AgeNumeral: TypeAlias = (
     CurrentAge
     | AgeFromFirstPublicationNumeral
     | AgeFromBirthNumeral
 )
-AgeNumeralT = TypeVar("AgeNumeralT", bound=AgeNumeral)
+AgeBasis: TypeAlias = Literal["birth", "first_publication"]
 
-class ReportedAgeNumeral[N: AgeNumeral](StrictModel):
-    provenance: Literal["reported"] = "reported"
-    age_numeral: N
-class ComputedAgeNumeral[N: AgeNumeral](StrictModel):
-    provenance: Literal["computed"] = "computed"
-    age_numeral: N
-
-AgeNumeralWithProvenance = TypeAliasType(
-    "AgeNumeralWithProvenance",
-    Annotated[
-        ReportedAgeNumeral[AgeNumeralT] | ComputedAgeNumeral[AgeNumeralT],
-        Field(discriminator="provenance"),
-    ],
-    type_params=(AgeNumeralT,),
-)
-
-class _AgeWithProvenance[N: AgeNumeral](StrictModel):
+class AgeComputation[Basis: AgeBasis](StrictModel):
+    basis: Basis
     as_of: date
-    age: ComputedAgeNumeral[CurrentAge]
+
+class _AgeWithProvenance[N: AgeNumeral, Basis: AgeBasis](StrictModel):
+    age: ComputedNumeral[CurrentAge, AgeComputation[Basis]]
 
     def _counterpart(
         self,
-    ) -> ReportedAgeNumeral[N]:
+    ) -> ReportedNumeral[N]:
         raise NotImplementedError
 
     @model_validator(mode="after")
@@ -279,14 +281,15 @@ class _AgeWithProvenance[N: AgeNumeral](StrictModel):
         other = self._counterpart()
 
         numeral = other.age_numeral
+        as_of = self.age.computed.as_of
 
         if isinstance(numeral, date):
-            expected_age = self.as_of.year - numeral.year - (
-                (self.as_of.month, self.as_of.day)
+            expected_age = as_of.year - numeral.year - (
+                (as_of.month, as_of.day)
                 < (numeral.month, numeral.day)
             )
         else:
-            expected_age = self.as_of.year - numeral
+            expected_age = as_of.year - numeral
 
         if self.age.age_numeral != expected_age:
             raise ValueError(
@@ -299,33 +302,35 @@ class _AgeWithProvenance[N: AgeNumeral](StrictModel):
         return self
 
 
-class AgeFromBirth(_AgeWithProvenance[AgeFromBirthNumeral]):
-    basis: Literal["birth"] = "birth"
-    birth: ReportedAgeNumeral[AgeFromBirthNumeral]
+class AgeFromBirth(
+    _AgeWithProvenance[AgeFromBirthNumeral, Literal["birth"]]
+):
+    birth: ReportedNumeral[AgeFromBirthNumeral]
 
     def _counterpart(
         self,
-    ) -> ReportedAgeNumeral[AgeFromBirthNumeral]:
+    ) -> ReportedNumeral[AgeFromBirthNumeral]:
         return self.birth
 
 
-class AgeFromFirstPublication(_AgeWithProvenance[AgeFromFirstPublicationNumeral]):
-    basis: Literal["first_publication"] = "first_publication"
-    first_publication: ReportedAgeNumeral[
+class AgeFromFirstPublication(
+    _AgeWithProvenance[
+        AgeFromFirstPublicationNumeral,
+        Literal["first_publication"],
+    ]
+):
+    first_publication: ReportedNumeral[
         AgeFromFirstPublicationNumeral
     ]
 
     def _counterpart(
         self,
-    ) -> ReportedAgeNumeral[AgeFromFirstPublicationNumeral]:
+    ) -> ReportedNumeral[AgeFromFirstPublicationNumeral]:
         return self.first_publication
 
 
 AgeStandardized: TypeAlias = SubmissionValueRequired[
-    Annotated[
-        AgeFromBirth | AgeFromFirstPublication,
-        Field(discriminator="basis"),
-    ]
+    AgeFromBirth | AgeFromFirstPublication,
 ]
 
 

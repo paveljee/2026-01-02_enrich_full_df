@@ -1262,10 +1262,10 @@ def _age_evidence_check_failed(
         - push_response_record.duration_usec
     )
     push_date = utc_datetime_from_unix_usec(push_received_at_unix_usec).date()
-    if age_value.as_of != push_date:
+    if age_value.age.computed.as_of != push_date:
         logger.warning(
             Locale.AGE_EVIDENCE_AS_OF_MISMATCH_LOG,
-            age_value.as_of,
+            age_value.age.computed.as_of,
             push_date,
             push_received_at_unix_usec,
         )
@@ -1275,7 +1275,7 @@ def _age_evidence_check_failed(
         if isinstance(age_value, AgeFromBirth)
         else age_value.first_publication
     )
-    reported_text = str(reported.age_numeral)
+    reported_text = reported.reported
     if not any(
         reported_text in item.excerpt
         for item in age_standardized_submission.web_search_excerpts
