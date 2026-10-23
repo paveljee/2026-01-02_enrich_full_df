@@ -1,0 +1,270 @@
+@prefix string: <http://www.w3.org/2000/10/swap/string#> .
+@prefix func: <http://www.w3.org/2007/rif-builtin-function#>.
+@prefix log: <http://www.w3.org/2000/10/swap/log#> .
+@prefix list: <http://www.w3.org/2000/10/swap/list#> .
+@prefix math: <http://www.w3.org/2000/10/swap/math#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix v: <http://view/> .
+@prefix attr: <http://view/dot/attribute/> .
+
+v:config 
+    v:bgColorNode "/accent3/1:/accent3/3" ;
+    v:bgColorList "/blues8/1:/blues8/3" ;
+    v:maxTextLength 50 ;
+    v:maxTextPrefix 25 ;
+    v:maxListLength 20 .
+
+# all the subjects of some triple become nodes
+{
+    ?s ?p ?o .
+    # to avoid loops
+    ?p log:namespace ?ns .
+    v: log:uri [ log:notEqualTo ?ns ] .
+    attr: log:uri [ log:notEqualTo ?ns ] .
+}
+=>
+{
+    v:digraph v:hasNode [ v:term ?s ]
+}
+.
+
+# all properties connecting two nodes become edges
+{     
+    ?s ?p ?o .
+    ?source v:term ?s .
+    ?target v:term ?o .
+    v:digraph v:hasNode ?source , ?target .
+}
+=>
+{
+    v:digraph v:hasEdge [ v:source ?source ; v:target ?target ; v:term ?p ]
+}
+.
+
+# node header and URL
+{ 
+    v:digraph v:hasNode ?n .
+    ?n v:term [
+        log:rawType [ log:notEqualTo log:LabeledBlankNode , log:UnlabeledBlankNode ] ;
+        log:uri ?uri ;
+        v:text ?text ;
+    ] .
+    ?text v:escape ?escapedText .
+    v:config v:bgColorNode ?bgColorNode .
+    ('<TR><TD ALIGN="CENTER" COLSPAN="2" BGCOLOR="%s">%s</TD></TR>' ?bgColorNode ?escapedText) string:format ?header .
+}
+=>
+{
+    ?n v:header ?header ; attr:URL ?uri
+}
+.
+
+
+{ 
+    v:digraph v:hasNode ?n .
+    ?n v:term ?term .
+    ?term log:uri ?name .
+   
+    (?x {
+    	?term ?p ?o .
+        ?o v:textSize v:long .
+    	?p log:localName ?pName .
+    	(?pName ": " ?o) string:concatenation ?x
+    } ?xs) log:collectAllIn [] .
+    ?items list:firstRest (?name ?xs) .
+  	(?items "\n-----------\n") string:join ?tooltip
+}
+=>
+{
+    ?n attr:tooltip ?tooltip
+}
+.
+
+
+# edge labels, tooltips and URLs
+{
+    v:digraph v:hasEdge ?e .
+    # BEGIN PATCH: Show curies for predicates
+    ?e v:term ?property .
+    ?property v:curie ?name ;
+            log:uri ?uri .
+    # END PATCH
+}
+=> 
+{
+    ?e attr:label ?name ; attr:tooltip ?name ; attr:labelURL ?uri
+}
+.
+
+
+# collect fields for properties with objects which are not nodes
+{
+    v:digraph v:hasNode ?n .
+    ?n v:term [ ?p ?o ] .
+    [] log:notIncludes { ?o [] [] } .
+    ?p log:localName ?fieldName .
+    ?o v:text ?fieldValue .
+    ?fieldValue v:escape ?escapedValue .
+    ( "<TR><TD><I>%s</I></TD><TD>%s</TD></TR>" ?fieldName ?escapedValue) string:format ?field
+}
+=>
+{
+    ?n v:field ?field
+}
+.
+
+# node shape and label
+{
+    v:digraph v:hasNode ?n .
+    ( ?h { ?n v:header ?h } ?hs ) log:collectAllIn [] .
+    ( ?f { ?n v:field ?f } ?fs ) log:collectAllIn [] .
+    (?hs ?fs) list:append ?all .
+    (?all "\n") string:join ?joined .
+
+    (
+       { ?joined log:equalTo '' } # blank node without fields
+       { 
+        ?shape log:equalTo "circle" .
+        ?label log:equalTo ''. 
+       } 
+       { 
+        ?shape log:equalTo "plaintext" .
+        ( '< <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0">\n%s\n</TABLE> >' ?joined) string:format ?label .
+       }
+    ) log:ifThenElseIn [] .
+}
+=>
+{
+    ?n attr:shape ?shape ; attr:label ?label
+}
+.
+
+
+# lists
+
+{ ?x v:type rdf:List } <= { ?x log:rawType rdf:List }.
+{ ?x v:type rdf:List } <= { ?x rdf:rest [] }.
+
+{ ?s ?p ?o . ?o v:type rdf:List } => { v:digraph v:hasNode [ v:term ?o ] } .
+
+{
+    v:digraph v:hasNode ?n .
+    ?n v:term ?list .
+    ?list v:type rdf:List .
+    ?list list:length ?length .
+    v:config v:maxListLength ?max .
+    ?list list:iterate (?i ?item) .
+    ?i math:notGreaterThan ?max .
+    ?item v:text ?fieldValue .
+    ?fieldValue v:escape ?escapedValue .
+    v:config v:bgColorList ?bgColorList .
+    ( '<TR><TD BGCOLOR="%s" ALIGN="LEFT" PORT="%s">• %s</TD></TR>' ?bgColorList ?i ?escapedValue) string:format ?field
+}
+=> 
+{
+    ?n v:field ?field
+}
+.
+
+{
+    v:digraph v:hasNode ?n .
+    ?n v:term ?list .
+    ?list v:type rdf:List .
+    ?list list:length ?length .
+    v:config v:maxListLength ?max .
+    ?length math:greaterThan ?max .
+    v:config v:bgColorList ?bgColorList .
+    ('<TR><TD BGCOLOR="%s" ALIGN="LEFT" >... %s items</TD></TR>' ?bgColorList ?length) string:format ?field
+}
+=> 
+{
+    ?n v:field ?field
+}
+.
+
+{
+    v:digraph v:hasNode ?source .
+    ?source v:term ?list .
+    ?list v:type rdf:List .
+    ?list list:iterate (?i ?item) .
+    v:digraph v:hasNode ?target .
+    ?target v:term ?item .
+}
+=> 
+{
+    v:digraph v:hasEdge [ v:source ?source ; v:sourcePort ?i ; v:target ?target ] .    
+}
+.
+
+# edge coloring
+{
+    (?p { v:digraph v:hasEdge [ v:term ?p ] } ?ps) log:collectAllIn [] .
+    ?ps list:iterate (?i ?prop) .
+    (?i 1) math:sum ?color .
+    ?edge v:term ?prop .
+}
+=>
+{
+    ?edge attr:color ?color
+}
+.
+
+{ } => { v:digraph v:edgeAttributes [ attr:colorscheme "paired12" ]  } .
+
+{ ?text v:escape ?escaped } <= {
+    (?text
+    ("&" "<" ">" '"') 
+    ("&amp;" "&lt;" "&gt;" "&quot;")
+    ) string:replaceAll ?escaped .
+} .
+
+# BEGIN PATCH: Show curies for nodes
+v:config v:prefix [ v:name "owl"; v:namespace "http://www.w3.org/2002/07/owl#" ] .
+# Below line is commented out for visual clarity
+#v:config v:prefix [ v:name ""; v:namespace "https://example.org/hcr-agent-architecture#" ] .
+
+{ ?term v:curie ?text } <= {
+    ?term log:namespace ?ns ;
+          log:localName ?local .
+
+    (
+        { v:config v:prefix [ v:name ?prefix ; v:namespace ?ns ] }
+        { (?prefix ":" ?local) string:concatenation ?text }
+        { ?local log:equalTo ?text }
+    ) log:ifThenElseIn [] .
+} .
+
+{ ?node v:text ?text } <= {
+    ?node log:rawType log:Other ;
+          v:curie ?text .
+} .
+# END PATCH
+
+{ ?node v:text ?text } <= { 
+    ?node log:rawType log:Literal . 
+    (?literalText ?dataType) log:dtlit ?node .
+    ?literalText v:shorten ?text .
+} .
+
+
+{ ?text v:shorten ?text } <= { ?text v:textSize v:short } .
+
+{ ?text v:shorten ?shortened } <= { 
+  ?text v:textSize v:long .
+  v:config v:maxTextPrefix ?prefix .
+  (?text 0 ?prefix) func:substring ?substring .
+  (?substring "...") string:concatenation ?shortened .
+} . # TODO check string:substring
+
+{ ?text v:textSize v:long }  <= { 
+    ?text string:length ?length .
+    v:config v:maxTextLength ?max .
+    ?length math:greaterThan ?max .
+} .
+
+{ ?text v:textSize v:short }  <= { 
+    ?text string:length ?length .
+    v:config v:maxTextLength ?max .
+    ?length math:notGreaterThan ?max .
+} .

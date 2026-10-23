@@ -21,6 +21,7 @@ class MatchRuleVersion(BaseModel):
     docx_name: int = 1
     ssn_name: int = 1
     ssn_hit: int = 1
+    codex_match: int = 1
 
     @model_validator(mode="after")
     def _validate_versions(self) -> MatchRuleVersion:
@@ -29,6 +30,7 @@ class MatchRuleVersion(BaseModel):
             "docx_name": {1},
             "ssn_name": {1, 2},
             "ssn_hit": {1, 2},
+            "codex_match": {1, 2},
         }
         for field_name, allowed_versions in allowed.items():
             value = getattr(self, field_name)

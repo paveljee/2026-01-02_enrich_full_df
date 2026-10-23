@@ -1,0 +1,957 @@
+from __future__ import annotations
+
+import hashlib
+import inspect
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import threading
+import time
+from http import HTTPStatus
+from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import Mock
+from uuid import UUID, uuid7
+
+import pytest
+
+from src.detours.detour_ai_augment.protected.src.backend import server as backend_server
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_detour_db import (  # noqa: E501
+    AiAugmentDetourDB,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_registered_resource import (  # noqa: E501
+    RESOURCE_SHA256_KEY,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
+    PostCommitValidation,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.replay_log import (  # noqa: E501
+    READ_ONLY_PERMISSIONS,
+    READ_WRITE_PERMISSIONS,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store import (  # noqa: E501
+    AiAugmentBackendStore,
+    initialize_backend_store,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AUTHORITATIVE_RECORDS_TABLE,
+    CONFIG_FILENAME,
+    HTTP_GET_METHOD,
+    HTTP_POST_METHOD,
+    NANOSECONDS_PER_MICROSECOND,
+    PULL_PATH,
+    PUSH_PATH,
+    REPLAY_LOG_KEY,
+    SYNTHETIC_COMMIT_HOST,
+    SYNTHETIC_COMMIT_SCHEME,
+    TEXT_ENCODING,
+    AiAugmentCohort,
+)
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
+    Locale,
+)
+from src.detours.detour_ai_augment.protected.tests import (
+    pytest_plugin as operator_preflight,
+)
+from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
+    STARTUP_NAMEKEY,
+    StartupFiles,
+    init_request_record,
+)
+from src.detours.detour_ai_augment.protected.tests.operator import (
+    test_operator_e2e as workflow,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
+    COMMIT_PATH,
+    _CommitRequestBodyJson,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.init_request import (
+    BackendInitRequestRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
+    BackendLifecycle,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (
+    VALIDATE_PATH,
+    BackendValidationRequestRecord,
+    ValidationRequestBody,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.lifecycle import (  # noqa: E501
+    RunLifecycle,
+)
+from src.detours.detour_ai_augment.tests.backend import test_api as api_fixtures
+from src.detours.detour_ai_augment.tests.control_centre import test_ui_e2e as browser_tests
+from src.helpers.data_models import HttpRequestLogRecord
+from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+
+completed_query_files = browser_tests.completed_query_files
+
+
+def test_operator_preparation_does_not_create_a_backend_launch(
+    startup_files: StartupFiles,
+    tmp_path: Path,
+) -> None:
+    """DB preparation must not invent a launch for the first eligible NameKey."""
+    repository = tmp_path / "operator-repository"
+    repository.mkdir()
+    (repository / CONFIG_FILENAME).write_bytes(
+        startup_files.config.read_bytes()
+    )
+    run_directory = tmp_path / "operator-runtime"
+    run_directory.mkdir()
+    operator_runtime = workflow._operator_runtime(
+        run_directory,
+        repository_root=repository,
+        dashboard_socket_path=run_directory / "dashboard.sock",
+    )
+
+    assert operator_runtime.replay_log_path.read_bytes() == b""
+    context = backend_server.configure_runtime(operator_runtime.config_path)
+    with initialize_backend_store(context, ipc_only=True) as query_store:
+        assert query_store._engine.current_replayed_record is None
+        assert query_store._engine._execute(
+            f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
+        ).fetchone() == (0,)
+
+    eligible_blueprints = tuple(
+        blueprint
+        for blueprint in context.ai_augment_singular_outerdict_blueprints
+        if blueprint.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
+    )
+    assert len(eligible_blueprints) >= 2
+    selected_blueprint = eligible_blueprints[1]
+    requested_init = init_request_record(selected_blueprint.namekey)
+
+    with initialize_backend_store(
+        context,
+        ipc_only=False,
+        init_request_record=requested_init,
+        new=True,
+        confirmed=True,
+        confirm_replay=lambda: False,
+    ) as backend_store:
+        replayed_init = backend_store.current_replayed_record
+        assert isinstance(replayed_init, BackendInitRequestRecord)
+        assert replayed_init is backend_store._init_request_record
+        assert replayed_init is not requested_init
+        assert replayed_init.record_id == requested_init.record_id
+        assert replayed_init.namekey == selected_blueprint.namekey
+        assert (
+            backend_store.selected_ai_augment_singular_outerdict()
+            is selected_blueprint
+        )
+        assert backend_store._execute(
+            f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
+        ).fetchone() == (1,)
+
+    lines = operator_runtime.replay_log_path.read_bytes().splitlines()
+    assert len(lines) == 1
+    logged_init = BackendInitRequestRecord.from_serialized_json(
+        value=lines[0].decode(TEXT_ENCODING),
+    )
+    assert logged_init.record_id == requested_init.record_id
+    assert logged_init.namekey == selected_blueprint.namekey
+
+
+def test_operator_artifact_validator_opens_a_fresh_store(
+    completed_query_files: StartupFiles,
+    tmp_path: Path,
+) -> None:
+    """A later rebuild must not make validation reuse obsolete replay metadata."""
+    files = completed_query_files
+    completed_context = backend_server.configure_runtime(files.config)
+
+    repository = tmp_path / "validator-repository"
+    repository.mkdir()
+    (repository / CONFIG_FILENAME).write_bytes(
+        files.config.read_bytes()
+    )
+    run_directory = tmp_path / "validator-runtime"
+    run_directory.mkdir()
+    operator_runtime = workflow._operator_runtime(
+        run_directory,
+        repository_root=repository,
+        dashboard_socket_path=run_directory / "dashboard.sock",
+    )
+    assert (
+        operator_runtime.backend_store._replay_log.hash
+        == workflow.EMPTY_FILE_SHA256
+    )
+
+    # Reuse faithfully produced completed history and its actual CAS bytes.
+    operator_runtime.replay_log_path.chmod(READ_WRITE_PERMISSIONS)
+    try:
+        operator_runtime.replay_log_path.write_bytes(files.replay.read_bytes())
+    finally:
+        operator_runtime.replay_log_path.chmod(READ_ONLY_PERMISSIONS)
+    shutil.copytree(
+        completed_context.pipeline_config.rollout_cas.path,
+        operator_runtime.rollout_cas_dir,
+        dirs_exist_ok=True,
+    )
+    config = json.loads(
+        operator_runtime.config_path.read_text(encoding=TEXT_ENCODING)
+    )
+    config["files_config"][REPLAY_LOG_KEY][
+        RESOURCE_SHA256_KEY
+    ] = hashlib.sha256(operator_runtime.replay_log_path.read_bytes()).hexdigest()
+    operator_runtime.config_path.write_text(
+        json.dumps(config),
+        encoding=TEXT_ENCODING,
+    )
+
+    context = backend_server.configure_runtime(operator_runtime.config_path)
+    pipeline_config = context.pipeline_config
+    rebuilding_store = AiAugmentBackendStore._from_resources(
+        replay_log=pipeline_config.replay_log,
+        detour_db=AiAugmentDetourDB.from_pipeline_db(
+            pipeline_config.db_file,
+            duckdb_extensions=pipeline_config.duckdb_extensions,
+        ),
+        rollout_cas=pipeline_config.rollout_cas,
+    )
+    rebuilding_store._rebuild_from_log(
+        context,
+        reset_confirmed=True,
+        confirm_replay=lambda: True,
+    )
+
+    # The existing hash guard must still reject the obsolete Store.
+    with (
+        pytest.raises(ValueError, match="Hash verification failed"),
+        operator_runtime.backend_store._read_only(context),
+    ):
+        pass
+
+    # The validator must obtain a fresh Store, not bypass that guard.
+    workflow.validate_workflow_artifacts(
+        operator_runtime,
+        namekey=STARTUP_NAMEKEY,
+        expected_run_outcome_path=RunLifecycle.COMPLETED.to_run_outcome_path(),
+    )
+
+
+@pytest.mark.python_subprocess
+def test_operator_artifact_validator_accepts_completed_store_history(
+    completed_query_files: StartupFiles,
+    pytestconfig: pytest.Config,
+) -> None:
+    files = completed_query_files
+    with initialize_backend_store(
+        backend_server.configure_runtime(files.config),
+        ipc_only=True,
+    ) as query_store:
+        fixture_store = query_store._engine
+    runtime = workflow.OperatorRuntime(
+        repository_root=pytestconfig.rootpath,
+        config_path=files.config,
+        backend_store=fixture_store,
+        replay_log_path=files.replay,
+        rollout_cas_dir=files.config.parent / "cas",
+        dashboard_socket_path=files.config.parent / "dashboard.sock",
+    )
+    workflow.validate_workflow_artifacts(
+        runtime,
+        namekey=STARTUP_NAMEKEY,
+        expected_run_outcome_path=RunLifecycle.COMPLETED.to_run_outcome_path(),
+    )
+
+
+def _workflow_http_records(
+    *,
+    provider_targets: tuple[tuple[str, str], ...],
+    provider_status: HTTPStatus = HTTPStatus.OK,
+    with_initial: bool = True,
+) -> tuple[HttpRequestLogRecord, ...]:
+    session_id = uuid7()
+    records: list[HttpRequestLogRecord] = []
+    initial: BackendValidationRequestRecord | None = None
+    for index in range(2 if with_initial else 1):
+        pull, commit = api_fixtures.retry_commit_records(
+            original_pull_record_id=uuid7(),
+            init_request_record=init_request_record(STARTUP_NAMEKEY),
+            session_id=session_id,
+            synthetic_record_id_seed=f"operator-history-{index}",
+        )
+        providers = tuple(
+            HttpRequestLogRecord(
+                schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+                record_id=uuid7(), method=HTTP_GET_METHOD, scheme="https",
+                host=host, port=None, path=path, query="", request_headers={},
+                request_body=None, response_code=provider_status, response_headers={},
+                response_body='{"provider": "fixture"}', received_at_unix_usec=1,
+                ready_to_respond_at_unix_usec=None, duration_usec=1,
+            )
+            for host, path in provider_targets
+            if not with_initial or index == 1
+        )
+        validation_body = ValidationRequestBody(
+            commit_request_record=commit,
+            post_commit_validation=PostCommitValidation(
+                stage=BackendLifecycle.FIELD_VALIDATION,
+                result=BackendLifecycle.REJECTED,
+                detail="synthetic model rejection",
+                submission_type=None,
+                submission=None,
+            ),
+            initial_validation_request_record=initial,
+            openalex_ror_records=providers,
+        )
+        validation_request_record = BackendValidationRequestRecord(
+            validation_request_body=validation_body,
+            schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+            method=HTTP_POST_METHOD,
+            scheme=SYNTHETIC_COMMIT_SCHEME,
+            host=SYNTHETIC_COMMIT_HOST,
+            port=None,
+            path=VALIDATE_PATH,
+            query="",
+            request_headers=dict(commit.request_headers),
+            request_body=validation_body.model_dump_json(by_alias=True),
+            response_code=None,
+            response_headers=None,
+            response_body=None,
+            received_at_unix_usec=None,
+            ready_to_respond_at_unix_usec=time.time_ns() // NANOSECONDS_PER_MICROSECOND,
+            duration_usec=0,
+        )
+        records.extend((pull, commit.commit_request_body.push_response_record, commit,
+                        *providers, validation_request_record))
+        if initial is None:
+            initial = validation_request_record
+    return tuple(records)
+
+
+@pytest.mark.parametrize("provider_targets", (
+    (),
+    (("api.openalex.org", "/institutions/I97018004"),),
+    (("api.ror.org", "/v2/organizations/00f54p054"),),
+    (("api.openalex.org", "/institutions/I97018004"),
+     ("api.ror.org", "/v2/organizations/00f54p054")),
+))
+@pytest.mark.parametrize("provider_status", (HTTPStatus.OK, HTTPStatus.NOT_FOUND))
+@pytest.mark.parametrize("with_initial", (False, True))
+def test_operator_http_history_accepts_only_linked_current_records(
+    provider_targets: tuple[tuple[str, str], ...], provider_status: HTTPStatus,
+    with_initial: bool,
+) -> None:
+    records = _workflow_http_records(
+        provider_targets=provider_targets, provider_status=provider_status,
+        with_initial=with_initial,
+    )
+    validations = workflow._validate_workflow_http_records(records)
+    assert len(validations) == (2 if with_initial else 1)
+    assert validations[records[-1].record_id].model_dump() == records[-1].model_dump()
+
+
+@pytest.mark.parametrize("mutation, target", (
+    ("unknown-route", ""),
+    ("unreferenced-provider", ""),
+    ("wrong-endpoint", ""),
+    ("duplicate", ""),
+    *((mutation, target)
+      for mutation in ("missing", "changed", "after-validation")
+      for target in ("provider", "commit", "pull", "push", "initial")),
+))
+def test_operator_http_history_rejects_corrupt_or_unreferenced_records(
+    mutation: str, target: str,
+) -> None:
+    records = list(_workflow_http_records(
+        provider_targets=(("api.openalex.org", "/institutions/I97018004"),),
+    ))
+    validation = records[-1]
+    assert validation.request_body is not None
+    body = json.loads(validation.request_body)
+    assert body["initial_validation_request_record_id"] is not None
+    by_id = {record.record_id: record for record in records}
+    provider = by_id[UUID(body["openalex_ror_records_ids"][0])]
+    commit = by_id[UUID(body["commit_request_record_id"])]
+    assert commit.request_body is not None
+    commit_body = _CommitRequestBodyJson.model_validate_json(commit.request_body)
+    if mutation == "unknown-route":
+        records.append(api_fixtures.persisted_http_record(
+            record_id=uuid7(), method=HTTP_GET_METHOD, path="/unexpected",
+            response_code=HTTPStatus.OK,
+        ))
+    elif mutation == "unreferenced-provider":
+        records.append(provider.model_copy(update={"record_id": uuid7()}))
+    elif mutation == "wrong-endpoint":
+        changed = provider.model_copy(update={"host": "unapproved.invalid"})
+        records[records.index(provider)] = changed
+    elif mutation == "duplicate":
+        records.append(records[0])
+    else:
+        linked = {
+            "provider": provider,
+            "commit": commit,
+            "pull": by_id[commit_body.pull_record_id],
+            "push": by_id[commit_body.push_record_id],
+            "initial": by_id[UUID(body["initial_validation_request_record_id"])],
+        }[target]
+        position = next(
+            index for index, record in enumerate(records) if record.record_id == linked.record_id
+        )
+        if mutation == "missing":
+            records.pop(position)
+        elif mutation == "after-validation":
+            records.append(records.pop(position))
+        else:
+            assert mutation == "changed"
+            if target == "provider":
+                records[position] = linked.model_copy(update={"scheme": "ftp"})
+            else:
+                wrong_path = {
+                    "commit": PULL_PATH,
+                    "pull": PUSH_PATH,
+                    "push": PULL_PATH,
+                    "initial": COMMIT_PATH,
+                }[target]
+                records[position] = linked.model_copy(update={"path": wrong_path})
+    with pytest.raises(AssertionError):
+        workflow._validate_workflow_http_records(records)
+
+
+def test_operator_runtime_uses_supplied_directories_and_preserves_files(
+    startup_files: StartupFiles, request: pytest.FixtureRequest,
+) -> None:
+    files = startup_files
+    source_before = hashlib.sha256(files.source.read_bytes()).hexdigest()
+    assert files.source.stat().st_mode & 0o222 == 0
+    directory = tempfile.TemporaryDirectory(prefix="p.", dir="/tmp")
+    request.addfinalizer(directory.cleanup)
+    repository = Path(directory.name)
+    (repository / CONFIG_FILENAME).write_bytes(files.config.read_bytes())
+    run_dirs: list[Path] = []
+    for index in range(2):
+        supplied = repository / f"run-{index}"
+        supplied.mkdir()
+        fixture = inspect.unwrap(workflow.operator_runtime)(
+            repository_root=repository, tmp_path=supplied,
+        )
+        runtime = next(fixture)
+        run_dir = runtime.config_path.parent
+        run_dirs.append(run_dir)
+        assert run_dir == supplied
+        assert (
+            len(os.fsencode(runtime.dashboard_socket_path))
+            < workflow.DARWIN_AF_UNIX_PATH_CAPACITY_BYTES
+        )
+        config = json.loads(runtime.config_path.read_text())
+        for path in (
+            runtime.config_path, runtime.replay_log_path, runtime.rollout_cas_dir,
+            runtime.dashboard_socket_path, runtime.backend_store._detour_db_path,
+            Path(config["db_file"]), Path(config["state_file"]),
+            Path(config["output_dir"]), run_dir / "nicegui",
+        ):
+            assert path.is_relative_to(run_dir), path
+        source_link = Path(config["db_file"])
+        assert source_link.is_symlink()
+        assert source_link.resolve() == files.source.resolve()
+        retained = (runtime.config_path, runtime.replay_log_path,
+                    runtime.backend_store._detour_db_path)
+        before_close = {path: path.read_bytes() for path in retained}
+        with pytest.raises(StopIteration):
+            next(fixture)
+        assert run_dir.is_dir()
+        assert {path: path.read_bytes() for path in retained} == before_close
+    assert run_dirs[0] != run_dirs[1]
+    assert all(path.is_dir() for path in run_dirs)
+    assert hashlib.sha256(files.source.read_bytes()).hexdigest() == source_before
+    assert files.source.stat().st_mode & 0o222 == 0
+
+
+def test_operator_run_directory_rejects_overlong_socket_path(tmp_path: Path) -> None:
+    run_dir = tmp_path / ("long-directory-" * 9)
+    run_dir.mkdir()
+    fixture = inspect.unwrap(workflow.operator_runtime)(
+        repository_root=tmp_path, tmp_path=run_dir,
+    )
+    with pytest.raises(RuntimeError, match="exceeds Darwin AF_UNIX capacity"):
+        next(fixture)
+    assert run_dir.is_dir()
+    assert not (run_dir / "config.operator.json").exists()
+
+
+@pytest.mark.python_subprocess
+def test_nicegui_children_have_private_persistent_storage(
+    tmp_path: Path, python_process: operator_preflight.PythonProcess,
+    monkeypatch: pytest.MonkeyPatch, nicegui_storage_path: Path,
+) -> None:
+    original = tmp_path / ".nicegui"
+    original.mkdir()
+    sentinel = original / "storage-general.json"
+    sentinel.write_text('{"operator_sentinel": "untouched"}')
+    before = workflow._tree_digest(original)
+    monkeypatch.setenv("NICEGUI_STORAGE_PATH", str(original))
+    monkeypatch.setenv("NICEGUI_REDIS_URL", "redis://must-not-connect.invalid")
+    for path, previous, value in (
+        (nicegui_storage_path, {}, "first"),
+        (nicegui_storage_path, {"test_value": "first"}, "restart"),
+        (tmp_path / "other-test", {}, "separate"),
+    ):
+        result = python_process.run(
+            operator_preflight.nicegui_persistence_process, json.dumps(previous), value,
+            cwd=tmp_path, env=operator_preflight.nicegui_test_environment(path), timeout=20,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert json.loads((path / "storage-general.json").read_text()) == {"test_value": value}
+        assert workflow._tree_digest(original) == before
+
+
+@pytest.mark.python_subprocess
+@pytest.mark.parametrize("collection_failure", (False, True))
+def test_nicegui_isolated_before_collection_and_cleaned_after_exit(
+    tmp_path: Path, python_process: operator_preflight.PythonProcess,
+    collection_failure: bool,
+) -> None:
+    original = tmp_path / "operator-storage"
+    original.mkdir()
+    (original / "storage-general.json").write_text('{"operator_sentinel": "untouched"}')
+    before = workflow._tree_digest(original)
+    environment = dict(os.environ, NICEGUI_STORAGE_PATH=str(original),
+                       NICEGUI_REDIS_URL="redis://must-not-connect.invalid",
+                       TEST_ORIGINAL_STORAGE=str(original),
+                       TEST_STORAGE_RECEIPT=str(tmp_path / "receipt"),
+                       TEST_COLLECTION_FAILURE=str(int(collection_failure)))
+    result = python_process.run(
+        operator_preflight.nicegui_collection_process, str(tmp_path),
+        "2" if collection_failure else "0", env=environment, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "COLLECTION_STORAGE_CLEANED" in result.stdout
+    assert workflow._tree_digest(original) == before
+
+
+@pytest.mark.python_subprocess
+@pytest.mark.parametrize("retention_policy", ("all", "failed", "none"))
+def test_pytest_temporary_storage_is_not_redirected(
+    tmp_path: Path, pytestconfig: pytest.Config,
+    python_process: operator_preflight.PythonProcess, retention_policy: str,
+) -> None:
+    assert not tmp_path.is_relative_to(pytestconfig.rootpath / "tmp")
+    assert not Path(tempfile.gettempdir()).is_relative_to(pytestconfig.rootpath / "tmp")
+    ini = tmp_path / "pytest.ini"
+    ini.write_text("[pytest]\n")
+    test_path = tmp_path / "test_scratch.py"
+    test_path.write_text(
+        "from pathlib import Path\n\n"
+        + inspect.getsource(operator_preflight.test_pytest_requested_temporary_path),
+    )
+    basetemp = tmp_path / "requested-pytest-data"
+    result = python_process.run(
+        operator_preflight.artifact_configuration_process,
+        "-q", "--noconftest", "-p", operator_preflight.__name__,
+        "-c", str(ini), "--basetemp", str(basetemp),
+        "-o", f"tmp_path_retention_policy={retention_policy}", str(test_path),
+        cwd=pytestconfig.rootpath,
+        env=dict(os.environ, TEST_EXPECTED_BASETEMP=str(basetemp)), timeout=30,
+    )
+    assert result.returncode == pytest.ExitCode.OK, result.stdout + result.stderr
+    assert "1 passed" in result.stdout
+    assert not (tmp_path / "tmp").exists()
+
+
+@pytest.mark.python_subprocess
+@pytest.mark.parametrize("marker_scope", ("function", "module"))
+@pytest.mark.parametrize("fails", (False, True))
+def test_rootpath_tmp_marker_retains_unique_directories(
+    tmp_path: Path, pytestconfig: pytest.Config,
+    python_process: operator_preflight.PythonProcess, marker_scope: str, fails: bool,
+) -> None:
+    ini = tmp_path / "pytest.ini"
+    ini.write_text("[pytest]\n")
+    suite = tmp_path / "suite"
+    suite.mkdir()
+    marked = (
+        "pytestmark = pytest.mark.use_rootpath_tmp\n\n"
+        if marker_scope == "module" else "@pytest.mark.use_rootpath_tmp\n"
+    )
+    test_path = suite / "test_paths.py"
+    test_path.write_text(
+        "from pathlib import Path\n\nimport pytest\n\n"
+        + marked
+        + '@pytest.mark.parametrize("case", (0, 1))\n'
+        + inspect.getsource(operator_preflight.test_rootpath_tmp_directory),
+    )
+    environment = dict(
+        os.environ,
+        PYTHONPATH=os.pathsep.join(filter(None, (
+            str(pytestconfig.rootpath), os.environ.get("PYTHONPATH"),
+        ))),
+        TEST_FAIL_AFTER_WRITE=str(int(fails)),
+    )
+    result = python_process.run(
+        operator_preflight.artifact_configuration_process,
+        "-q", "-s", "--noconftest", "-p", operator_preflight.__name__,
+        "-c", str(ini), "-o", "tmp_path_retention_policy=none", str(test_path),
+        cwd=suite, env=environment, timeout=30,
+    )
+    expected = pytest.ExitCode.TESTS_FAILED if fails else pytest.ExitCode.OK
+    assert result.returncode == expected, result.stdout + result.stderr
+    assert ("2 failed" if fails else "2 passed") in result.stdout
+    if fails:
+        assert "intentional failure after writing retained data" in result.stdout
+    directories = tuple((tmp_path / "tmp").iterdir())
+    assert len(directories) == 2
+    assert {path.joinpath("retained.txt").read_text() for path in directories} == {"0", "1"}
+    for path in directories:
+        assert path.name.startswith("test.")
+        assert f": retained {path}" in result.stdout
+    assert not (suite / "tmp").exists()
+
+
+@pytest.mark.python_subprocess
+@pytest.mark.parametrize("marker", ("", "real_api"), ids=("ordinary", "real-api"))
+def test_root_pytest_discovery_ignores_retained_artifacts(
+    tmp_path: Path, pytestconfig: pytest.Config,
+    python_process: operator_preflight.PythonProcess, marker: str,
+) -> None:
+    (tmp_path / "pyproject.toml").write_bytes(
+        (pytestconfig.rootpath / "pyproject.toml").read_bytes(),
+    )
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_controls.py").write_text(
+        "import pytest\n\n"
+        + inspect.getsource(operator_preflight.test_artifact_discovery_ordinary_control)
+        + "\n"
+        + inspect.getsource(operator_preflight.test_artifact_discovery_real_api_control),
+    )
+    artifacts = (tmp_path / "tmp", tmp_path / "logs")
+    source = python_process.source(operator_preflight.artifact_discovery_import_failure)
+    for directory in (
+        artifacts[0] / "tests.previous/pytest/case0",
+        artifacts[1] / "from_operator/copied-run/pytest/case0",
+    ):
+        directory.mkdir(parents=True)
+        (directory / "test_collection.py").write_text(source)
+    (artifacts[0] / "tests.previous/pytest/casecurrent").symlink_to(
+        "case0", target_is_directory=True,
+    )
+    before = {path: workflow._tree_digest(path) for path in artifacts}
+    marker_args = ("-m", marker) if marker else ()
+    result = python_process.run(
+        operator_preflight.artifact_configuration_process,
+        "-q", ".", *marker_args, cwd=tmp_path, timeout=30,
+    )
+    assert result.returncode == pytest.ExitCode.OK, result.stdout + result.stderr
+    assert (tmp_path / "real-api-executed").read_text() == "ran"
+    if marker:
+        assert not (tmp_path / "ordinary-executed").exists()
+        assert "1 passed, 1 deselected" in result.stdout
+    else:
+        assert (tmp_path / "ordinary-executed").read_text() == "ran"
+        assert "2 passed" in result.stdout
+    assert {path: workflow._tree_digest(path) for path in artifacts} == before
+
+
+@pytest.mark.parametrize("initially_present", (False, True))
+def test_operator_preservation_guard_covers_original_storage(
+    tmp_path: Path, initially_present: bool,
+) -> None:
+    storage = tmp_path / "nicegui"
+    if initially_present:
+        storage.mkdir()
+        (storage / "storage-general.json").write_text("{}")
+    config = cast(pytest.Config, SimpleNamespace(stash={
+        operator_preflight.ORIGINAL_NICEGUI_STORAGE_PATH: storage,
+    }))
+    guard = inspect.unwrap(workflow.production_data_unchanged)(
+        operator_aivm=None, repository_root=tmp_path / "repo",
+        detour_root=tmp_path / "detour", pytestconfig=config,
+    )
+    next(guard)
+    storage.mkdir(exist_ok=True)
+    (storage / "storage-general.json").write_text('{"test_data": true}')
+    with pytest.raises(AssertionError):
+        next(guard)
+
+
+@pytest.mark.parametrize("launcher", ("operator", "browser", "browser-contract"))
+def test_dashboard_launchers_pass_private_storage(
+    launcher: str, tmp_path: Path, nicegui_storage_path: Path,
+    pytestconfig: pytest.Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.detours.detour_ai_augment.tests.control_centre import test_ui_e2e as browser
+
+    class LaunchCaptured(Exception):
+        pass
+
+    def capture(*_args: object, **kwargs: object) -> None:
+        environment = cast(dict[str, str], kwargs["env"])
+        assert environment["NICEGUI_STORAGE_PATH"] == str(nicegui_storage_path.resolve())
+        assert "NICEGUI_REDIS_URL" not in environment
+        raise LaunchCaptured
+
+    monkeypatch.setenv("NICEGUI_STORAGE_PATH", str(tmp_path / "must-not-use"))
+    monkeypatch.setenv("NICEGUI_REDIS_URL", "redis://must-not-connect.invalid")
+    monkeypatch.setattr(subprocess, "Popen", capture)
+    monkeypatch.setattr(workflow, "_assert_ports_available", lambda: None)
+    monkeypatch.setattr(browser, "available_e2e_port", lambda: 12345)
+    runtime = cast(workflow.OperatorRuntime, SimpleNamespace(
+        config_path=tmp_path / "config.json", repository_root=pytestconfig.rootpath,
+        dashboard_socket_path=tmp_path / "ipc.sock",
+    ))
+    with pytest.raises(LaunchCaptured):
+        if launcher == "operator":
+            with workflow.running_dashboard(runtime):
+                pytest.fail("must stop at launch")
+        elif launcher == "browser":
+            with browser.control_centre_browser(pytestconfig, nicegui_storage_path):
+                pytest.fail("must stop at launch")
+        else:
+            browser.test_control_centre_browser_contract(pytestconfig, nicegui_storage_path)
+
+
+@pytest.mark.parametrize("outcome", ("success", "savedness-pending", "failed", "cancelled"))
+def test_operator_completion_wait_reports_actual_conditions(
+    monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    cells = [Mock() for _ in range(5)]
+    values = ["", "completed", "commit-id", "pending", "OK"]
+    if outcome in {"failed", "cancelled"}:
+        values[1] = outcome
+    for index, cell in enumerate(cells):
+        cell.inner_text.side_effect = lambda index=index: values[index]
+    history_rows = Mock()
+    history_rows.count.return_value = 1
+    history_rows.nth.return_value.locator.return_value.nth.side_effect = lambda index: cells[index]
+    history = Mock()
+    history.locator.return_value = history_rows
+    execute = Mock()
+    execute.inner_text.return_value = "RERUN"
+    execute.text_content.return_value = "Rerun"
+    card = Mock()
+    card.is_enabled.return_value = True
+    page = Mock()
+    page.get_by_test_id.side_effect = {
+        control_ui.RESEARCHER_GRID_TEST_ID: Mock(),
+        control_ui.RUN_OUTCOME_HISTORY_TABLE_TEST_ID: history,
+        control_ui.EXECUTE_ACTION_TEST_ID: execute,
+        control_ui.VIEW_CARD_TEST_ID: card,
+    }.__getitem__
+    clock = iter(range(100))
+    monkeypatch.setattr(workflow, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    monkeypatch.setattr(workflow, "FULL_WORKFLOW_TIMEOUT_SECONDS", 12)
+    monkeypatch.setattr(workflow, "OPERATOR_HEARTBEAT_SECONDS", 0)
+    monkeypatch.setattr(workflow, "expect", Mock())
+    query = Mock()
+    monkeypatch.setattr(workflow, "query_snapshot_in_browser", query)
+    logs: list[str] = []
+    monkeypatch.setattr(workflow, "_operator_log", logs.append)
+    dashboard = Mock()
+    dashboard.process.poll.return_value = None
+    dashboard.output = []
+    if outcome == "success":
+        page.wait_for_timeout.side_effect = lambda _ms: values.__setitem__(
+            3, Locale.RUN_OUTCOME_SNAPSHOT_SAVED,
+        )
+        values[4] = Locale.SESSION_STATUS_OK
+        _, commit = workflow.wait_for_completed_grid_row(
+            page, dashboard, Mock(), queued_at_monotonic=0,
+        )
+        assert commit == "commit-id"
+    elif outcome == "savedness-pending":
+        with pytest.raises(TimeoutError, match="savedness='pending'"):
+            workflow.wait_for_completed_grid_row(page, dashboard, Mock(), queued_at_monotonic=0)
+    else:
+        with pytest.raises(RuntimeError, match="failed run activity"):
+            workflow.wait_for_completed_grid_row(page, dashboard, Mock(), queued_at_monotonic=0)
+    assert query.call_count == int(outcome not in {"failed", "cancelled"})
+    if outcome in {"success", "savedness-pending"}:
+        diagnostic = "\n".join(logs)
+        assert "queried_after_completion=True" in diagnostic
+        assert "savedness='pending'" in diagnostic
+        assert "action='Rerun'" in diagnostic
+        assert "waiting for Codex to exit" not in diagnostic
+
+
+def test_existing_codex_authentication_does_not_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    repository_root: Path,
+) -> None:
+    observed: list[tuple[str, ...]] = []
+
+    def run(
+        command: tuple[str, ...],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        observed.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    def unexpected_input() -> str:
+        pytest.fail("existing Codex authentication must not prompt")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("builtins.input", unexpected_input)
+
+    operator_preflight._ensure_codex_is_authenticated(
+        {},
+        repository_root=repository_root,
+    )
+
+    assert observed == [operator_preflight.AIVM_CODEX_AUTH_STATUS_COMMAND]
+
+
+def test_missing_codex_authentication_runs_device_auth_and_rechecks(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    repository_root: Path,
+) -> None:
+    observed: list[tuple[str, ...]] = []
+    status_return_codes = iter((1, 0))
+
+    def run(
+        command: tuple[str, ...],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        observed.append(command)
+        return_code = (
+            next(status_return_codes)
+            if command == operator_preflight.AIVM_CODEX_AUTH_STATUS_COMMAND
+            else 0
+        )
+        return subprocess.CompletedProcess(command, return_code)
+
+    def approve_authentication() -> str:
+        assert capsys.readouterr().out.endswith(
+            "[operator-preflight] "
+            f"{operator_preflight.OPERATOR_CODEX_AUTH_PROMPT.rstrip()}\n"
+        )
+        return "yes"
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("builtins.input", approve_authentication)
+
+    operator_preflight._ensure_codex_is_authenticated(
+        {},
+        repository_root=repository_root,
+    )
+
+    assert observed == [
+        operator_preflight.AIVM_CODEX_AUTH_STATUS_COMMAND,
+        operator_preflight.AIVM_CODEX_DEVICE_AUTH_COMMAND,
+        operator_preflight.AIVM_CODEX_AUTH_STATUS_COMMAND,
+    ]
+
+
+def test_missing_codex_authentication_refusal_fails_fast(
+    monkeypatch: pytest.MonkeyPatch,
+    repository_root: Path,
+) -> None:
+    def run(
+        command: tuple[str, ...],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 1)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("builtins.input", lambda: "no")
+
+    with pytest.raises(
+        pytest.UsageError,
+        match=operator_preflight.OPERATOR_CODEX_AUTH_REQUIRED,
+    ):
+        operator_preflight._ensure_codex_is_authenticated(
+            {},
+            repository_root=repository_root,
+        )
+
+
+@pytest.mark.parametrize(
+    "outcome", ("success", "startup_failed", "query_failed", "exited", "stale"),
+)
+def test_operator_query_button_uses_production_lifecycle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str,
+) -> None:
+    runtime = cast(workflow.OperatorRuntime, SimpleNamespace(
+        config_path=tmp_path / "config.json", dashboard_socket_path=tmp_path / "ipc.sock",
+    ))
+    # Query itself must not initialize a DB or bypass the Dashboard-owned IPC lifetime.
+    monkeypatch.setattr(backend_server, "configure_runtime", Mock(side_effect=AssertionError))
+    monkeypatch.setattr(
+        backend_server,
+        "start_dashboard_query_server",
+        Mock(side_effect=AssertionError),
+    )
+    process = Mock()
+    process.poll.return_value = None
+    output = ["Dashboard snapshot replaced: previous query\n"]
+    dashboard = cast(workflow.DashboardProcess, SimpleNamespace(process=process, output=output))
+    page = Mock()
+    page.get_by_text.return_value.is_visible.return_value = True
+
+    def click() -> None:
+        if outcome == "exited":
+            process.poll.return_value = 1
+        elif outcome != "stale":
+            output.append({
+                "success": "Dashboard snapshot replaced: fresh query\n",
+                "startup_failed": "Backend startup failed: missing DB\n",
+                "query_failed": "Query IPC failed: invalid response\n",
+            }[outcome])
+
+    page.get_by_test_id.return_value.click.side_effect = click
+    if outcome == "stale":
+        page.wait_for_timeout.side_effect = lambda _timeout: output.append(
+            "Dashboard snapshot replaced: fresh query\n",
+        )
+    else:
+        page.wait_for_timeout.side_effect = AssertionError("must not wait after known result")
+    if outcome in {"success", "stale"}:
+        workflow.query_snapshot_in_browser(page, runtime, dashboard)
+        assert page.wait_for_timeout.call_count == int(outcome == "stale")
+    else:
+        diagnostic = {"startup_failed": "missing DB", "query_failed": "invalid response",
+                      "exited": "dashboard exited"}[outcome]
+        with pytest.raises(RuntimeError, match=diagnostic):
+            workflow.query_snapshot_in_browser(page, runtime, dashboard)
+        page.wait_for_timeout.assert_not_called()
+    page.get_by_test_id.assert_called_once_with(control_ui.BACKEND_REFRESH_TEST_ID)
+    page.get_by_test_id.return_value.click.assert_called_once_with()
+
+
+@pytest.mark.parametrize("full_stop", ("clean", "missing", "no-ack", "forced-kill"))
+def test_operator_requires_clean_stop_for_each_owned_backend(full_stop: str) -> None:
+    prefix = Locale.CONTROL_CENTRE_LOG_PREFIX
+    output = [f"{prefix} Owned Backend ready: pid={pid}\n" for pid in (101, 102)]
+    output.append(
+        f"{prefix} " + Locale.BACKEND_STOPPED_LOG_TEMPLATE.format(
+            pid=101, return_code=0, clean_close_ack=True,
+            forced_kill=False, shutdown_succeeded=True,
+        ) + "\n",
+    )
+    if full_stop != "missing":
+        output.append(
+            f"{prefix} " + Locale.BACKEND_STOPPED_LOG_TEMPLATE.format(
+                pid=102, return_code=0, clean_close_ack=full_stop != "no-ack",
+                forced_kill=full_stop == "forced-kill", shutdown_succeeded=full_stop == "clean",
+            ) + "\n",
+        )
+    if full_stop == "clean":
+        workflow.assert_owned_backends_stopped(output, [])
+    else:
+        with pytest.raises(AssertionError, match=r"PIDs.*\[102\]"):
+            workflow.assert_owned_backends_stopped(output, [])
+
+
+def test_operator_failure_includes_captured_backend_reason() -> None:
+    summary = f"{workflow.FAILED_RUN_LOG_PREFIX} detail=unspecified\n"
+    reason = (
+        f"{Locale.BACKEND_LOG_PREFIX} WARNING:backend.api:"
+        "validation rejected at rollout_index: broken supported citation chain\n"
+    )
+    informational = f"{Locale.BACKEND_LOG_PREFIX} INFO:backend.api:Pull: HTTP 500\n"
+    process = Mock(spec=subprocess.Popen)
+    process.poll.return_value = None
+    dashboard = workflow.DashboardProcess(
+        process=process, output=[reason, informational, summary],
+        output_thread=threading.Thread(),
+    )
+    with pytest.raises(RuntimeError) as caught:
+        workflow.raise_for_dashboard_failure(dashboard)
+    assert str(caught.value) == "workflow failed:\n" + summary + reason

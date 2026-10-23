@@ -1,0 +1,626 @@
+#!/bin/bash
+set -euo pipefail
+
+AIVM_USER="${AIVM_USER:-ai}"
+AIVM_PYTHON_VERSION="${AIVM_PYTHON_VERSION:-}"
+AIVM_PYDANTIC_VERSION="${AIVM_PYDANTIC_VERSION:-}"
+AIVM_HOME="${AIVM_HOME:-/home/$AIVM_USER}"
+AIVM_AUDIT_USER="${AIVM_AUDIT_USER:-aivm-audit}"
+AIVM_AUDIT_HOME="${AIVM_AUDIT_HOME:-/var/lib/$AIVM_AUDIT_USER}"
+AIVM_AUTHORIZED_KEY="${AIVM_AUTHORIZED_KEY:-}"
+AIVM_RESTRICTED_PATH="${AIVM_RESTRICTED_PATH:-}"
+AIVM_SSH_PORT="${AIVM_SSH_PORT:-22022}"
+AIVM_BACKEND_PORT="${AIVM_BACKEND_PORT:-8612}"
+AIVM_SSH_SERVER_NAME="aivm-sshd.service"
+AIVM_SSH_SERVER_DESCRIPTION="AIVM private SSH server"
+AIVM_SERVICE_RESTART_SECONDS="2"
+
+AIVM_VSCODE_VERSION="${AIVM_VSCODE_VERSION:-1.130.0}"
+AIVM_VSCODE_COMMIT="${AIVM_VSCODE_COMMIT:-1b6a188127eeaf9194f945eb6eb89a657e93c54c}"
+AIVM_VSCODE_URL="${AIVM_VSCODE_URL:-https://update.code.visualstudio.com/commit:$AIVM_VSCODE_COMMIT/server-linux-arm64/stable}"
+AIVM_VSCODE_PATH="${AIVM_VSCODE_PATH:-$AIVM_HOME/.vscode-server/bin/$AIVM_VSCODE_COMMIT}"
+AIVM_VSCODE_BIN_PATH="${AIVM_VSCODE_BIN_PATH:-$AIVM_VSCODE_PATH/bin/code-server}"
+AIVM_VSCE_PATH="${AIVM_VSCE_PATH:-$AIVM_HOME/.vscode-server/extensions}"
+AIVM_CODEX_VSCE="${AIVM_CODEX_VSCE:-openai.chatgpt@26.721.41059}"
+AIVM_CODEX_CLI_VERSION="${AIVM_CODEX_CLI_VERSION:-0.146.0-alpha.3.1}"
+AIVM_CODEX_CLI_INSTALL_URL="${AIVM_CODEX_CLI_INSTALL_URL:-https://chatgpt.com/codex/install.sh}"
+AIVM_CODEX_CLI_BIN_PATH="${AIVM_CODEX_CLI_BIN_PATH:-$AIVM_HOME/.local/bin/codex}"
+AIVM_CODEX_PATH="${AIVM_CODEX_PATH:-$AIVM_HOME/.codex}"
+AIVM_CODEX_SESSIONS_PATH="$AIVM_CODEX_PATH/sessions"
+AIVM_CODEX_CONFIG_PATH="${AIVM_CODEX_CONFIG_PATH:-$AIVM_CODEX_PATH/config.toml}"
+AIVM_UV_VERSION="${AIVM_UV_VERSION:-0.10.0}"
+AIVM_UV_URL="${AIVM_UV_URL:-https://github.com/astral-sh/uv/releases/download/$AIVM_UV_VERSION/uv-aarch64-unknown-linux-gnu.tar.gz}"
+AIVM_UV_BIN_PATH="${AIVM_UV_BIN_PATH:-/usr/local/libexec/aivm-uv/uv}"
+AIVM_APPENDWATCH_SCRIPT="${AIVM_APPENDWATCH_SCRIPT:-}"
+AIVM_APPENDWATCH_REPORT="${AIVM_APPENDWATCH_REPORT:-}"
+AIVM_AUDIT_READ_SCRIPT="${AIVM_AUDIT_READ_SCRIPT:-}"
+APPENDWATCH_DIR="$(dirname "$AIVM_APPENDWATCH_SCRIPT")"
+AIVM_AUDIT_READ_BIN="/usr/local/libexec/aivm-audit-read"
+# Provision `audit_read.py`'s Python prerequisites
+AIVM_AUDIT_ENV="/usr/local/libexec/aivm-audit-env"
+AIVM_PYTHON_INSTALL_DIR="/usr/local/libexec/aivm-python"
+AIVM_AUDIT_DISPATCH="/usr/local/libexec/aivm-audit-dispatch"
+AIVM_AUDIT_ENTRYPOINT="/usr/local/libexec/aivm-audit-entrypoint"
+AIVM_AUDIT_CONFIG="$APPENDWATCH_DIR/audit-read.json"
+AIVM_AUDIT_SUDOERS="/etc/sudoers.d/aivm-audit-read"
+AIVM_APPENDWATCH_SERVICE_NAME="aivm-appendwatch.service"
+AIVM_APPENDWATCH_SERVICE_DESCRIPTION="AIVM Codex rollout append-only watcher"
+AIVM_APPENDWATCH_REPORT_WAIT_ATTEMPTS="50"
+AIVM_APPENDWATCH_REPORT_WAIT_INTERVAL_SECONDS="0.1"
+
+usage() {
+    cat <<EOF
+Usage:
+  sudo $0 \\
+    --authorized-key-file /path/to/id_ed25519.pub \\
+    --restricted-path /absolute/guest/mount/path
+
+Options:
+  --user NAME
+  --home PATH
+  --audit-user NAME
+  --audit-home PATH
+  --authorized-key KEY
+  --authorized-key-file PATH
+  --restricted-path PATH
+  --ssh-port PORT
+  --backend-port PORT
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --user)
+            [ -n "${2:-}" ] || { echo "❌ Missing user"; exit 1; }
+            AIVM_USER="$2"
+            shift 2
+            ;;
+        --home)
+            [ -n "${2:-}" ] || { echo "❌ Missing home"; exit 1; }
+            AIVM_HOME="$2"
+            shift 2
+            ;;
+        --audit-user)
+            [ -n "${2:-}" ] || { echo "❌ Missing audit user"; exit 1; }
+            AIVM_AUDIT_USER="$2"
+            shift 2
+            ;;
+        --audit-home)
+            [ -n "${2:-}" ] || { echo "❌ Missing audit home"; exit 1; }
+            AIVM_AUDIT_HOME="$2"
+            shift 2
+            ;;
+        --authorized-key)
+            [ -n "${2:-}" ] || { echo "❌ Missing authorized key"; exit 1; }
+            AIVM_AUTHORIZED_KEY="$2"
+            shift 2
+            ;;
+        --authorized-key-file)
+            [ -n "${2:-}" ] || { echo "❌ Missing authorized key file"; exit 1; }
+            AIVM_AUTHORIZED_KEY="$(cat "$2")"
+            shift 2
+            ;;
+        --restricted-path)
+            [ -n "${2:-}" ] || { echo "❌ Missing restricted path"; exit 1; }
+            AIVM_RESTRICTED_PATH="$2"
+            shift 2
+            ;;
+        --ssh-port)
+            [ -n "${2:-}" ] || { echo "❌ Missing SSH port"; exit 1; }
+            AIVM_SSH_PORT="$2"
+            shift 2
+            ;;
+        --backend-port)
+            [ -n "${2:-}" ] || { echo "❌ Missing backend port"; exit 1; }
+            AIVM_BACKEND_PORT="$2"
+            shift 2
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "❌ Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+[ "$(id -u)" -eq 0 ] \
+    || { echo "❌ This provisioning script must run as root"; exit 1; }
+
+[[ "$AIVM_PYTHON_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || { echo "❌ Exact project Python version is required"; exit 1; }
+[[ "$AIVM_PYDANTIC_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || { echo "❌ Exact detour Pydantic version is required"; exit 1; }
+
+[[ "$AIVM_USER" =~ ^[a-z_][a-z0-9_-]*\$?$ ]] \
+    || { echo "❌ Invalid user name: $AIVM_USER"; exit 1; }
+[[ "$AIVM_AUDIT_USER" =~ ^[a-z_][a-z0-9_-]*\$?$ ]] \
+    || { echo "❌ Invalid audit user name: $AIVM_AUDIT_USER"; exit 1; }
+[ "$AIVM_AUDIT_USER" != "$AIVM_USER" ] \
+    || { echo "❌ Audit user must differ from the AIVM user"; exit 1; }
+
+case "$AIVM_HOME" in
+    /*) ;;
+    *) echo "❌ Home must be an absolute path: $AIVM_HOME"; exit 1 ;;
+esac
+
+case "$AIVM_AUDIT_HOME" in
+    /*) ;;
+    *) echo "❌ Audit home must be an absolute path: $AIVM_AUDIT_HOME"; exit 1 ;;
+esac
+
+case "$AIVM_RESTRICTED_PATH" in
+    /*) ;;
+    "") echo "❌ Restricted path is required"; exit 1 ;;
+    *) echo "❌ Restricted path must be absolute: $AIVM_RESTRICTED_PATH"; exit 1 ;;
+esac
+
+case "$AIVM_APPENDWATCH_SCRIPT" in
+    "$AIVM_RESTRICTED_PATH"/*) ;;
+    "") echo "❌ Appendwatch script path is required"; exit 1 ;;
+    *) echo "❌ Appendwatch script must be below the restricted path"; exit 1 ;;
+esac
+
+case "$AIVM_APPENDWATCH_REPORT" in
+    "$AIVM_RESTRICTED_PATH"/*) ;;
+    "") echo "❌ Appendwatch report path is required"; exit 1 ;;
+    *) echo "❌ Appendwatch report must be below the restricted path"; exit 1 ;;
+esac
+
+case "$AIVM_AUDIT_READ_SCRIPT" in
+    "$AIVM_RESTRICTED_PATH"/*) ;;
+    "") echo "❌ Audit read script path is required"; exit 1 ;;
+    *) echo "❌ Audit read script must be below the restricted path"; exit 1 ;;
+esac
+
+case "$AIVM_AUTHORIZED_KEY" in
+    ssh-*) ;;
+    "") echo "❌ Authorized key is required"; exit 1 ;;
+    *) echo "❌ Authorized key does not look like an SSH public key"; exit 1 ;;
+esac
+
+[[ "$AIVM_SSH_PORT" =~ ^[0-9]+$ ]] \
+    && [ "$AIVM_SSH_PORT" -ge 1 ] \
+    && [ "$AIVM_SSH_PORT" -le 65535 ] \
+    || { echo "❌ Invalid SSH port: $AIVM_SSH_PORT"; exit 1; }
+
+[[ "$AIVM_BACKEND_PORT" =~ ^[0-9]+$ ]] \
+    && [ "$AIVM_BACKEND_PORT" -ge 1 ] \
+    && [ "$AIVM_BACKEND_PORT" -le 65535 ] \
+    || { echo "❌ Invalid backend port: $AIVM_BACKEND_PORT"; exit 1; }
+
+RESTRICTED_GATE="$(dirname "$AIVM_RESTRICTED_PATH")"
+[ "$RESTRICTED_GATE" != "/" ] \
+    || { echo "❌ Refusing to restrict filesystem root"; exit 1; }
+
+case "$AIVM_HOME/" in
+    "$RESTRICTED_GATE/"*)
+        echo "❌ Restricted-path parent contains the AIVM home: $RESTRICTED_GATE"
+        exit 1
+        ;;
+esac
+
+packages=()
+command -v setfacl >/dev/null 2>&1 || packages+=(acl)
+command -v sshd >/dev/null 2>&1 || packages+=(openssh-server)
+command -v curl >/dev/null 2>&1 || packages+=(curl)
+command -v openssl >/dev/null 2>&1 || packages+=(openssl)
+command -v sudo >/dev/null 2>&1 || packages+=(sudo)
+[ -f /etc/ssl/certs/ca-certificates.crt ] || packages+=(ca-certificates)
+
+if [ "${#packages[@]}" -gt 0 ]; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends "${packages[@]}"
+fi
+
+# Keep the audit interpreter and models isolated from the guest's distro Python.
+if [ ! -x "$AIVM_UV_BIN_PATH" ]; then
+    install -d -m 0755 "$(dirname "$AIVM_UV_BIN_PATH")"
+    curl -fsSL "$AIVM_UV_URL" |
+        tar -xz --strip-components=1 -C "$(dirname "$AIVM_UV_BIN_PATH")"
+fi
+[ "$("$AIVM_UV_BIN_PATH" --version)" = "uv $AIVM_UV_VERSION" ] \
+    || { echo "❌ uv does not match the configured version"; exit 1; }
+UV_PYTHON_INSTALL_DIR="$AIVM_PYTHON_INSTALL_DIR" \
+    "$AIVM_UV_BIN_PATH" python install "$AIVM_PYTHON_VERSION"
+AIVM_PYTHON_BIN="$(
+    UV_PYTHON_INSTALL_DIR="$AIVM_PYTHON_INSTALL_DIR" \
+        "$AIVM_UV_BIN_PATH" python find \
+        --managed-python "$AIVM_PYTHON_VERSION"
+)"
+if [ ! -x "$AIVM_AUDIT_ENV/bin/python" ]; then
+    "$AIVM_UV_BIN_PATH" venv --python "$AIVM_PYTHON_BIN" "$AIVM_AUDIT_ENV"
+fi
+[ "$("$AIVM_AUDIT_ENV/bin/python" -c 'import platform; print(platform.python_version())')" \
+    = "$AIVM_PYTHON_VERSION" ] \
+    || { echo "❌ Audit Python does not match project pin"; exit 1; }
+"$AIVM_UV_BIN_PATH" pip install \
+    --python "$AIVM_AUDIT_ENV/bin/python" "pydantic==$AIVM_PYDANTIC_VERSION"
+[ "$("$AIVM_AUDIT_ENV/bin/python" -c 'import pydantic; print(pydantic.__version__)')" \
+    = "$AIVM_PYDANTIC_VERSION" ] \
+    || { echo "❌ Audit Pydantic does not match detour pin"; exit 1; }
+
+if ! getent group "$AIVM_USER" >/dev/null; then
+    groupadd "$AIVM_USER"
+fi
+
+if ! id -u "$AIVM_USER" >/dev/null 2>&1; then
+    useradd \
+        --create-home \
+        --home-dir "$AIVM_HOME" \
+        --shell /bin/bash \
+        --gid "$AIVM_USER" \
+        "$AIVM_USER"
+else
+    usermod \
+        --home "$AIVM_HOME" \
+        --shell /bin/bash \
+        "$AIVM_USER"
+fi
+
+AIVM_GROUP="$(id -gn "$AIVM_USER")"
+
+if ! getent group "$AIVM_AUDIT_USER" >/dev/null; then
+    groupadd "$AIVM_AUDIT_USER"
+fi
+
+if ! id -u "$AIVM_AUDIT_USER" >/dev/null 2>&1; then
+    useradd \
+        --no-create-home \
+        --home-dir "$AIVM_AUDIT_HOME" \
+        --shell /bin/bash \
+        --gid "$AIVM_AUDIT_USER" \
+        "$AIVM_AUDIT_USER"
+else
+    usermod \
+        --home "$AIVM_AUDIT_HOME" \
+        --shell /bin/bash \
+        "$AIVM_AUDIT_USER"
+fi
+
+# Keep both accounts outside administrative groups.
+for group in sudo admin wheel; do
+    if getent group "$group" >/dev/null; then
+        gpasswd -d "$AIVM_USER" "$group" >/dev/null 2>&1 || true
+        gpasswd -d "$AIVM_AUDIT_USER" "$group" >/dev/null 2>&1 || true
+    fi
+done
+rm -f "/etc/sudoers.d/$AIVM_USER"
+rm -f "$AIVM_AUDIT_SUDOERS"
+
+# Keep the account unlocked for public-key SSH, but assign an unknown random
+# password while password authentication remains disabled.
+set_random_password() {
+    local account="$1"
+    local random_password
+    local password_hash
+    random_password="$(
+        head -c 48 /dev/urandom |
+            base64 |
+            tr -d '\n'
+    )"
+    password_hash="$(
+        printf '%s' "$random_password" |
+            openssl passwd -6 -stdin
+    )"
+    usermod --password "$password_hash" "$account"
+}
+
+set_random_password "$AIVM_USER"
+set_random_password "$AIVM_AUDIT_USER"
+
+install -d \
+    -m 0700 \
+    -o "$AIVM_USER" \
+    -g "$AIVM_GROUP" \
+    "$AIVM_HOME"
+
+install -d \
+    -m 0700 \
+    -o "$AIVM_USER" \
+    -g "$AIVM_GROUP" \
+    "$AIVM_HOME/.ssh"
+
+printf '%s\n' "$AIVM_AUTHORIZED_KEY" > "$AIVM_HOME/.ssh/authorized_keys"
+chown "$AIVM_USER:$AIVM_GROUP" "$AIVM_HOME/.ssh/authorized_keys"
+chmod 0600 "$AIVM_HOME/.ssh/authorized_keys"
+
+# The audit account has no writable home and every SSH request is forced
+# through the root-owned read protocol installed below.
+install -d -m 0755 -o root -g root "$AIVM_AUDIT_HOME"
+install -d -m 0755 -o root -g root "$AIVM_AUDIT_HOME/.ssh"
+printf 'restrict,command="%s" %s\n' \
+    "$AIVM_AUDIT_ENTRYPOINT" \
+    "$AIVM_AUTHORIZED_KEY" \
+    > "$AIVM_AUDIT_HOME/.ssh/authorized_keys"
+chown root:root "$AIVM_AUDIT_HOME/.ssh/authorized_keys"
+# sshd reads authorized_keys with the target user's privileges. Keep this
+# public-key file root-owned and non-writable by the audit account, but readable.
+chmod 0644 "$AIVM_AUDIT_HOME/.ssh/authorized_keys"
+
+# Preserve the normal Lima mount, but deny this user even directory traversal.
+mkdir -p "$RESTRICTED_GATE"
+setfacl -m "u:$AIVM_USER:---" "$RESTRICTED_GATE"
+
+if runuser -u "$AIVM_USER" -- \
+    bash -c 'cd -- "$1" >/dev/null 2>&1' bash "$RESTRICTED_GATE"; then
+    echo "❌ Failed to block '$AIVM_USER' from traversing: $RESTRICTED_GATE"
+    exit 1
+fi
+
+install -d \
+    -m 0700 \
+    -o "$AIVM_USER" \
+    -g "$AIVM_GROUP" \
+    "$AIVM_CODEX_PATH" \
+    "$AIVM_CODEX_SESSIONS_PATH"
+
+# Root-owned import location serves both the audit executable and appendwatch service.
+install -d -m 0755 -o root -g root /usr/local/libexec/src/helpers
+install -m 0644 -o root -g root \
+    "$APPENDWATCH_DIR/architecture.py" /usr/local/libexec/src/helpers/architecture.py
+PYTHONPATH=/usr/local/libexec "$AIVM_AUDIT_ENV/bin/python" -c \
+    'from src.helpers.architecture import FrozenStrictModel'
+
+install -D \
+    -m 0755 \
+    -o root \
+    -g root \
+    "$AIVM_AUDIT_READ_SCRIPT" \
+    "$AIVM_AUDIT_READ_BIN"
+sed -i "1c#!$AIVM_AUDIT_ENV/bin/python" "$AIVM_AUDIT_READ_BIN"
+
+"$AIVM_AUDIT_ENV/bin/python" - \
+    "$AIVM_AUDIT_CONFIG" \
+    "$AIVM_USER" \
+    "$AIVM_AUDIT_USER" \
+    "$AIVM_CODEX_SESSIONS_PATH" \
+    "$AIVM_APPENDWATCH_REPORT" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+config_path, runtime_user, audit_user, sessions_root, appendwatch_report = sys.argv[1:]
+Path(config_path).write_text(
+    json.dumps(
+        {
+            "runtime_user": runtime_user,
+            "audit_user": audit_user,
+            "sessions_root": sessions_root,
+            "appendwatch_report": appendwatch_report,
+        },
+        separators=(",", ":"),
+    )
+    + "\n",
+    encoding="utf-8",
+)
+os.chmod(config_path, 0o600)
+PY
+
+cat > "$AIVM_AUDIT_ENTRYPOINT" <<EOF
+#!/bin/bash
+set -euo pipefail
+exec sudo -n "$AIVM_AUDIT_DISPATCH" "\${SSH_ORIGINAL_COMMAND:-}"
+EOF
+chown root:root "$AIVM_AUDIT_ENTRYPOINT"
+chmod 0755 "$AIVM_AUDIT_ENTRYPOINT"
+
+printf -v AIVM_AUDIT_READ_BIN_Q '%q' "$AIVM_AUDIT_READ_BIN"
+printf -v AIVM_AUDIT_CONFIG_Q '%q' "$AIVM_AUDIT_CONFIG"
+cat > "$AIVM_AUDIT_DISPATCH" <<EOF
+#!/bin/bash
+set -euo pipefail
+[ "\$#" -eq 1 ] || exit 2
+exec $AIVM_AUDIT_READ_BIN_Q --configuration $AIVM_AUDIT_CONFIG_Q "\$1"
+EOF
+chown root:root "$AIVM_AUDIT_DISPATCH"
+chmod 0755 "$AIVM_AUDIT_DISPATCH"
+
+printf '%s ALL=(root) NOPASSWD: %s *\n' \
+    "$AIVM_AUDIT_USER" \
+    "$AIVM_AUDIT_DISPATCH" \
+    > "$AIVM_AUDIT_SUDOERS"
+chmod 0440 "$AIVM_AUDIT_SUDOERS"
+visudo -cf "$AIVM_AUDIT_SUDOERS" >/dev/null
+
+# Start appendwatch before anything Codex-capable runs as the AIVM user.
+# The directory is reverse-SSHFS-mounted from macOS, where guest-side chown is
+# unsupported. The restricted audit protocol reads it through its root-only
+# dispatcher, so it does not need direct guest ownership of the mounted tree.
+chmod 0700 "$APPENDWATCH_DIR"
+chmod 0600 "$AIVM_APPENDWATCH_SCRIPT"
+chmod 0600 "$AIVM_AUDIT_READ_SCRIPT"
+chmod 0600 "$AIVM_AUDIT_CONFIG"
+
+cat > "/etc/systemd/system/$AIVM_APPENDWATCH_SERVICE_NAME" <<EOF
+[Unit]
+Description="$AIVM_APPENDWATCH_SERVICE_DESCRIPTION"
+After=local-fs.target
+RequiresMountsFor="$AIVM_APPENDWATCH_SCRIPT" "$AIVM_CODEX_SESSIONS_PATH"
+
+[Service]
+Type=simple
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=/usr/local/libexec
+ExecStart="$AIVM_AUDIT_ENV/bin/python" -B "$AIVM_APPENDWATCH_SCRIPT" "$AIVM_CODEX_SESSIONS_PATH" --report "$AIVM_APPENDWATCH_REPORT" --report-mode 0640
+Restart=on-failure
+RestartSec=$AIVM_SERVICE_RESTART_SECONDS
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now "$AIVM_APPENDWATCH_SERVICE_NAME"
+systemctl is-enabled --quiet "$AIVM_APPENDWATCH_SERVICE_NAME"
+systemctl is-active --quiet "$AIVM_APPENDWATCH_SERVICE_NAME"
+
+for ((attempt = 0; attempt < AIVM_APPENDWATCH_REPORT_WAIT_ATTEMPTS; attempt++)); do
+    [ -s "$AIVM_APPENDWATCH_REPORT" ] && break
+    sleep "$AIVM_APPENDWATCH_REPORT_WAIT_INTERVAL_SECONDS"
+done
+[ -s "$AIVM_APPENDWATCH_REPORT" ] \
+    || { echo "❌ Appendwatch did not create its report"; exit 1; }
+
+# Everything below runs as the unprivileged AIVM user.
+runuser -u "$AIVM_USER" -- env \
+    HOME="$AIVM_HOME" \
+    USER="$AIVM_USER" \
+    LOGNAME="$AIVM_USER" \
+    AIVM_VSCODE_URL="$AIVM_VSCODE_URL" \
+    AIVM_VSCODE_PATH="$AIVM_VSCODE_PATH" \
+    AIVM_VSCODE_BIN_PATH="$AIVM_VSCODE_BIN_PATH" \
+    AIVM_VSCE_PATH="$AIVM_VSCE_PATH" \
+    AIVM_CODEX_VSCE="$AIVM_CODEX_VSCE" \
+    AIVM_CODEX_CLI_VERSION="$AIVM_CODEX_CLI_VERSION" \
+    AIVM_CODEX_CLI_INSTALL_URL="$AIVM_CODEX_CLI_INSTALL_URL" \
+    AIVM_CODEX_CLI_BIN_PATH="$AIVM_CODEX_CLI_BIN_PATH" \
+    AIVM_CODEX_PATH="$AIVM_CODEX_PATH" \
+    AIVM_CODEX_SESSIONS_PATH="$AIVM_CODEX_SESSIONS_PATH" \
+    AIVM_CODEX_CONFIG_PATH="$AIVM_CODEX_CONFIG_PATH" \
+    bash <<'AIVM_USER_PROVISION'
+set -euo pipefail
+
+chmod 700 "$AIVM_CODEX_PATH"
+cat > "$AIVM_CODEX_CONFIG_PATH" <<'CODEX_CONFIG'
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+model_reasoning_summary = "detailed"
+personality = "none"
+web_search = "live"
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+service_tier = "default"
+
+[features.code_mode]
+direct_only_tool_namespaces = ["web"]
+
+[agents]
+enabled = false
+
+[sandbox_workspace_write]
+network_access = true
+CODEX_CONFIG
+chmod 600 "$AIVM_CODEX_CONFIG_PATH"
+
+mkdir -p "$AIVM_VSCODE_PATH"
+if [ ! -x "$AIVM_VSCODE_BIN_PATH" ]; then
+    curl -fsSL "$AIVM_VSCODE_URL" |
+        tar -xz --strip-components=1 -C "$AIVM_VSCODE_PATH"
+fi
+
+mkdir -p "$AIVM_VSCE_PATH"
+"$AIVM_VSCODE_BIN_PATH" \
+    --extensions-dir "$AIVM_VSCE_PATH" \
+    --install-extension "$AIVM_CODEX_VSCE" --force
+
+curl -fsSL "$AIVM_CODEX_CLI_INSTALL_URL" |
+    sh -s -- --release "$AIVM_CODEX_CLI_VERSION"
+[ -x "$AIVM_CODEX_CLI_BIN_PATH" ]
+[ "$("$AIVM_CODEX_CLI_BIN_PATH" --version)" = \
+    "codex-cli $AIVM_CODEX_CLI_VERSION" ]
+AIVM_USER_PROVISION
+
+# The normal Lima sshd must never accept either private AIVM account.
+cat > /etc/ssh/sshd_config.d/90-aivm-deny.conf <<EOF
+DenyUsers $AIVM_USER $AIVM_AUDIT_USER
+EOF
+
+/usr/sbin/sshd -t
+systemctl reload ssh.service 2>/dev/null \
+    || systemctl reload sshd.service
+
+# Run a second sshd only on guest loopback for the private AIVM accounts.
+install -d -m 0700 /etc/ssh/aivm
+if [ ! -f /etc/ssh/aivm/ssh_host_ed25519_key ]; then
+    ssh-keygen \
+        -q \
+        -t ed25519 \
+        -N "" \
+        -f /etc/ssh/aivm/ssh_host_ed25519_key
+fi
+
+cat > /etc/ssh/sshd_config_aivm <<EOF
+Port $AIVM_SSH_PORT
+ListenAddress 127.0.0.1
+AddressFamily inet
+
+HostKey /etc/ssh/aivm/ssh_host_ed25519_key
+PidFile /run/sshd-aivm.pid
+
+UsePAM yes
+StrictModes yes
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+AuthorizedKeysFile %h/.ssh/authorized_keys
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PermitEmptyPasswords no
+PermitRootLogin no
+AllowUsers $AIVM_USER $AIVM_AUDIT_USER
+
+AllowAgentForwarding no
+# For VS Code to be able to connect
+AllowTcpForwarding yes
+PermitOpen 127.0.0.1:*
+PermitListen 127.0.0.1:$AIVM_BACKEND_PORT
+AllowStreamLocalForwarding no
+GatewayPorts no
+X11Forwarding no
+PermitTunnel no
+PermitUserEnvironment no
+PermitTTY yes
+
+PrintMotd no
+PrintLastLog yes
+TCPKeepAlive yes
+Subsystem sftp internal-sftp
+
+Match User $AIVM_AUDIT_USER
+    DisableForwarding yes
+    PermitTTY no
+    ForceCommand $AIVM_AUDIT_ENTRYPOINT
+EOF
+
+cat > "/etc/systemd/system/$AIVM_SSH_SERVER_NAME" <<EOF
+[Unit]
+Description=$AIVM_SSH_SERVER_DESCRIPTION
+After=network.target ssh.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/sbin/sshd -t -f /etc/ssh/sshd_config_aivm
+ExecStart=/usr/sbin/sshd -D -e -f /etc/ssh/sshd_config_aivm
+ExecReload=/bin/kill -HUP \$MAINPID
+KillMode=process
+Restart=on-failure
+RestartSec=$AIVM_SERVICE_RESTART_SECONDS
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+/usr/sbin/sshd -t -f /etc/ssh/sshd_config_aivm
+systemctl daemon-reload
+systemctl enable --now "$AIVM_SSH_SERVER_NAME"
+systemctl restart "$AIVM_SSH_SERVER_NAME"
+
+if command -v sudo >/dev/null 2>&1 \
+    && runuser -u "$AIVM_USER" -- sudo -n true >/dev/null 2>&1; then
+    echo "❌ '$AIVM_USER' unexpectedly has passwordless sudo"
+    exit 1
+fi
+
+if runuser -u "$AIVM_AUDIT_USER" -- sudo -n true >/dev/null 2>&1; then
+    echo "❌ '$AIVM_AUDIT_USER' unexpectedly has unrestricted passwordless sudo"
+    exit 1
+fi
+
+echo "✅ Provisioned '$AIVM_USER' and read-only '$AIVM_AUDIT_USER' with private SSH access on 127.0.0.1:$AIVM_SSH_PORT"

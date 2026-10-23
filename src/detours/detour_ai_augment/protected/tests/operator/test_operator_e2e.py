@@ -1,0 +1,1835 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+import re
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from collections.abc import Generator, Iterator, Sequence
+from contextlib import contextmanager, suppress
+from pathlib import Path, PurePosixPath
+from random import Random
+from typing import Any, TextIO, cast
+from urllib import error as urllib_error
+from urllib import request as urllib_request
+from uuid import UUID
+
+import psutil
+import pytest
+from fastapi import status
+from playwright.sync_api import Locator, Page, ViewportSize, expect, sync_playwright
+from pydantic import BaseModel, ConfigDict, field_validator
+
+from src.detours.detour_ai_augment.protected.src.backend import server as backend_server
+from src.detours.detour_ai_augment.protected.src.backend.helpers import api as backend_api
+from src.detours.detour_ai_augment.protected.src.backend.helpers.aivm_audit import (
+    aivm_connection_options,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (
+    pydantic_to_paste as submission_models,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
+    AiAugmentDetourConfig,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_detour_db import (  # noqa: E501
+    AiAugmentDetourDB,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_registered_resource import (  # noqa: E501
+    RESOURCE_PATH_KEY,
+    RESOURCE_SHA256_KEY,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
+    PostCommitValidation,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store import (  # noqa: E501
+    AiAugmentBackendStore,
+    initialize_backend_store,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import (  # noqa: E501
+    Locale as BackendLocale,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AI_AUGMENT_EVIDENCE_COLUMNS,
+    AIVM_AUDIT_USER,
+    AIVM_IDENTITY_FILE,
+    AIVM_INSTANCE,
+    AIVM_KNOWN_HOSTS_FILE,
+    AUDIT_FIND_ROLLOUT_COMMAND,
+    AUDIT_PROBE_COMMAND,
+    AUDIT_READ_APPENDWATCH_REPORT_COMMAND,
+    AUDIT_READ_ROLLOUT_COMMAND,
+    CODEX_OUTPUT_ROWS_TABLE,
+    COMMIT_REQUEST_RECORD_ID_COLUMN,
+    COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE,
+    CONFIG_FILENAME,
+    DASHBOARD_SOCKET_PATH_ENV_NAME,
+    ETAG_HEADER,
+    HTTP_CONTENT_TYPE_HEADER,
+    HTTP_GET_METHOD,
+    HTTP_POST_METHOD,
+    INIT_PATH,
+    KTP_AI_AUGMENT_COMMENTS_COL,
+    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
+    KTP_AI_AUGMENT_SESSION_METADATA_COL,
+    LIMA_SSH_CONFIG_PATH,
+    LOCATION_HEADER,
+    POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL,
+    POST_COMMIT_VALIDATION_FIELD_AUDIT_COL,
+    POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE,
+    PULL_PATH,
+    PUSH_PATH,
+    REPLAY_LOG_KEY,
+    ROLLOUT_FILENAME_PREFIX,
+    ROLLOUT_FILENAME_SUFFIX,
+    SOURCE_KEY_HEADER,
+    SSH_EXECUTABLE,
+    SSH_TIMEOUT_SECONDS,
+    STANDARDIZED_SUBMISSION_TYPE,
+    TEXT_ENCODING,
+    VALIDATION_REQUEST_RECORD_ID_COLUMN,
+    AiAugmentCohort,
+    ContentType,
+)
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
+    Locale,
+)
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.vars import (
+    AIVM_SSH_CONNECTION_COMMAND,
+    AIVM_SSH_TARGET,
+    BACKEND_MODULE,
+    BACKEND_PORT,
+    BACKEND_READY_TIMEOUT_SECONDS,
+    CODEX_EXEC_COMMAND,
+    CODEX_REMOTE_FIND_ROLLOUT_COMMAND_TEMPLATE,
+    CODEX_SESSIONS_ROOT,
+    CONTROL_CENTRE_BASE_URL,
+    CONTROL_CENTRE_HOST,
+    CONTROL_CENTRE_PORT,
+    CONTROL_HTTP_TIMEOUT_SECONDS,
+)
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.vars import (
+    PROCESS_STOP_TIMEOUT_SECONDS as CONTROL_PROCESS_STOP_TIMEOUT_SECONDS,
+)
+from src.detours.detour_ai_augment.protected.src.shared import (
+    AppendwatchReportError,
+    parse_appendwatch_report_bytes,
+)
+from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
+    ORIGINAL_NICEGUI_STORAGE_PATH,
+    nicegui_test_environment,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
+    AiAugmentBackendContext,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
+    AiAugmentSingularOuterDict,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.codex_innerdict import (
+    CodexInnerDict,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
+    COMMIT_PATH,
+    _CommitRequestBodyJson,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.init_request import (
+    BackendInitRequestRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
+    BackendLifecycle,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (
+    VALIDATE_PATH,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
+    run_outcome_event as run_outcome_models,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.ai_augment_context import (  # noqa: E501
+    LIMA_APPENDWATCH_REPORT_PARAM,
+    AiAugmentControlCentreContext,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.ai_augment_dashboard_storage import (  # noqa: E501
+    BACKEND_DATABASE_STORAGE_KEY,
+    RUN_EVENTS_STORAGE_KEY,
+    RUNS_STORAGE_KEY,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.dashboard_query_snapshot import (  # noqa: E501
+    DashboardQuerySnapshot,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.lifecycle import (  # noqa: E501
+    RunLifecycle,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_event import (  # noqa: E501
+    Run,
+    RunEvent,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome_event import (  # noqa: E501
+    RunOutcomePath,
+    RunOutcomeResponseRecord,
+)
+from src.helpers.architecture import FrozenStrictModel, nameof
+from src.helpers.data_models import HttpRequestLogRecord, NameKey
+from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1, KTP_LAST_NAME_COL
+
+CONTROL_CENTRE_MODULE = "src.detours.detour_ai_augment.src.control_centre.dashboard.ui"
+CONTROL_CENTRE_COMMAND_PREFIX = (
+    sys.executable,
+    "-m",
+    CONTROL_CENTRE_MODULE,
+    backend_server.CONFIG_OPTION,
+)
+CONTROL_CENTRE_URL = CONTROL_CENTRE_BASE_URL
+CONTROL_CENTRE_READY_LOG = Locale.READY_LOG_TEMPLATE.format(
+    url=CONTROL_CENTRE_URL
+)
+CONTROL_CENTRE_PORTS = (CONTROL_CENTRE_PORT, BACKEND_PORT)
+HASH_ALGORITHM = "sha256"
+HASH_SEPARATOR = b"\0"
+EMPTY_FILE_SHA256 = hashlib.sha256(b"").hexdigest()
+PROCESS_START_TIMEOUT_SECONDS = 300
+PROCESS_STOP_TIMEOUT_SECONDS = 30
+PROCESS_POLL_SECONDS = 0.1
+FULL_WORKFLOW_TIMEOUT_SECONDS = 1_800
+OPERATOR_HEARTBEAT_SECONDS = 10
+APPENDWATCH_ARCHIVE_WAIT_SECONDS = 120
+BROWSER_ASSERTION_TIMEOUT_MILLISECONDS = 30_000
+BROWSER_VIEWPORT: ViewportSize = {"width": 1_600, "height": 1_000}
+BROWSER_CHANNEL = "chrome"
+GRID_ROW_SELECTOR = ".ag-center-cols-container .ag-row"
+RUN_OUTCOME_HISTORY_ROW_SELECTOR = "tbody tr"
+OPERATOR_TARGET_DRAW_NUMBER = "146"
+DARWIN_AF_UNIX_PATH_CAPACITY_BYTES = 104
+PYTEST_CURRENT_TEST_ENV_NAME = "PYTEST_CURRENT_TEST"
+OPERATOR_LIVE_OUTPUT = sys.__stdout__ or sys.stdout
+FAILED_RUN_LOG_PREFIX = f"{Locale.CONTROL_CENTRE_LOG_PREFIX} run failed:"
+RESEARCHER_CARD_BEGIN = "Playwright researcher card begin"
+RESEARCHER_CARD_END = "Playwright researcher card end"
+
+pytestmark = [
+    pytest.mark.operator,
+    pytest.mark.use_rootpath_tmp,
+]
+
+
+class OperatorRuntime(FrozenStrictModel):
+    repository_root: Path
+    config_path: Path
+    backend_store: AiAugmentBackendStore
+    replay_log_path: Path
+    rollout_cas_dir: Path
+    dashboard_socket_path: Path
+
+
+class WorkflowCheckpoint(FrozenStrictModel):
+    queued_at_monotonic: float
+
+
+class DashboardProcess(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid", strict=True, frozen=True, arbitrary_types_allowed=True,
+    )
+
+    process: subprocess.Popen[str]
+    output: list[str]
+    output_thread: threading.Thread
+
+    @field_validator("output", mode="plain")
+    @classmethod
+    def shared_output(cls, value: object) -> list[str]:
+        # The collector thread owns this very buffer; validation must not copy it.
+        if not isinstance(value, list) or any(not isinstance(line, str) for line in value):
+            raise ValueError("output must be a shared list of strings")
+        return value
+
+    def wait_until_ready(self) -> None:
+        _operator_log("waiting for Control Centre readiness")
+        started_at = time.monotonic()
+        deadline = time.monotonic() + PROCESS_START_TIMEOUT_SECONDS
+        next_heartbeat = started_at + OPERATOR_HEARTBEAT_SECONDS
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                raise RuntimeError(
+                    "Control Centre exited during startup:\n" + "".join(self.output)
+                )
+            if CONTROL_CENTRE_READY_LOG not in "".join(self.output):
+                time.sleep(PROCESS_POLL_SECONDS)
+                continue
+            try:
+                with urllib_request.urlopen(
+                    CONTROL_CENTRE_URL,
+                    timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
+                ):
+                    _operator_log("Control Centre is ready")
+                    return
+            except (OSError, urllib_error.URLError):
+                time.sleep(PROCESS_POLL_SECONDS)
+            now = time.monotonic()
+            if now >= next_heartbeat:
+                _operator_log(
+                    f"still waiting for Control Centre ({now - started_at:.0f}s elapsed)"
+                )
+                next_heartbeat = now + OPERATOR_HEARTBEAT_SECONDS
+        raise TimeoutError("Control Centre did not become ready:\n" + "".join(self.output))
+
+    def stop(self) -> None:
+        _operator_log("stopping Control Centre and its child processes")
+        descendants = self._descendants()
+        if self.process.poll() is None:
+            control_centre = _process_snapshot(
+                psutil.Process(self.process.pid),
+                role="Control Centre",
+            )
+            _operator_process_log(
+                "sending SIGINT",
+                control_centre,
+            )
+            self.process.send_signal(signal.SIGINT)
+            try:
+                self.process.wait(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                _operator_process_log(
+                    "SIGINT timed out; sending SIGTERM",
+                    control_centre,
+                )
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    _operator_process_log(
+                        "SIGTERM timed out; sending SIGKILL",
+                        control_centre,
+                    )
+                    self.process.kill()
+                    self.process.wait(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+            _operator_log(
+                "Control Centre process exited: "
+                f"pid={self.process.pid} return_code={self.process.returncode}"
+            )
+        else:
+            _operator_log(
+                "Control Centre process had already exited: "
+                f"pid={self.process.pid} return_code={self.process.returncode}"
+            )
+        self._stop_descendants(descendants)
+        self.output_thread.join(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+        if self.process.stdout is not None:
+            self.process.stdout.close()
+        _wait_for_ports_released()
+        _operator_log("Control Centre and child processes stopped")
+        assert_owned_backends_stopped(self.output, descendants)
+
+    def _descendants(self) -> list[OperatorProcessSnapshot]:
+        try:
+            return [
+                _process_snapshot(process)
+                for process in psutil.Process(self.process.pid).children(recursive=True)
+            ]
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            return []
+
+    @staticmethod
+    def _stop_descendants(descendants: list[OperatorProcessSnapshot]) -> None:
+        snapshots = {snapshot.pid: snapshot for snapshot in descendants}
+        gone, alive = psutil.wait_procs(
+            [snapshot.process for snapshot in descendants],
+            timeout=0,
+        )
+        for process in gone:
+            _operator_process_log(
+                "exited during graceful Control Centre shutdown",
+                snapshots[process.pid],
+            )
+        for process in alive:
+            _operator_process_log("sending fallback SIGTERM", snapshots[process.pid])
+            with suppress(psutil.AccessDenied, psutil.NoSuchProcess):
+                process.terminate()
+        gone, alive = psutil.wait_procs(alive, timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+        for process in gone:
+            _operator_process_log("stopped after fallback SIGTERM", snapshots[process.pid])
+        for process in alive:
+            _operator_process_log("sending fallback SIGKILL", snapshots[process.pid])
+            with suppress(psutil.AccessDenied, psutil.NoSuchProcess):
+                process.kill()
+        gone, alive = psutil.wait_procs(alive, timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+        for process in gone:
+            _operator_process_log("stopped after fallback SIGKILL", snapshots[process.pid])
+        if alive:
+            processes = ", ".join(
+                f"{snapshots[process.pid].role} pid={process.pid}" for process in alive
+            )
+            raise RuntimeError(f"operator child processes did not stop: {processes}")
+
+
+def assert_owned_backends_stopped(
+    output: Sequence[str], descendants: Sequence[OperatorProcessSnapshot],
+) -> None:
+    prefix = re.escape(Locale.CONTROL_CENTRE_LOG_PREFIX)
+    owned_pid = re.compile(
+        rf"^{prefix} (?:Owned Backend ready|stopping Backend process): pid=(\d+)$",
+    )
+    owned = {snapshot.pid for snapshot in descendants if snapshot.role == "Backend"}
+    for line in output:
+        match = owned_pid.fullmatch(line.strip())
+        if match is not None:
+            owned.add(int(match[1]))
+    lines = {line.strip() for line in output}
+    missing = sorted(
+        pid for pid in owned
+        if not any(
+            f"{Locale.CONTROL_CENTRE_LOG_PREFIX} "
+            + Locale.BACKEND_STOPPED_LOG_TEMPLATE.format(
+                pid=pid, return_code=code, clean_close_ack=True,
+                forced_kill=False, shutdown_succeeded=True,
+            ) in lines
+            for code in (0, -signal.SIGTERM, -signal.SIGINT)
+        )
+    )
+    assert not missing, (
+        f"Owned Backend PIDs lack successful clean-stop evidence: {missing}\n"
+        + "".join(output)
+    )
+
+
+class OperatorProcessSnapshot(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid", strict=True, frozen=True, arbitrary_types_allowed=True,
+    )
+
+    process: psutil.Process
+    pid: int
+    parent_pid: int | None
+    role: str
+    command: tuple[str, ...]
+
+
+def _process_snapshot(
+    process: psutil.Process,
+    *,
+    role: str | None = None,
+) -> OperatorProcessSnapshot:
+    try:
+        command = tuple(process.cmdline())
+    except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+        command = ()
+    try:
+        parent_pid = process.ppid()
+    except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+        parent_pid = None
+    return OperatorProcessSnapshot(
+        process=process,
+        pid=process.pid,
+        parent_pid=parent_pid,
+        role=role or _process_role(command),
+        command=command,
+    )
+
+
+def _process_role(command: tuple[str, ...]) -> str:
+    command_text = " ".join(command)
+    executable = Path(command[0]).name if command else ""
+    if BACKEND_MODULE in command_text:
+        return "Backend"
+    if str(CODEX_EXEC_COMMAND[0]) in command_text:
+        return "Codex SSH transport"
+    if executable == SSH_EXECUTABLE:
+        if any(
+            command in command_text
+            for command in (
+                AUDIT_FIND_ROLLOUT_COMMAND,
+                AUDIT_READ_ROLLOUT_COMMAND,
+                AUDIT_READ_APPENDWATCH_REPORT_COMMAND,
+                AUDIT_PROBE_COMMAND,
+            )
+        ):
+            return "Backend audit reader"
+        return "AIVM SSH helper"
+    return "unclassified Control Centre descendant"
+
+
+def _operator_process_log(action: str, snapshot: OperatorProcessSnapshot) -> None:
+    _operator_log(
+        f"{action}: role={snapshot.role} pid={snapshot.pid} "
+        f"parent_pid={snapshot.parent_pid} command={json.dumps(snapshot.command)}"
+    )
+
+
+def _operator_log(message: str, *, separate: bool = False) -> None:
+    separator = "\n" if separate else ""
+    OPERATOR_LIVE_OUTPUT.write(f"{separator}[operator-test] {message}\n")
+    OPERATOR_LIVE_OUTPUT.flush()
+
+
+def _file_digest(path: Path) -> bytes:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, HASH_ALGORITHM).digest()
+
+
+def _tree_digest(directory: Path) -> str:
+    digest = hashlib.sha256()
+    for path in (directory, *sorted(directory.rglob("*"))):
+        digest.update(path.relative_to(directory).as_posix().encode(TEXT_ENCODING))
+        digest.update(HASH_SEPARATOR)
+        if path.is_symlink():
+            digest.update(b"symlink")
+            digest.update(path.readlink().as_posix().encode(TEXT_ENCODING))
+        elif path.is_dir():
+            digest.update(b"directory")
+        elif path.is_file():
+            digest.update(b"file")
+            digest.update(_file_digest(path))
+        else:
+            digest.update(b"other")
+        digest.update(HASH_SEPARATOR)
+    return digest.hexdigest()
+
+
+@pytest.fixture(autouse=True)
+def production_data_unchanged(
+    operator_aivm: None,
+    repository_root: Path,
+    detour_root: Path,
+    pytestconfig: pytest.Config,
+) -> Iterator[None]:
+    production_data_directories = (
+        repository_root / "data",
+        detour_root / "data",
+        pytestconfig.stash[ORIGINAL_NICEGUI_STORAGE_PATH],
+    )
+    _operator_log(f"hashing protected paths before the test: {production_data_directories}")
+    before = {path: _tree_digest(path) for path in production_data_directories}
+    _operator_log("production-data pre-test hashes completed")
+    yield
+    _operator_log("verifying production data remains unchanged", separate=True)
+    assert {path: _tree_digest(path) for path in production_data_directories} == before
+    _operator_log(f"protected paths unchanged: {production_data_directories}")
+
+
+def _operator_runtime(
+    tmp_path: Path,
+    *,
+    repository_root: Path,
+    dashboard_socket_path: Path,
+) -> OperatorRuntime:
+    replay_log_path = tmp_path / "backend-replay.jsonl"
+    rollout_cas_dir = tmp_path / "rollout-cas"
+    config_path = tmp_path / "config.operator.json"
+    config_value: object = json.loads(
+        (repository_root / CONFIG_FILENAME).read_text(
+            encoding=TEXT_ENCODING
+        )
+    )
+    if not isinstance(config_value, dict):
+        raise AssertionError("operator configuration must be a JSON object")
+    config = cast(dict[str, Any], config_value)
+    configured_source = Path(str(config["db_file"]))
+    source = (
+        configured_source
+        if configured_source.is_absolute()
+        else repository_root / configured_source
+    )
+    source_link = tmp_path / source.name
+    source_link.symlink_to(source)
+    replay_log_path.write_bytes(b"")
+    files_config = cast(dict[str, Any], config["files_config"])
+    replay_config = cast(dict[str, Any], files_config[REPLAY_LOG_KEY])
+    replay_config[RESOURCE_PATH_KEY] = str(replay_log_path)
+    replay_config[RESOURCE_SHA256_KEY] = EMPTY_FILE_SHA256
+    config.update({
+        "db_file": str(source_link),
+        "state_file": str(tmp_path / "state.json"),
+        "output_dir": str(tmp_path / "output"),
+        "rollout_cas_dir": str(rollout_cas_dir),
+    })
+    config_path.write_text(json.dumps(config, indent=2), encoding=TEXT_ENCODING)
+    _operator_log("preparing isolated Backend DB without a Backend launch")
+    context = backend_server.configure_runtime(config_path)
+    pipeline_config = context.pipeline_config
+    backend_store = AiAugmentBackendStore._from_resources(
+        replay_log=pipeline_config.replay_log,
+        detour_db=AiAugmentDetourDB.from_pipeline_db(
+            pipeline_config.db_file,
+            duckdb_extensions=pipeline_config.duckdb_extensions,
+        ),
+        rollout_cas=pipeline_config.rollout_cas,
+    )
+    backend_store._rebuild_from_log(context, reset_confirmed=True)
+    _operator_log("isolated Backend DB prepared; replay log remains empty")
+    return OperatorRuntime(
+        repository_root=repository_root,
+        config_path=config_path,
+        backend_store=backend_store,
+        replay_log_path=replay_log_path,
+        rollout_cas_dir=rollout_cas_dir,
+        dashboard_socket_path=dashboard_socket_path,
+    )
+
+
+@pytest.fixture
+def operator_runtime(
+    repository_root: Path,
+    tmp_path: Path,
+) -> Iterator[OperatorRuntime]:
+    run_dir = tmp_path
+    _operator_log(f"Operator run directory (preserved): {run_dir}")
+    _operator_log(f"operator test source SHA-256: {_file_digest(Path(__file__)).hex()}")
+    dashboard_socket_path = run_dir / "dashboard.sock"
+    if len(os.fsencode(dashboard_socket_path)) >= DARWIN_AF_UNIX_PATH_CAPACITY_BYTES:
+        raise RuntimeError("operator dashboard socket path exceeds Darwin AF_UNIX capacity")
+    yield _operator_runtime(
+        run_dir,
+        repository_root=repository_root,
+        dashboard_socket_path=dashboard_socket_path,
+    )
+
+
+def _collect_output(stream: TextIO, output: list[str]) -> None:
+    for line in stream:
+        output.append(line)
+        OPERATOR_LIVE_OUTPUT.write(line)
+        OPERATOR_LIVE_OUTPUT.flush()
+
+
+def _assert_ports_available() -> None:
+    for port in CONTROL_CENTRE_PORTS:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+            if client.connect_ex((CONTROL_CENTRE_HOST, port)) == 0:
+                _operator_log(
+                    f"local port {port} is already in use; no operator-owned "
+                    "Control Centre or Backend process was started"
+                )
+                pytest.fail(f"operator test requires unused local port {port}")
+
+
+def _wait_for_ports_released() -> None:
+    deadline = time.monotonic() + PROCESS_STOP_TIMEOUT_SECONDS
+    occupied: list[int] = []
+    while time.monotonic() < deadline:
+        occupied = []
+        for port in CONTROL_CENTRE_PORTS:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+                if client.connect_ex((CONTROL_CENTRE_HOST, port)) == 0:
+                    occupied.append(port)
+        if not occupied:
+            return
+        time.sleep(PROCESS_POLL_SECONDS)
+    raise RuntimeError(f"operator processes retained local ports: {occupied}")
+
+
+@contextmanager
+def running_dashboard(runtime: OperatorRuntime) -> Generator[DashboardProcess]:
+    _operator_log("checking that Control Centre and Backend ports are free")
+    _assert_ports_available()
+    storage_path = runtime.config_path.parent / "nicegui"
+    environment = nicegui_test_environment(storage_path)
+    _operator_log(f"isolated NiceGUI storage: {storage_path}")
+    environment.pop(PYTEST_CURRENT_TEST_ENV_NAME, None)
+    environment["PYTHONUNBUFFERED"] = "1"
+    environment[DASHBOARD_SOCKET_PATH_ENV_NAME] = str(
+        runtime.dashboard_socket_path
+    )
+    process = subprocess.Popen(
+        (*CONTROL_CENTRE_COMMAND_PREFIX, str(runtime.config_path)),
+        cwd=runtime.repository_root,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding=TEXT_ENCODING,
+        errors="backslashreplace",
+        bufsize=1,
+        start_new_session=True,
+    )
+    dashboard: DashboardProcess | None = None
+    try:
+        _operator_log(f"started Control Centre process {process.pid}")
+        if process.stdout is None:
+            raise RuntimeError("Control Centre output pipe is unavailable")
+        output: list[str] = []
+        output_thread = threading.Thread(
+            target=_collect_output,
+            args=(process.stdout, output),
+            daemon=True,
+        )
+        output_thread.start()
+        dashboard = DashboardProcess(process=process, output=output, output_thread=output_thread)
+        dashboard.wait_until_ready()
+        yield dashboard
+    finally:
+        if dashboard is None:
+            _operator_log("stopping partially started Control Centre process")
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+            if process.stdout is not None:
+                process.stdout.close()
+            _operator_log("partially started Control Centre process stopped")
+        else:
+            dashboard.stop()
+
+
+def target_namekey(
+    runtime: OperatorRuntime, *, randomize_target: bool = False,
+) -> NameKey:
+    _operator_log("selecting the operator workflow target")
+    configuration = AiAugmentBackendContext(
+        pipeline_config=AiAugmentDetourConfig.from_json(
+            runtime.config_path,
+            verify_hash_on_init=False,
+        )
+    )
+    namekey = next(
+        item.namekey
+        for item in configuration.ai_augment_singular_outerdict_blueprints
+        if OPERATOR_TARGET_DRAW_NUMBER in item.draw_numbers
+        and item.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
+    )
+    if randomize_target:
+        first_five = sorted(
+            (
+                item
+                for item in configuration.ai_augment_singular_outerdict_blueprints
+                if item.ai_augment_cohort is AiAugmentCohort.GROUND_TRUTH
+            ),
+            key=lambda item: item.ai_augment_rnd,
+        )[:5]
+        _operator_log("first five workflow candidates by ai_augment_rnd:")
+        for item in first_five:
+            _operator_log(f"ai_augment_rnd={item.ai_augment_rnd}: {item.namekey.to_json_key()}")
+        assert tuple(item.namekey.model_dump_json(by_alias=True) for item in first_five) == (
+            '{"ktp.first_name":"Kenneth G","ktp.last_name":"Cassman"}',
+            '{"ktp.first_name":"John","ktp.last_name":"Haanen"}',
+            '{"ktp.first_name":"Antoine","ktp.last_name":"Guisan"}',
+            '{"ktp.first_name":"David N","ktp.last_name":"Spergel"}',
+            '{"ktp.first_name":"Gaoquan ","ktp.last_name":"Shi"}',
+        )
+        _operator_log(
+            f"added to workflow candidates: "
+            f"{namekey.model_dump_json(by_alias=True)}"
+        )
+        namekey = Random().choice((namekey, *(item.namekey for item in first_five)))
+    _operator_log(f"randomly selected workflow target {namekey}")
+    return namekey
+
+
+def query_snapshot_in_browser(
+    page: Page, runtime: OperatorRuntime, dashboard: DashboardProcess,
+) -> None:
+    """Exercise production-owned query lifetime after explicit fixture initialization."""
+    deadline = time.monotonic() + PROCESS_STOP_TIMEOUT_SECONDS
+    while runtime.dashboard_socket_path.exists():
+        raise_for_dashboard_failure(dashboard)
+        if time.monotonic() >= deadline:
+            raise TimeoutError("owned Backend did not release its IPC socket")
+        page.wait_for_timeout(round(PROCESS_POLL_SECONDS * 1_000))
+    output_start = len(dashboard.output)
+    page.get_by_test_id(control_ui.BACKEND_REFRESH_TEST_ID).click()
+    deadline = time.monotonic() + (
+        BACKEND_READY_TIMEOUT_SECONDS + CONTROL_PROCESS_STOP_TIMEOUT_SECONDS
+    )
+    while time.monotonic() < deadline:
+        raise_for_dashboard_failure(dashboard)
+        output = "".join(dashboard.output[output_start:])
+        if "Backend startup failed:" in output or "Query IPC failed:" in output:
+            raise RuntimeError("operator Query IPC failed:\n" + output)
+        if (
+            "Dashboard snapshot replaced:" in output
+            and page.get_by_text(Locale.QUERY_SNAPSHOT_REPLACED, exact=True).is_visible()
+        ):
+            return
+        page.wait_for_timeout(round(PROCESS_POLL_SECONDS * 1_000))
+    raise TimeoutError("operator Query IPC did not complete:\n" + "".join(dashboard.output))
+
+
+def queue_in_browser(
+    namekey: NameKey, runtime: OperatorRuntime, dashboard: DashboardProcess,
+) -> float:
+    _operator_log("opening the Control Centre in Playwright")
+    queued_at_monotonic: float | None = None
+    with sync_playwright() as playwright:
+        browser = None
+        try:
+            browser = playwright.chromium.launch(channel=BROWSER_CHANNEL, headless=True)
+            page = browser.new_page(viewport=BROWSER_VIEWPORT)
+            page.set_default_timeout(BROWSER_ASSERTION_TIMEOUT_MILLISECONDS)
+            page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
+            query_snapshot_in_browser(page, runtime, dashboard)
+            page.get_by_label(Locale.SEARCH_FILTER).fill(namekey.to_json_key())
+            rows = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID).locator(
+                GRID_ROW_SELECTOR
+            )
+            expect(rows).to_have_count(1)
+            rows.first.click()
+            execute = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
+            expect(execute).to_be_enabled()
+            queued_at_monotonic = time.monotonic()
+            execute.click()
+            _operator_log("queued the workflow through the browser")
+            start_queue = page.get_by_role(
+                "button", name=Locale.ACTION_START_QUEUE_PROCESSING, exact=True,
+            )
+            expect(start_queue).to_be_enabled()
+            start_queue.click()
+            expect(page.get_by_role(
+                "button", name=Locale.ACTION_STOP_QUEUE_PROCESSING, exact=True,
+            )).to_be_visible()
+            _operator_log("started queue processing through the browser")
+        finally:
+            if browser is not None:
+                browser.close()
+            _operator_log("closed the operator-test browser")
+    if queued_at_monotonic is None:
+        raise RuntimeError("operator workflow was not queued")
+    return queued_at_monotonic
+
+
+def authoritative_records(path: Path) -> tuple[HttpRequestLogRecord, ...]:
+    if not path.exists():
+        return ()
+    return tuple(
+        HttpRequestLogRecord.model_validate_json(line)
+        for line in path.read_bytes().splitlines()
+        if line
+    )
+
+
+def raise_for_dashboard_failure(dashboard: DashboardProcess) -> None:
+    if dashboard.process.poll() is not None:
+        raise RuntimeError("dashboard exited:\n" + "".join(dashboard.output))
+    failed_run_lines = [
+        line for line in dashboard.output if line.startswith(FAILED_RUN_LOG_PREFIX)
+    ]
+    if failed_run_lines:
+        backend_error_prefixes = tuple(
+            f"{Locale.BACKEND_LOG_PREFIX} {level}:"
+            for level in ("WARNING", "ERROR", "CRITICAL")
+        )
+        diagnostics = [
+            line for line in dashboard.output
+            if line.startswith(backend_error_prefixes)
+        ]
+        raise RuntimeError(
+            "workflow failed:\n"
+            + "".join((*failed_run_lines, *diagnostics))
+        )
+
+
+def wait_for_gone_pull(
+    runtime: OperatorRuntime,
+    dashboard: DashboardProcess,
+) -> tuple[HttpRequestLogRecord, ...]:
+    _operator_log("waiting for Backend GET /pull -> 410 Gone")
+    started_at = time.monotonic()
+    deadline = time.monotonic() + FULL_WORKFLOW_TIMEOUT_SECONDS
+    next_heartbeat = started_at + OPERATOR_HEARTBEAT_SECONDS
+    previous_record_count = 0
+    previous_exchange: tuple[str, str, int | None] | None = None
+    _operator_log("authoritative request log initially contains 0 record(s)")
+    while time.monotonic() < deadline:
+        raise_for_dashboard_failure(dashboard)
+        records = authoritative_records(runtime.replay_log_path)
+        for record in records[previous_record_count:]:
+            exchange = (record.method, record.path, record.response_code)
+            if exchange != previous_exchange:
+                response = (
+                    "request-only record; response fields intentionally null"
+                    if record.method == HTTP_POST_METHOD
+                    and record.path in {COMMIT_PATH, VALIDATE_PATH}
+                    and record.response_code is None
+                    and record.response_headers is None and record.response_body is None
+                    else (
+                        "no response" if record.response_code is None else str(record.response_code)
+                    )
+                )
+                _operator_log(
+                    f"observed authoritative {record.method} {record.path} -> {response}"
+                )
+                previous_exchange = exchange
+        previous_record_count = len(records)
+        if any(
+            (record.method, record.path, record.response_code)
+            == (
+                HTTP_GET_METHOD,
+                PULL_PATH,
+                status.HTTP_410_GONE,
+            )
+            for record in records
+        ):
+            _operator_log("Backend reached GET /pull -> 410 Gone")
+            return records
+        now = time.monotonic()
+        if now >= next_heartbeat:
+            _operator_log(
+                f"workflow is still running ({now - started_at:.0f}s elapsed, "
+                f"{len(records)} request-log record(s))"
+            )
+            next_heartbeat = now + OPERATOR_HEARTBEAT_SECONDS
+        time.sleep(PROCESS_POLL_SECONDS)
+    raise TimeoutError(
+        "workflow did not reach GET /pull -> 410 Gone:\n"
+        + "".join(dashboard.output)
+    )
+
+
+def run_workflow_to_gone_pull(
+    runtime: OperatorRuntime,
+    dashboard: DashboardProcess,
+    namekey: NameKey,
+) -> WorkflowCheckpoint:
+    queued_at_monotonic = queue_in_browser(namekey, runtime, dashboard)
+    wait_for_gone_pull(runtime, dashboard)
+    return WorkflowCheckpoint(
+        queued_at_monotonic=queued_at_monotonic,
+    )
+
+
+def wait_for_completed_grid_row(
+    page: Page,
+    dashboard: DashboardProcess,
+    runtime: OperatorRuntime,
+    *,
+    queued_at_monotonic: float,
+) -> tuple[Locator, str]:
+    rows = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID).locator(
+        GRID_ROW_SELECTOR
+    )
+    expect(rows).to_have_count(1)
+    row = rows.first
+    row.click()
+    history = page.get_by_test_id(control_ui.RUN_OUTCOME_HISTORY_TABLE_TEST_ID)
+    expect(history).to_be_visible()
+    history_rows = history.locator(RUN_OUTCOME_HISTORY_ROW_SELECTOR)
+    execute = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
+    view_card = page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID)
+    deadline = queued_at_monotonic + FULL_WORKFLOW_TIMEOUT_SECONDS
+    next_heartbeat = time.monotonic() + OPERATOR_HEARTBEAT_SECONDS
+    previous_status: str | None = None
+    queried_after_completion = False
+    observation = "no completion observations yet"
+    while time.monotonic() < deadline:
+        raise_for_dashboard_failure(dashboard)
+        history_count = history_rows.count()
+        current_status = (
+            ""
+            if history_count == 0
+            else history_rows.nth(history_count - 1).locator("td").nth(1).inner_text().strip()
+        )
+        if current_status != previous_status:
+            _operator_log(
+                f"Control Centre Runs and outcomes panel reports workflow status {current_status!r}"
+            )
+            previous_status = current_status
+        action_text = (execute.text_content() or "").strip()
+        card_enabled = view_card.is_enabled()
+        completed_attempt_id = run_outcome_savedness = session_status = ""
+        if history_count:
+            cells = history_rows.nth(history_count - 1).locator("td")
+            completed_attempt_id = cells.nth(2).inner_text().strip()
+            run_outcome_savedness = cells.nth(3).inner_text().strip()
+            session_status = cells.nth(4).inner_text().strip()
+        observation = (
+            f"status={current_status!r}; action={action_text!r}; "
+            f"view_card_enabled={card_enabled}; "
+            f"queried_after_completion={queried_after_completion}; "
+            f"completed_attempt_present={bool(completed_attempt_id)}; "
+            f"savedness={run_outcome_savedness!r}; "
+            f"session_status={session_status!r}"
+        )
+        if (
+            current_status == RunLifecycle.COMPLETED.value
+            and action_text
+            == control_ui.ACTION_LABEL_BY_VALUE[control_ui._RunAction.RERUN.value]
+            and card_enabled
+        ):
+            if not queried_after_completion:
+                query_snapshot_in_browser(page, runtime, dashboard)
+                queried_after_completion = True
+                continue
+            if not completed_attempt_id:
+                raise RuntimeError(Locale.RUN_OUTCOME_COMPLETED_ATTEMPT_ID_MISSING)
+            if run_outcome_savedness == Locale.RUN_OUTCOME_SNAPSHOT_SAVED:
+                if session_status != Locale.SESSION_STATUS_OK:
+                    raise RuntimeError(
+                        "completed Control Centre history has non-OK run-outcome "
+                        f"session status: {session_status!r}"
+                    )
+                _operator_log("Control Centre projected the completed post-Codex run")
+                return row, completed_attempt_id
+        if current_status in {
+            RunLifecycle.FAILED.value,
+            RunLifecycle.CANCELLED.value,
+        }:
+            raise RuntimeError(
+                f"Control Centre projected failed run activity {current_status!r}"
+            )
+        now = time.monotonic()
+        if now >= next_heartbeat:
+            _operator_log(
+                f"waiting for completion conditions ({now - queued_at_monotonic:.0f}s elapsed): "
+                + observation
+            )
+            next_heartbeat = now + OPERATOR_HEARTBEAT_SECONDS
+        page.wait_for_timeout(round(PROCESS_POLL_SECONDS * 1_000))
+    raise TimeoutError(
+        f"workflow did not reach the completed Control Centre state: {observation}\n"
+        + "".join(dashboard.output)
+    )
+
+
+def capture_completed_researcher_card(
+    dashboard: DashboardProcess,
+    runtime: OperatorRuntime,
+    *,
+    namekey: NameKey,
+    queued_at_monotonic: float,
+) -> tuple[str, str]:
+    _operator_log("opening the completed workflow in Playwright")
+    with sync_playwright() as playwright:
+        browser = None
+        try:
+            browser = playwright.chromium.launch(channel=BROWSER_CHANNEL, headless=True)
+            page = browser.new_page(viewport=BROWSER_VIEWPORT)
+            page.set_default_timeout(BROWSER_ASSERTION_TIMEOUT_MILLISECONDS)
+            browser_errors: list[str] = []
+            page.on(
+                "console",
+                lambda message: (
+                    browser_errors.append(message.text)
+                    if message.type == "error"
+                    else None
+                ),
+            )
+            page.on("pageerror", lambda error: browser_errors.append(str(error)))
+            page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
+            page.get_by_label(Locale.SEARCH_FILTER).fill(namekey.to_json_key())
+            _row, completed_attempt_id = wait_for_completed_grid_row(
+                page,
+                dashboard,
+                runtime,
+                queued_at_monotonic=queued_at_monotonic,
+            )
+            history = page.get_by_test_id(control_ui.RUN_OUTCOME_HISTORY_TABLE_TEST_ID)
+            expect(history).to_be_visible()
+            expect(history.locator(RUN_OUTCOME_HISTORY_ROW_SELECTOR)).not_to_have_count(0)
+            expect(history).to_contain_text(completed_attempt_id)
+            expect(history).to_contain_text(
+                Locale.RUN_OUTCOME_SNAPSHOT_SAVED
+            )
+            expect(history).to_contain_text(Locale.SESSION_STATUS_OK)
+            execute = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
+            expect(execute).to_have_text(
+                control_ui.ACTION_LABEL_BY_VALUE[control_ui._RunAction.RERUN.value]
+            )
+            view_card = page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID)
+            expect(view_card).to_be_enabled()
+            view_card.click()
+            card = page.get_by_test_id(control_ui.CARD_MARKDOWN_TEST_ID)
+            expect(card).to_contain_text(completed_attempt_id)
+            expect(page.get_by_test_id(control_ui.DOWNLOAD_CARD_DOCX_TEST_ID)).to_be_enabled()
+            card_text = card.inner_text().strip()
+            if not card_text:
+                raise RuntimeError("Playwright captured an empty researcher card")
+            outcome_label = card.locator("strong > code").filter(
+                has_text=KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL
+            )
+            expect(outcome_label).to_have_count(1)
+            expect(outcome_label).to_have_text(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)
+            outcome_value = outcome_label.locator("xpath=../following-sibling::code")
+            expect(outcome_value).to_have_count(1)
+            browser_run_outcome_response_body = outcome_value.inner_text()
+            assert browser_errors == []
+            _operator_log(
+                "Playwright confirmed the completed run and captured its researcher card"
+            )
+            return card_text, browser_run_outcome_response_body
+        finally:
+            if browser is not None:
+                browser.close()
+            _operator_log("closed the completed-workflow browser")
+
+
+def emit_researcher_card(card_text: str) -> None:
+    OPERATOR_LIVE_OUTPUT.write(
+        f"\n[operator-test] {RESEARCHER_CARD_BEGIN}\n"
+        f"{card_text}\n"
+        f"[operator-test] {RESEARCHER_CARD_END}\n"
+    )
+    OPERATOR_LIVE_OUTPUT.flush()
+
+
+def _record_ordinal(
+    records: Sequence[HttpRequestLogRecord],
+    record_id: object,
+) -> int:
+    return next(
+        index for index, record in enumerate(records) if record.record_id == record_id
+    )
+
+
+def _assert_deployed_appendwatch_topology(
+    operator_runtime: OperatorRuntime,
+) -> bytes:
+    _operator_log("loading the deployed appendwatch topology")
+    identity_file = AIVM_IDENTITY_FILE
+    assert identity_file is not None
+    configuration = AiAugmentControlCentreContext(
+        pipeline_config=AiAugmentDetourConfig.from_json(
+            operator_runtime.config_path,
+            verify_hash_on_init=False,
+        )
+    )
+    appendwatch_report = PurePosixPath(
+        configuration.lima_configuration.param[LIMA_APPENDWATCH_REPORT_PARAM]
+    )
+    assert appendwatch_report.is_absolute()
+    options = aivm_connection_options(
+        lima_ssh_config=LIMA_SSH_CONFIG_PATH,
+        identity_file=identity_file,
+        known_hosts_file=AIVM_KNOWN_HOSTS_FILE,
+        ssh_user=AIVM_AUDIT_USER,
+        host_key_alias=(
+            f"lima-{AIVM_INSTANCE}-{AIVM_AUDIT_USER}"
+        ),
+    )
+    completed = subprocess.run(
+        [
+            SSH_EXECUTABLE,
+            *options,
+            "--",
+            f"{AIVM_INSTANCE}-{AIVM_AUDIT_USER}",
+            shlex.join([
+                AUDIT_READ_APPENDWATCH_REPORT_COMMAND,
+                str(appendwatch_report),
+            ]),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=SSH_TIMEOUT_SECONDS,
+    )
+    assert completed.stdout
+    _operator_log("deployed appendwatch topology is readable")
+    return completed.stdout
+
+
+@pytest.mark.excluded_from_suites
+def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
+    operator_runtime: OperatorRuntime,
+) -> None:
+    _operator_log("preparing isolated topology-test runtime")
+    _assert_deployed_appendwatch_topology(operator_runtime)
+
+
+def _guest_rollouts(root: PurePosixPath, filename: str) -> tuple[str, ...]:
+    completed = subprocess.run(
+        [
+            *AIVM_SSH_CONNECTION_COMMAND,
+            AIVM_SSH_TARGET,
+            CODEX_REMOTE_FIND_ROLLOUT_COMMAND_TEMPLATE.format(
+                sessions_root=shlex.quote(str(root)),
+                rollout_name=shlex.quote(filename),
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding=TEXT_ENCODING,
+        timeout=SSH_TIMEOUT_SECONDS,
+    )
+    return tuple(completed.stdout.splitlines())
+
+
+def wait_for_saved_session(
+    operator_runtime: OperatorRuntime, dashboard: DashboardProcess,
+) -> tuple[UUID, UUID]:
+    storage_path = operator_runtime.config_path.parent / "nicegui" / "storage-general.json"
+    deadline = time.monotonic() + PROCESS_START_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        raise_for_dashboard_failure(dashboard)
+        if storage_path.exists():
+            try:
+                stored = json.loads(storage_path.read_text(encoding=TEXT_ENCODING))
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass  # NiceGUI may be replacing the saved snapshot while we read it.
+            else:
+                runs = stored.get(RUNS_STORAGE_KEY, ())
+                if len(runs) == 1:
+                    run = runs[0]
+                    saved_session_id = run.get(nameof(lambda: Run.session_id))
+                    if saved_session_id is not None:
+                        session_id = UUID(saved_session_id)
+                        acknowledgement = (
+                            BackendLocale.SESSION_ID_STDIN_ACCEPTED_LOG % session_id
+                        )
+                        if acknowledgement in "".join(dashboard.output):
+                            return UUID(run[nameof(lambda: Run.run_id)]), session_id
+        time.sleep(PROCESS_POLL_SECONDS)
+    raise TimeoutError("operator Backend did not acknowledge the saved Codex session")
+
+
+def wait_for_guest_rollout(session_id: UUID) -> str:
+    pattern = f"{ROLLOUT_FILENAME_PREFIX}*{session_id}{ROLLOUT_FILENAME_SUFFIX}"
+    paths = _guest_rollouts(CODEX_SESSIONS_ROOT, pattern)
+    assert len(paths) == 1, (session_id, paths)
+    return PurePosixPath(paths[0]).name
+
+
+def _wait_for_appendwatch(
+    operator_runtime: OperatorRuntime, filename: str, *, present: bool,
+) -> None:
+    missing = BackendLocale.ROLLOUT_STATUS_INVALID_TEMPLATE.format(
+        reason=BackendLocale.ROLLOUT_STATUS_MISSING,
+    )
+    deadline = time.monotonic() + APPENDWATCH_ARCHIVE_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            parse_appendwatch_report_bytes(
+                _assert_deployed_appendwatch_topology(operator_runtime),
+                PurePosixPath(filename),
+            )
+        except AppendwatchReportError as exc:
+            # A removed/replaced entry still mentions the session; only missing is gone.
+            if str(exc) != missing:
+                raise
+            observed_present = False
+        else:
+            observed_present = True
+        if observed_present is present:
+            return
+        time.sleep(1.0)
+    raise AssertionError(
+        f"appendwatch did not report present={present} for {filename}"
+    )
+
+
+def assert_cancelled_outcome_persisted(
+    operator_runtime: OperatorRuntime, *, run_id: UUID, session_id: UUID,
+) -> None:
+    deadline = time.monotonic() + PROCESS_STOP_TIMEOUT_SECONDS
+    storage_path = operator_runtime.config_path.parent / "nicegui" / "storage-general.json"
+    while time.monotonic() < deadline:
+        raw_log = operator_runtime.replay_log_path.read_bytes()
+        if raw_log.endswith(b"\n"):
+            outcomes = tuple(
+                record for record in authoritative_records(operator_runtime.replay_log_path)
+                if (record.method, record.path) == (
+                    HTTP_POST_METHOD, run_outcome_models.CANCELLED_PATH,
+                )
+            )
+            if outcomes:
+                assert len(outcomes) == 1
+                outcome = RunOutcomeResponseRecord.from_http_request_log_record(
+                    outcomes[0]
+                )
+                assert outcome.response_code == status.HTTP_200_OK
+                assert outcome.run_outcome_request_record.session_id == session_id
+                try:
+                    stored = json.loads(storage_path.read_text(encoding=TEXT_ENCODING))
+                except (FileNotFoundError, json.JSONDecodeError):
+                    pass  # Wait for NiceGUI's in-progress storage write.
+                else:
+                    runs = stored[RUNS_STORAGE_KEY]
+                    assert len(runs) == 1
+                    assert UUID(runs[0][nameof(lambda: Run.run_id)]) == run_id
+                    if runs[0][nameof(lambda: Run.lifecycle)] == RunLifecycle.CANCELLED.value:
+                        return
+        time.sleep(PROCESS_POLL_SECONDS)
+    raise TimeoutError("cancelled run outcome was not persisted and finalized")
+
+
+def _assert_guest_session_archived(
+    operator_runtime: OperatorRuntime, session_id: UUID, filename: str,
+) -> None:
+    assert filename.endswith(f"{session_id}{ROLLOUT_FILENAME_SUFFIX}")
+    _wait_for_appendwatch(operator_runtime, filename, present=False)
+    assert _guest_rollouts(CODEX_SESSIONS_ROOT, filename) == ()
+    archived = _guest_rollouts(
+        CODEX_SESSIONS_ROOT.parent / "archived_sessions", filename,
+    )
+    assert len(archived) == 1, archived
+
+
+@pytest.mark.requires_codex_auth
+@pytest.mark.excluded_from_suites
+def test_cancelled_guest_session_is_archived(
+    operator_runtime: OperatorRuntime,
+) -> None:
+    namekey = target_namekey(operator_runtime)
+
+    with running_dashboard(operator_runtime) as dashboard:
+        queue_in_browser(namekey, operator_runtime, dashboard)
+        run_id, session_id = wait_for_saved_session(operator_runtime, dashboard)
+        filename = wait_for_guest_rollout(session_id)
+        _wait_for_appendwatch(operator_runtime, filename, present=True)
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                channel=BROWSER_CHANNEL, headless=True,
+            )
+            try:
+                page = browser.new_page(viewport=BROWSER_VIEWPORT)
+                page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
+                page.get_by_label(Locale.SEARCH_FILTER).fill(namekey.to_json_key())
+                page.get_by_test_id(
+                    control_ui.RESEARCHER_GRID_TEST_ID
+                ).locator(GRID_ROW_SELECTOR).first.click()
+                cancel = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
+                expect(cancel).to_have_text(Locale.ACTION_CANCEL)
+                cancel.click()
+            finally:
+                browser.close()
+
+        assert_cancelled_outcome_persisted(
+            operator_runtime, run_id=run_id, session_id=session_id,
+        )
+        _assert_guest_session_archived(
+            operator_runtime, session_id, filename,
+        )
+
+
+def _validate_workflow_http_records(
+    records: Sequence[HttpRequestLogRecord],
+) -> dict[UUID, HttpRequestLogRecord]:
+    by_id = {record.record_id: record for record in records}
+    assert len(by_id) == len(records), "Duplicate HTTP record UUID"
+    ordinal = {record.record_id: index for index, record in enumerate(records)}
+    validations: dict[UUID, HttpRequestLogRecord] = {}
+    provider_ids: set[UUID] = set()
+    provider_endpoints = {
+        (HTTP_GET_METHOD, submission_models.OPENALEX_SCHEME,
+         submission_models.OPENALEX_HOST, submission_models.OPENALEX_INSTITUTIONS_PATH),
+        (HTTP_GET_METHOD, submission_models.ROR_SCHEME,
+         submission_models.ROR_HOST, submission_models.ROR_ORGANIZATIONS_PATH),
+    }
+    for record in records:
+        if (record.method, record.path) != (HTTP_POST_METHOD, VALIDATE_PATH):
+            continue
+        assert record.request_body is not None
+        validations[record.record_id] = record
+        body = json.loads(record.request_body)
+        commit_id = UUID(body["commit_request_record_id"])
+        assert commit_id in by_id, commit_id
+        commit = by_id[commit_id]
+        assert (commit.method, commit.path) == (HTTP_POST_METHOD, COMMIT_PATH)
+        assert commit.request_body is not None
+        commit_body = _CommitRequestBodyJson.model_validate_json(commit.request_body)
+        push_id = commit_body.push_record_id
+        assert push_id in by_id, push_id
+        push = by_id[push_id]
+        assert (push.method, push.path) == (HTTP_POST_METHOD, PUSH_PATH)
+        pull_id = commit_body.pull_record_id
+        assert pull_id in by_id, pull_id
+        pull = by_id[pull_id]
+        assert (pull.method, pull.path) == (HTTP_GET_METHOD, PULL_PATH)
+        provider_ids_in_body = tuple(UUID(value) for value in body["openalex_ror_records_ids"])
+        assert all(record_id in by_id for record_id in provider_ids_in_body)
+        providers = tuple(by_id[record_id] for record_id in provider_ids_in_body)
+        references = (commit, pull, push, *providers)
+        initial_id = body["initial_validation_request_record_id"]
+        if initial_id is not None:
+            assert UUID(initial_id) in by_id
+            initial_record = by_id[UUID(initial_id)]
+            assert (initial_record.method, initial_record.path) == (HTTP_POST_METHOD, VALIDATE_PATH)
+            references += (by_id[UUID(initial_id)],)
+        for linked in references:
+            assert ordinal[linked.record_id] < ordinal[record.record_id], linked.record_id
+        for provider in providers:
+            parent, _, identifier = provider.path.rpartition("/")
+            assert identifier and (
+                provider.method, provider.scheme, provider.host, parent
+            ) in provider_endpoints, provider.record_id
+            provider_ids.add(provider.record_id)
+
+    local_routes = {
+        (HTTP_POST_METHOD, INIT_PATH),
+        (HTTP_GET_METHOD, PULL_PATH),
+        (HTTP_POST_METHOD, PUSH_PATH),
+        (HTTP_POST_METHOD, COMMIT_PATH),
+        (HTTP_POST_METHOD, VALIDATE_PATH),
+        *((HTTP_POST_METHOD, path) for path in run_outcome_models.RUN_OUTCOME_PATHS),
+    }
+    unexpected = [
+        (record.record_id, record.method, record.host, record.path)
+        for record in records
+        if (record.method, record.path) not in local_routes
+        and record.record_id not in provider_ids
+    ]
+    assert not unexpected, unexpected
+    return validations
+
+
+def validate_workflow_artifacts(
+    operator_runtime: OperatorRuntime,
+    *,
+    namekey: NameKey,
+    expected_run_outcome_path: RunOutcomePath | None = None,
+    card_text: str | None = None,
+    browser_run_outcome_response_body: str | None = None,
+) -> None:
+    _operator_log("validating authoritative workflow artifacts")
+    assert not operator_runtime.dashboard_socket_path.exists()
+    artifact_dir = operator_runtime.config_path.parent
+    _operator_log(
+        f"retained artifact entries: "
+        f"{', '.join(sorted(path.name for path in artifact_dir.iterdir()))}"
+    )
+    records = authoritative_records(operator_runtime.replay_log_path)
+    previous_end: int | None = None
+    for ordinal, record in enumerate(records, start=1):
+        ready = record.ready_to_respond_at_unix_usec
+        end = ready if ready is not None else record.received_at_unix_usec
+        duration = record.duration_usec
+        start = end - duration if end is not None and duration is not None else None
+        gap = start - previous_end if start is not None and previous_end is not None else None
+        _operator_log(
+            f"replay line={ordinal}/{len(records)} record={record.record_id} "
+            f"{record.method} {record.path} status={record.response_code} "
+            f"received={record.received_at_unix_usec} ready={ready} "
+            f"duration={duration} gap_from_previous_end={gap}"
+        )
+        previous_end = end
+
+    assert all(
+        record.schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        for record in records
+    )
+    assert all(record.record_id.version == 7 for record in records)
+    validations = _validate_workflow_http_records(records)
+
+    gone_pull = next(
+        record
+        for record in reversed(records)
+        if (record.method, record.path, record.response_code)
+        == (
+            HTTP_GET_METHOD,
+            PULL_PATH,
+            status.HTTP_410_GONE,
+        )
+    )
+    records_by_id = {record.record_id: record for record in records}
+    runtime = AiAugmentBackendContext(
+        pipeline_config=AiAugmentDetourConfig.from_json(
+            operator_runtime.config_path,
+            verify_hash_on_init=False,
+        )
+    )
+    accepted_commits: list[tuple[HttpRequestLogRecord, _CommitRequestBodyJson]] = []
+    for record in records:
+        if (record.method, record.path) != (HTTP_POST_METHOD, COMMIT_PATH):
+            continue
+        assert record.request_body is not None
+        body = _CommitRequestBodyJson.model_validate_json(record.request_body)
+        pull = records_by_id[body.pull_record_id]
+        push = records_by_id[body.push_record_id]
+        assert pull.response_code == status.HTTP_200_OK
+        assert push.response_code == status.HTTP_202_ACCEPTED
+        pull_ordinal = _record_ordinal(records, pull.record_id)
+        assert (
+            pull_ordinal
+            < _record_ordinal(records, push.record_id)
+            < _record_ordinal(records, record.record_id)
+        )
+        if backend_api._http_header_value(
+            pull.response_headers, HTTP_CONTENT_TYPE_HEADER,
+        ) == ContentType.MARKDOWN_UTF8:
+            prior_validation = next(
+                (
+                    candidate for candidate in reversed(records[:pull_ordinal])
+                    if (candidate.method, candidate.path)
+                    == (HTTP_POST_METHOD, VALIDATE_PATH)
+                ),
+                None,
+            )
+            assert prior_validation is not None
+            assert prior_validation.request_body is not None
+            feedback = json.loads(prior_validation.request_body)[
+                "post_commit_validation"
+            ]["detail"]
+            assert pull.response_body == (
+                (feedback or BackendLocale.VALIDATION_ERROR_DETAIL).rstrip() + "\n"
+            )
+        with initialize_backend_store(runtime, ipc_only=True) as query_store:
+            backend_store = query_store._engine
+            row = backend_store._execute(
+                f"SELECT {VALIDATION_REQUEST_RECORD_ID_COLUMN} "
+                f"FROM {COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE} "
+                f"WHERE {COMMIT_REQUEST_RECORD_ID_COLUMN} = ?",
+                [str(record.record_id)],
+            ).fetchone()
+            if row is not None:
+                validation_request_record = validations[UUID(str(row[0]))]
+                assert validation_request_record.request_headers == record.request_headers
+                assert validation_request_record.request_body is not None
+                validation_request_body = json.loads(validation_request_record.request_body)
+                assert UUID(validation_request_body["commit_request_record_id"]) == record.record_id
+        if row is not None:
+            if (
+                validation_request_body["post_commit_validation"]["result"]
+                == BackendLifecycle.ACCEPTED
+            ):
+                accepted_commits.append((record, body))
+    assert len(accepted_commits) == 1
+    commit_request_record, commit_request_body = accepted_commits[0]
+    session = commit_request_body.codex_session_record
+    assert session.codex_session_id is not None
+    assert session.codex_rollout_record is not None
+    assert session.appendwatch_report_record is not None
+    rollout = session.codex_rollout_record
+    pull_ordinal = _record_ordinal(records, commit_request_body.pull_record_id)
+    push_ordinal = _record_ordinal(records, commit_request_body.push_record_id)
+    commit_ordinal = _record_ordinal(records, commit_request_record.record_id)
+    gone_pull_ordinal = _record_ordinal(records, gone_pull.record_id)
+    assert pull_ordinal < push_ordinal < commit_ordinal < gone_pull_ordinal
+    push_record = records[push_ordinal]
+    assert push_record.response_code == status.HTTP_202_ACCEPTED
+    assert push_record.response_headers is not None
+    assert backend_api._http_header_value(
+        push_record.response_headers, LOCATION_HEADER,
+    ) == PULL_PATH
+    rollout_blob = (
+        operator_runtime.rollout_cas_dir
+        / rollout.sha256[:2] / rollout.sha256[2:4] / rollout.sha256
+    )
+    assert rollout_blob.is_file()
+    assert rollout_blob.stat().st_size == rollout.size
+    assert _file_digest(rollout_blob).hex() == rollout.sha256
+    assert len(rollout_blob.read_bytes().splitlines()) == rollout.line_count
+    assert gone_pull.response_body
+    assert json.loads(gone_pull.response_body.splitlines()[0])
+
+    run_outcome_records = tuple(
+        record
+        for record in records
+        if (record.method, record.path)
+        in {
+            (HTTP_POST_METHOD, path)
+            for path in run_outcome_models.RUN_OUTCOME_PATHS
+        }
+    )
+    assert run_outcome_records
+    run_outcome_record = run_outcome_records[-1]
+    if expected_run_outcome_path is not None:
+        assert run_outcome_record.path == expected_run_outcome_path
+        assert run_outcome_record.response_code == status.HTTP_200_OK
+    assert gone_pull_ordinal < _record_ordinal(records, run_outcome_record.record_id)
+    assert run_outcome_record.request_body is None
+    assert AiAugmentBackendStore._parse_name_key_header(
+        backend_api._http_header_value(
+            run_outcome_record.request_headers,
+            run_outcome_models.NAME_KEY_HEADER,
+        )
+    ) == namekey
+    assert backend_api._http_header_value(
+        run_outcome_record.request_headers,
+        SOURCE_KEY_HEADER,
+    ) is None
+    validated_run_outcome = RunOutcomeResponseRecord.from_http_request_log_record(
+        run_outcome_record
+    )
+    run_outcome_snapshot = validated_run_outcome._body()
+    assert run_outcome_snapshot.pull_record_id == commit_request_body.pull_record_id
+    assert run_outcome_snapshot.push_record_id == commit_request_body.push_record_id
+    assert run_outcome_snapshot.commit_request_record_id == commit_request_record.record_id
+    assert run_outcome_snapshot.run_outcome_record_id == run_outcome_record.record_id
+    assert run_outcome_snapshot.validation_record_id is not None
+    assert run_outcome_snapshot.validation_record_id in validations
+    validation = validations[run_outcome_snapshot.validation_record_id]
+    assert validation.request_body is not None
+    validation_body = json.loads(validation.request_body)
+    assert UUID(validation_body["commit_request_record_id"]) == commit_request_record.record_id
+    assert validation_body["post_commit_validation"]["result"] == BackendLifecycle.ACCEPTED
+    assert commit_ordinal < _record_ordinal(records, validation.record_id) < gone_pull_ordinal
+    assert backend_api._http_header_value(
+        gone_pull.response_headers, ETAG_HEADER,
+    ) == f'"{validation.record_id}"'
+    outcome_request = validated_run_outcome.run_outcome_request_record
+    assert outcome_request.session_id == session.codex_session_id
+    if outcome_request.run_outcome is run_outcome_models.RunOutcome.COMPLETED:
+        assert outcome_request.validation_request_record_id == validation.record_id
+    run_outcome_session = validated_run_outcome._codex_session_record()
+    if run_outcome_record.response_code == status.HTTP_200_OK:
+        assert run_outcome_session.session_id is not None
+        assert run_outcome_session.codex_rollout_record is not None
+        assert run_outcome_session.appendwatch_report_record is not None
+        run_outcome_rollout = run_outcome_session.codex_rollout_record
+        run_outcome_report = run_outcome_session.appendwatch_report_record
+        run_outcome_source_key = backend_api._http_header_value(
+            run_outcome_record.response_headers,
+            SOURCE_KEY_HEADER,
+        )
+        run_outcome_filename, run_outcome_line_count = (
+            AiAugmentBackendStore._parse_source_key_header(run_outcome_source_key)
+        )
+        assert run_outcome_line_count == run_outcome_rollout.line_count
+        run_outcome_rollout_blob = (
+            operator_runtime.rollout_cas_dir / run_outcome_rollout.sha256[:2]
+            / run_outcome_rollout.sha256[2:4] / run_outcome_rollout.sha256
+        )
+        assert run_outcome_rollout_blob.is_file()
+        assert run_outcome_rollout_blob.stat().st_size == run_outcome_rollout.size
+        assert (
+            _file_digest(run_outcome_rollout_blob).hex()
+            == run_outcome_rollout.sha256
+        )
+        parse_appendwatch_report_bytes(
+            base64.b64decode(
+                run_outcome_report.data,
+                validate=True,
+            ),
+            PurePosixPath(run_outcome_filename),
+        )
+    if card_text is not None:
+        last_name_position = card_text.index(KTP_LAST_NAME_COL)
+        outcome_position = card_text.index(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)
+        metadata_position = card_text.index(KTP_AI_AUGMENT_SESSION_METADATA_COL)
+        assert last_name_position < outcome_position < metadata_position
+        assert browser_run_outcome_response_body is not None
+        assert browser_run_outcome_response_body == validated_run_outcome.response_body
+        with initialize_backend_store(runtime, ipc_only=True) as query_store:
+            backend_store = query_store._engine
+            card = next(
+                card for card in backend_store.ai_augment_singular_outerdicts()
+                if card.namekey == namekey
+            )
+            assert len(card.codex_innerdicts) == 1
+            projected = card.codex_innerdicts[0]
+            assert (
+                projected.run_outcome_response_record.response_body
+                == run_outcome_record.response_body
+                == browser_run_outcome_response_body
+            )
+            output_rows = backend_store._query_mappings(
+                f"SELECT * FROM {CODEX_OUTPUT_ROWS_TABLE}"
+            )
+            assert len(output_rows) == 1
+            output = output_rows[0]
+            post_commit_validation = validation_body["post_commit_validation"]
+            submission_type = post_commit_validation[
+                nameof(lambda: PostCommitValidation.submission_type)
+            ]
+            assert submission_type == STANDARDIZED_SUBMISSION_TYPE
+            submission = post_commit_validation[
+                nameof(lambda: PostCommitValidation.submission)
+            ]
+            assert isinstance(submission, dict)
+
+            expected_null_columns: set[str] = set()
+            if submission.get(KTP_AI_AUGMENT_COMMENTS_COL) is None:
+                expected_null_columns.add(KTP_AI_AUGMENT_COMMENTS_COL)
+
+            assert {
+                column for column, value in output.items() if value is None
+            } == expected_null_columns
+            assert output == projected.innerdict.data
+            _operator_log(f"completed output: {len(output)} populated fields")
+            audits = backend_store._query_mappings(
+                f"SELECT * FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}"
+            )
+            accepted_audits = tuple(
+                audit for audit in audits
+                if audit[POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL]
+                == str(commit_request_record.record_id)
+            )
+            assert len(accepted_audits) == len(AI_AUGMENT_EVIDENCE_COLUMNS)
+            assert all(
+                json.loads(audit[POST_COMMIT_VALIDATION_FIELD_AUDIT_COL])["state"]["pins"]
+                == 7
+                for audit in accepted_audits
+            )
+            _operator_log(
+                f"evidence audits: {len(audits)} total, "
+                f"{len(accepted_audits)} accepted"
+            )
+        storage_path = artifact_dir / "nicegui" / "storage-general.json"
+        stored = json.loads(storage_path.read_text(encoding=TEXT_ENCODING))
+        snapshot = stored[BACKEND_DATABASE_STORAGE_KEY][
+            nameof(lambda: DashboardQuerySnapshot.ai_augment_singular_outerdicts)
+        ]
+        stored_target = next(
+            item for item in snapshot
+            if item[nameof(lambda: AiAugmentSingularOuterDict.namekey)]
+            == namekey.model_dump(mode="json")
+        )
+        stored_codex = stored_target[
+            nameof(lambda: AiAugmentSingularOuterDict.codex_innerdicts)
+        ]
+        assert len(stored_codex) == 1
+        assert stored_codex[0][nameof(lambda: CodexInnerDict.innerdict)] == output
+        _operator_log("completed output matches the saved Dashboard snapshot")
+        stored_runs = stored[RUNS_STORAGE_KEY]
+        assert len(stored_runs) == 1
+        stored_run = stored_runs[0]
+        assert stored_run[nameof(lambda: Run.namekey)] == namekey.model_dump(mode="json")
+        assert stored_run[nameof(lambda: Run.session_id)] == str(session.codex_session_id)
+        assert stored_run[nameof(lambda: Run.lifecycle)] == RunLifecycle.COMPLETED.value
+        events = tuple(
+            event for event in stored[RUN_EVENTS_STORAGE_KEY]
+            if event[nameof(lambda: RunEvent.run_id)]
+            == stored_run[nameof(lambda: Run.run_id)]
+        )
+        assert events
+        assert events[0][nameof(lambda: RunEvent.lifecycle)] == RunLifecycle.QUEUED.value
+        assert events[-1][nameof(lambda: RunEvent.lifecycle)] == RunLifecycle.COMPLETED.value
+        _operator_log(
+            "persisted run events: "
+            + " -> ".join(
+                event[nameof(lambda: RunEvent.lifecycle)] for event in events
+            )
+        )
+    _operator_log("full operator workflow contract validated")
+
+
+@pytest.mark.requires_codex_auth
+@pytest.mark.excluded_from_suites
+def test_complete_dashboard_backend_codex_commit_and_replay_workflow(
+    operator_runtime: OperatorRuntime,
+) -> None:
+    _assert_deployed_appendwatch_topology(operator_runtime)
+    _operator_log("preparing isolated durable-410 checkpoint runtime")
+    namekey = target_namekey(operator_runtime)
+
+    with running_dashboard(operator_runtime) as dashboard:
+        run_workflow_to_gone_pull(
+            operator_runtime,
+            dashboard,
+            namekey,
+        )
+
+    validate_workflow_artifacts(operator_runtime, namekey=namekey)
+
+
+def assert_completed_workflow_artifacts(
+    operator_runtime: OperatorRuntime,
+    *,
+    namekey: NameKey,
+    card_text: str,
+    browser_run_outcome_response_body: str,
+) -> None:
+    logged_init_requests = tuple(
+        BackendInitRequestRecord.from_http_request_log_record(
+            http_request_log_record=record,
+        )
+        for record in authoritative_records(operator_runtime.replay_log_path)
+        if (record.method, record.path) == (HTTP_POST_METHOD, INIT_PATH)
+    )
+    assert len(logged_init_requests) == 1
+    assert logged_init_requests[0].namekey == namekey
+
+    validate_workflow_artifacts(
+        operator_runtime,
+        namekey=namekey,
+        expected_run_outcome_path=run_outcome_models.COMPLETED_PATH,
+        card_text=card_text,
+        browser_run_outcome_response_body=browser_run_outcome_response_body,
+    )
+
+
+def assert_final_replay_rebuilds(operator_runtime: OperatorRuntime) -> None:
+    """Rebuild the completed log in isolation; reading its existing DB is insufficient."""
+
+    # Reading the existing projection cannot prove the final log can be replayed.
+    with tempfile.TemporaryDirectory(
+        prefix="operator-final-replay-", dir=operator_runtime.config_path.parent,
+    ) as temporary:
+        replay_root = Path(temporary).resolve()
+        current_config = AiAugmentDetourConfig.from_json(
+            operator_runtime.config_path, verify_hash_on_init=False,
+        )
+        source_link = replay_root / current_config.db_file.name
+        source_link.symlink_to(current_config.db_file.resolve())
+        raw_log = operator_runtime.replay_log_path.read_bytes()
+        replay_path = replay_root / operator_runtime.replay_log_path.name
+        replay_path.write_bytes(raw_log)
+        config = json.loads(operator_runtime.config_path.read_text(encoding=TEXT_ENCODING))
+        config["db_file"] = str(source_link)
+        config["state_file"] = str(replay_root / "state.json")
+        config["output_dir"] = str(replay_root / "output")
+        config["files_config"][REPLAY_LOG_KEY][RESOURCE_PATH_KEY] = str(replay_path)
+        # A new replay verifies the complete copied log, not the live DB's prefix anchor.
+        config["files_config"][REPLAY_LOG_KEY][RESOURCE_SHA256_KEY] = (
+            hashlib.sha256(raw_log).hexdigest()
+        )
+        replay_config_path = replay_root / operator_runtime.config_path.name
+        replay_config_path.write_text(json.dumps(config), encoding=TEXT_ENCODING)
+        replay_config = AiAugmentDetourConfig.from_json(
+            replay_config_path, verify_hash_on_init=False,
+        )
+        replay_store = AiAugmentBackendStore._from_resources(
+            replay_log=replay_config.replay_log,
+            detour_db=AiAugmentDetourDB.from_pipeline_db(
+                replay_config.db_file, duckdb_extensions=replay_config.duckdb_extensions,
+            ),
+            rollout_cas=replay_config.rollout_cas,
+        )
+        replay_store._rebuild_from_log(
+            AiAugmentBackendContext(pipeline_config=replay_config),
+            reset_confirmed=True,
+            confirm_replay=lambda: True,
+        )
+
+
+def assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
+    operator_runtime: OperatorRuntime,
+) -> None:
+    _assert_deployed_appendwatch_topology(operator_runtime)
+    _operator_log("preparing isolated completed-workflow runtime")
+    namekey = target_namekey(operator_runtime, randomize_target=True)
+
+    with running_dashboard(operator_runtime) as dashboard:
+        checkpoint = run_workflow_to_gone_pull(
+            operator_runtime,
+            dashboard,
+            namekey,
+        )
+        card_text, browser_run_outcome_response_body = capture_completed_researcher_card(
+            dashboard,
+            operator_runtime,
+            namekey=namekey,
+            queued_at_monotonic=checkpoint.queued_at_monotonic,
+        )
+        emit_researcher_card(card_text)
+        completed_outcomes = tuple(
+            record for record in authoritative_records(operator_runtime.replay_log_path)
+            if (record.method, record.path, record.response_code) == (
+                HTTP_POST_METHOD, run_outcome_models.COMPLETED_PATH, status.HTTP_200_OK,
+            )
+        )
+        assert len(completed_outcomes) == 1
+        completed_outcome = RunOutcomeResponseRecord.from_http_request_log_record(
+            completed_outcomes[0]
+        )
+        session_id = completed_outcome.run_outcome_request_record.session_id
+        assert session_id is not None
+        source_key = backend_api._http_header_value(
+            completed_outcome.response_headers, SOURCE_KEY_HEADER,
+        )
+        filename, _ = AiAugmentBackendStore._parse_source_key_header(source_key)
+        _assert_guest_session_archived(operator_runtime, session_id, filename)
+        elapsed_seconds = time.monotonic() - checkpoint.queued_at_monotonic
+
+    assert_completed_workflow_artifacts(
+        operator_runtime,
+        namekey=namekey,
+        card_text=card_text,
+        browser_run_outcome_response_body=browser_run_outcome_response_body,
+    )
+    assert_final_replay_rebuilds(operator_runtime)
+    _operator_log(
+        "full end-to-end execution elapsed time from queue submission through "
+        f"final Playwright verification: {elapsed_seconds:.3f}s"
+    )
+
+
+@pytest.mark.requires_codex_auth
+def test_completed_dashboard_backend_codex_workflow_renders_researcher_card(
+    operator_runtime: OperatorRuntime,
+) -> None:
+    assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
+        operator_runtime
+    )

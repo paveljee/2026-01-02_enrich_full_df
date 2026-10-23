@@ -34,6 +34,21 @@ detour-mode0-econ-stats = [
   "kaleido==0.2.1",
   "plotly==6.6.0",
 ]
+detour-ai-augment = [
+  "fastapi==0.140.0",
+  "flask==3.1.2",
+  "uvicorn==0.51.0",
+  "pydantic==2.13.4",
+  "httpx2==2.12.0",  # for starlette
+  "nicegui==3.13.0",
+  "playwright==1.62.0",
+  "pytest-bdd==8.1.0",
+  "pydantic-extra-types==2.11.1",
+  "pycountry==24.6.1",
+  "pandas-stubs==3.0.5.260730",
+  "types-psutil==7.2.2.20260906",
+  "types-lxml==2026.2.16",
+]
 
 # ============
 # Tool configs
@@ -46,6 +61,12 @@ norecursedirs = [
     "tmp",  # retained runtime/test artifacts, not test sources
     "logs",  # includes copied diagnostic/test artifact bundles
     "tests/test_detours",  # can run via `pixi run test tests/test_detours`
+    "src/detours/detour_ai_augment/tests",
+    "src/detours/detour_ai_augment/protected/tests",
+    # never testing sample deploy here as it's not part of codebase
+    "src/detours/detour_ai_augment/protected/src/llm_inference_api/sample_deploy",
+    # bdd is on pause now and stale and not actively worked on
+    "src/detours/detour_ai_augment/protected/tests/bdd",
 ]
 markers = [
     "slow: long-running integration tests against real config/data",
@@ -56,12 +77,26 @@ markers = [
 line-length = 100
 target-version = "py314"
 preview = true
+# simple exclude would drop ruff defaults
+extend-exclude = [
+  # see exclusion reasons under pytest above
+  "src/detours/detour_ai_augment/protected/src/llm_inference_api/sample_deploy",
+  "src/detours/detour_ai_augment/protected/tests/bdd",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 ignore = [
   "E731",  # allows to assign a `lambda` expressions instead of using a `def`,
            # which may be neat for defining a global executable rule
+]
+
+[tool.ruff.lint.per-file-ignores]
+# This source is embedded verbatim in client instructions; keep its formatting intact.
+"src/detours/detour_ai_augment/protected/src/backend/helpers/data_models/pydantic_to_paste.py" = [
+  "E302",  # Expected 2 blank lines
+  "E305",  # Top-level functions and classes must be separated by 2 blank lines
+  "E501",  # Line too long
 ]
 
 [tool.mypy]
@@ -73,6 +108,10 @@ python_version = "3.14"
 ignore_missing_imports = true
 plugins = ["pydantic.mypy"]
 warn_unused_ignores = true
+# AI augment detour has its own strict mypy config
+exclude = [
+    "src/detours/detour_ai_augment/",
+]
 
 # ==================
 # Pixi Environments
@@ -88,6 +127,11 @@ features = []
 no-default-feature = false
 features = [
   "detour-mode0-econ-stats",
+]
+[tool.pixi.environments.detour-ai-augment]
+no-default-feature = false
+features = [
+  "detour-ai-augment",
 ]
 
 # =======================
@@ -105,6 +149,17 @@ python = "==3.14.2"
 duckdb = "==1.5.1"
 pandoc = "==3.7.0.2"
 bun = "==1.4.2"
+
+[tool.pixi.feature.detour-ai-augment.target.linux.dependencies]
+alsa-lib = "*"
+at-spi2-atk = "*"
+at-spi2-core = "*"
+"atk-1.0" = "*"
+mesalib = "*"
+xorg-libxcomposite = "*"
+xorg-libxdamage = "*"
+xorg-libxfixes = "*"
+xorg-libxrandr = "*"
 
 # ======================
 # Default: Generic tasks
@@ -149,10 +204,15 @@ args = [
 cmd = "mypy {{ module_names }}"
 cwd = "."
 
+[tool.pixi.tasks.mypy-detour-ai-augment]
+cmd = "mypy --config-file src/detours/detour_ai_augment/mypy.ini src/detours/detour_ai_augment"
+cwd = "."
+
 [tool.pixi.tasks.lint]
 depends-on = [
   { task = "ruff", environment = "default" },
   { task = "mypy", environment = "default" },
+  { task = "mypy-detour-ai-augment", environment = "detour-ai-augment" },
 ]
 
 # ====================================
@@ -239,7 +299,7 @@ args = [
   { arg = "html_diff_path" },
 ]
 cmd = """
-bun install --frozen-lockfile --silent && diff -u -- "{{ old_file_path }}" "{{ new_file_path }}" | bunx --bun diff2html-cli -i stdin -s line -d char --lm words -F "{{ html_diff_path }}" && python -c '
+bun install --frozen-lockfile --silent && diff -U 999999 -- "{{ old_file_path }}" "{{ new_file_path }}" | bunx --bun diff2html-cli -i stdin -s line -d char --lm words -F "{{ html_diff_path }}" && python -c '
 from pathlib import Path
 from sys import argv
 out = Path(argv[1])
@@ -269,6 +329,7 @@ depends-on = [
   { task = "test-detour-step4-breakdown", environment = "default" },
   { task = "test-detour-mode3-pgf-stats", environment = "default" },
   { task = "test-detour-mode0-econ-stats", environment = "detour-mode0-econ-stats" },
+  { task = "test-detour-ai-augment", environment = "detour-ai-augment" },
 ]
 
 [tool.pixi.tasks.pre-commit]
@@ -304,7 +365,72 @@ depends-on = [
 [tool.pixi.tasks.pre-commit-extra]
 depends-on = [
   { task = "test-repl-extra", environment = "default" },
+  { task = "test-detour-ai-augment-root", environment = "detour-ai-augment" },
+  { task = "test-detour-ai-augment-operator", environment = "detour-ai-augment" },
 ]
+
+[tool.pixi.tasks.pre-commit-extra-operator]
+cwd = "."
+# run all in lima except operator tests.
+# using bash -c so that pixi does not
+# exit on first failed command.
+cmd = """
+bash -c '
+  if [ "$(uname -s)" != Darwin ]; then
+    echo "ERROR: run on a macOS host; it dispatches guest checks to Lima" >&2
+    exit 1
+  fi
+  limactl shell aicode -- bash -c '"'"'
+    export PATH="$HOME/.pixi/bin:$PATH"
+    script -e -c "
+      {
+        pixi run test-repl-extra &&
+        pixi run test-detour-ai-augment-root
+      } 2>&1
+    " logs/pre-commit-extra.log &&
+    ! grep -q "FAILED" logs/pre-commit-extra.log &&
+    echo "grep: no FAILED"
+  '"'"'
+  # note the use of BSD-style script on macOS
+  script -a \
+    logs/pre-commit-extra.log \
+    bash -c '"'"'pixi run test-detour-ai-augment-operator 2>&1'"'"'
+'
+"""
+
+[tool.pixi.tasks.pre-commit-operator]
+cwd = "."
+# run all in lima except operator tests and
+# except test_ui_e2e.py (because it intends
+# to test real prod macos chrome).
+# using bash -c so that pixi does not
+# exit on first failed command.
+cmd = """
+bash -c '
+  if [ "$(uname -s)" != Darwin ]; then
+    echo "ERROR: run on a macOS host; it dispatches guest checks to Lima" >&2
+    exit 1
+  fi
+  limactl shell aicode -- bash -c '"'"'
+    export PATH="$HOME/.pixi/bin:$PATH"
+    # exclude test_ui_e2e.py from lima
+    export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+$PYTEST_ADDOPTS }--ignore=src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py"
+    script -e -c "
+      {
+        pixi run pre-commit
+      } 2>&1
+    " logs/pre-commit.log &&
+    ! grep -q "FAILED" logs/pre-commit.log &&
+    echo "grep: no FAILED"
+  '"'"'
+  # run test_ui_e2e.py on a real macos chrome
+  script -a \
+    logs/pre-commit.log \
+    bash -c '"'"'pixi run -e detour-ai-augment python -m pytest -vv -srA \
+      src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py 2>&1'"'"'
+  pixi run pre-commit-extra-operator
+'
+"""
 
 # =======================
 # Default: Test coverage
@@ -342,3 +468,237 @@ depends-on = [
 test-detour-mode0-econ-stats = [
   { task = "test", args = ["tests/test_detours/test_detour_mode0_econ_stats.py"], environment = "detour-mode0-econ-stats" },
 ]
+
+# ==================
+# Detour: AI Augment
+# ==================
+
+# Feature tasks auto execute in its dedicated environment;
+# above this didn't apply because we were using the "test"
+# task defined within the default feature, and so we needed
+# to specify the environment to use.
+
+[tool.pixi.feature.detour-ai-augment.tasks]
+serve = """
+bash -c '
+  set -e
+  MODE_OR_NAMEKEY="$1"
+  test -n "$MODE_OR_NAMEKEY" || {
+    echo "ERROR: namekey argument or --ipc-only is required" >&2
+    echo "Usage: pixi run -e detour-ai-augment serve --ipc-only OR serve <namekey> (--new|--resume|--continue) [--yes]" >&2
+    exit 1
+  }
+
+  case "$MODE_OR_NAMEKEY" in
+    --new|--resume|--continue)
+      echo "ERROR: namekey must be passed before $MODE_OR_NAMEKEY" >&2
+      echo "Usage: pixi run -e detour-ai-augment serve <namekey> (--new|--resume|--continue) [--yes]" >&2
+      exit 1
+      ;;
+  esac
+
+  shift
+  export FASTAPI_DETOUR_DASHBOARD_SOCKET="/tmp/detour-manual-${UID}.sock"
+
+  if test "$MODE_OR_NAMEKEY" = "--ipc-only"; then
+    pixi run -e detour-ai-augment \
+      python -m src.detours.detour_ai_augment.protected.src.backend.server \
+      --config config_ai_augment.json \
+      --ipc-only "$@"
+    exit
+  fi
+
+  NAMEKEY="$MODE_OR_NAMEKEY"
+
+  ARGS=()
+  for arg in "$@"; do
+    if test "$arg" = "--continue"; then
+      ARGS+=(--resume)
+    else
+      ARGS+=("$arg")
+    fi
+  done
+
+  export OPENALEX_API_KEY="$(
+    pixi run -e detour-ai-augment python -c '"'"'
+  import os
+  from dotenv import dotenv_values
+  path = os.path.join(os.environ["PIXI_PROJECT_ROOT"], ".env")
+  print(dotenv_values(path).get("OPENALEX_API_KEY", ""), end="")
+  '"'"'
+  )"
+
+  test -n "$OPENALEX_API_KEY" || {
+    echo "ERROR: OPENALEX_API_KEY is missing from .env" >&2
+    exit 1
+  }
+
+  export FASTAPI_DETOUR_NAMEKEY="$NAMEKEY"
+  export FASTAPI_DETOUR_APPENDWATCH_REPORT='"'"'/Volumes/home/aicode/aivm/home/ai/.aivm-control/appendwatch/appendwatch-tree.txt'"'"'
+  export FASTAPI_DETOUR_CODEX_SESSIONS_DIR='"'"'/home/ai/.codex/sessions'"'"'
+  export FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519"
+
+  pixi run -e detour-ai-augment \
+    python -m src.detours.detour_ai_augment.protected.src.backend.server \
+    --config config_ai_augment.json "${ARGS[@]}"
+' --
+"""
+dashboard = """
+FASTAPI_DETOUR_DASHBOARD_SOCKET="/tmp/detour-manual-$(id -u).sock" \
+FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519" \
+OPENALEX_API_KEY="$(python -c '
+import os
+from dotenv import dotenv_values
+
+env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
+print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
+')" python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui \
+  --config config_ai_augment.json
+"""
+# provision a worktree first:
+# git worktree add --detach /tmp/detour-api-9a187d3 9a187d3fc497bef6d1568b885b33f0a834607d22
+# cp ./.env /tmp/detour-api-9a187d3; mkdir -p /tmp/detour-api-9a187d3/tmp && cp ./tmp/sheikh.jsonl /tmp/detour-api-9a187d3/tmp/sheikh.jsonl
+#serve = "cd /tmp/detour-api-9a187d3 && python -m src.detours.detour_ai_augment.protected.src.backend.server --config config_ai_augment.json"
+# don't forget to clean up afterwards:
+# rm -f /tmp/detour-api-9a187d3
+test-detour-ai-augment = """
+bash -c '
+export APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/protected/src/control_centre/appendwatch/appendwatch.py"
+export APPENDWATCH_PYTHON="$CONDA_PREFIX/bin/python"
+export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
+"$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m "not needs_sudo" \
+  src/detours/detour_ai_augment/tests \
+  src/detours/detour_ai_augment/protected/tests/backend \
+  src/detours/detour_ai_augment/protected/tests/operator/test_operator_e2e_preflight.py && \
+"$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m real_api \
+  src/detours/detour_ai_augment/protected/tests/backend/test_pydantic_to_paste.py::test_academic_institution_round_trips_against_real_apis
+status=$?
+echo "NOTE: root tests need to be run separately with test-detour-ai-augment-root"
+echo "NOTE: operator tests need to be run separately with test-detour-ai-augment-operator"
+exit "$status"
+'
+"""
+elevate = """
+bash -c 'LOG_PATH="$PIXI_PROJECT_ROOT/logs/from_operator/elevate.log"
+script -q -e -c '"'"'task_status=0
+echo "Nothing to elevate" || task_status=1
+exit "$task_status"
+'"'"' "$LOG_PATH"
+task_status=$?
+grep -n -- "FAILED" "$LOG_PATH"
+grep_status=$?
+case "$grep_status" in
+  0) echo "grep: FAILED matches shown above ($LOG_PATH)" ;;
+  1) echo "grep: no FAILED ($LOG_PATH)" ;;
+  *) echo "grep: could not inspect $LOG_PATH" >&2; task_status=1 ;;
+esac
+echo "Test output: $LOG_PATH"
+exit "$task_status"
+'
+"""
+test-detour-ai-augment-root = """
+sudo -k env \
+  APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/protected/src/control_centre/appendwatch/appendwatch.py" \
+  APPENDWATCH_PYTHON="$CONDA_PREFIX/bin/python" \
+  PATH="$CONDA_PREFIX/bin:$PATH" \
+  PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" \
+  "$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m needs_sudo \
+  src/detours/detour_ai_augment/protected/tests/backend
+"""
+test-detour-ai-augment-operator = """
+FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519" \
+OPENALEX_API_KEY="$(python -c '
+import os
+from dotenv import dotenv_values
+
+env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
+print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
+')" "$CONDA_PREFIX/bin/python" -m pytest -vv -srA --capture=tee-sys -m operator \
+  src/detours/detour_ai_augment/protected/tests/operator/test_operator_e2e.py
+"""
+# test-detour-ai-augment-bdd-hermetic = """
+# "$CONDA_PREFIX/bin/python" -m pytest -vv -srA \
+#   -m "not needs_sudo and not operator" \
+#   src/detours/detour_ai_augment/tests/test_detour_ai_augment_bdd.py
+# """
+# test-detour-ai-augment-bdd-root = """
+# sudo env \
+#   APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/src/control_centre/appendwatch/appendwatch.py" \
+#   APPENDWATCH_PYTHON="/usr/bin/python3" \
+#   PATH="$CONDA_PREFIX/bin:$PATH" \
+#   "$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m needs_sudo \
+#   src/detours/detour_ai_augment/tests/test_detour_ai_augment_bdd.py
+# """
+# test-detour-ai-augment-bdd-operator = """
+# FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519" \
+# OPENALEX_API_KEY="$(python -c '
+# import os
+# from dotenv import dotenv_values
+
+# env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
+# print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
+# ')" "$CONDA_PREFIX/bin/python" -m pytest -vv -srA --capture=tee-sys -m operator \
+#   src/detours/detour_ai_augment/tests/test_detour_ai_augment_bdd.py
+# """
+# test-detour-ai-augment-bdd = """
+# bash -c '
+# set -e
+# limactl shell aicode -- bash -c '"'"'
+#   set -e
+#   export PATH="$HOME/.pixi/bin:$PATH"
+#   pixi run -e detour-ai-augment test-detour-ai-augment-bdd-hermetic
+#   pixi run -e detour-ai-augment test-detour-ai-augment-bdd-root
+# '"'"'
+# pixi run -e detour-ai-augment test-detour-ai-augment-bdd-operator
+# '
+# """
+
+[tool.pixi.feature.detour-ai-augment.tasks.duckdb-export]
+args = [
+  { arg = "input_path", default = "data/scisci_process__detour_ai-augment.duckdb" },
+  { arg = "output_path", default = "data/scisci_process__detour_ai-augment.export" },
+  { arg = "config_path", default = "config_ai_augment.json" },
+]
+cmd = """
+python -c '
+import sys, duckdb
+from pathlib import Path
+from src.helpers.duckdb_extensions import load_duckdb_extension_from_config_path
+
+input_path = sys.argv[1]
+output_path = Path(sys.argv[2])
+config_path = Path(sys.argv[3])
+
+if output_path.exists():
+    sys.exit(f"Export path already exists: {output_path}")
+
+# using chr(39) to avoid conflict with outer single quote
+output_path_str = str(output_path)
+output_path_safe = (
+    chr(39)
+    + output_path_str.replace(chr(39), chr(39) + chr(39))
+    + chr(39)
+)
+
+con = duckdb.connect(input_path, read_only=True)
+try:
+    load_duckdb_extension_from_config_path(con, "splink_udfs", config_path)
+    con.sql(f"EXPORT DATABASE {output_path_safe} (FORMAT csv)")
+finally:
+    con.close()
+
+print(f"Exported {input_path!r} to {str(output_path)!r}")
+' "{{ input_path }}" "{{ output_path }}" "{{ config_path }}"
+"""
+cwd = "."
+
+# Set OPENALEX_API_KEY if you need it:
+# ~~~
+# OPENALEX_API_KEY="$(pixi run python -c '
+# import os
+# from dotenv import dotenv_values
+
+# env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
+# print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
+# ')"
+# ~~~
