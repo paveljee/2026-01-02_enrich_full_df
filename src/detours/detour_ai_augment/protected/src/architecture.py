@@ -561,7 +561,6 @@ class BackendComponent(
             "configuration",
             "appendwatch_report_validation",
             "rollout_index",
-            "pydantic_validation",
             "field_validation",
             "researcher_resolution",
             "standardized_submission_required",

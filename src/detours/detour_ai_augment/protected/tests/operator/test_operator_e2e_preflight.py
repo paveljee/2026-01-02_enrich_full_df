@@ -292,7 +292,7 @@ def _workflow_http_records(
         validation_body = ValidationRequestBody(
             commit_request_record=commit,
             post_commit_validation=PostCommitValidation(
-                stage=BackendLifecycle.PYDANTIC_VALIDATION,
+                stage=BackendLifecycle.FIELD_VALIDATION,
                 result=BackendLifecycle.REJECTED,
                 detail="synthetic model rejection",
                 submission_type=None,

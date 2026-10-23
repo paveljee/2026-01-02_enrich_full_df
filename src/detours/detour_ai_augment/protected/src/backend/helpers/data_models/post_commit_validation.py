@@ -1936,7 +1936,7 @@ def _evaluate_submission_for_commit(
             )
             if rollout_index.session.session_id != session_id:
                 raise _PushValidationError(Locale.CONFIGURED_SESSION_MISMATCH)
-            stage = BackendLifecycle.PYDANTIC_VALIDATION
+            stage = BackendLifecycle.FIELD_VALIDATION
             previous_audits, error = db_reads.field_audits()
             if error is not None:
                 assert previous_audits is None
@@ -1956,7 +1956,6 @@ def _evaluate_submission_for_commit(
                     push_request_body,
                     standardized_required=retry_submission_expected,
                 )
-            stage = BackendLifecycle.FIELD_VALIDATION
             _seed_evidence_random(inputs.config_facts.sample_seed)
             field_audits: list[_FieldAudit] = []
             assessment_items: list[_EvidenceItemAssessment] = []
@@ -2014,7 +2013,7 @@ def _evaluate_submission_for_commit(
                 )
                 return result(
                     commit_request_record=commit_request_record,
-                    stage=BackendLifecycle.PYDANTIC_VALIDATION,
+                    stage=stage,
                     submission_payload=submission_payload,
                     retry_projection=retry_projection,
                     rollout_index=rollout_index,

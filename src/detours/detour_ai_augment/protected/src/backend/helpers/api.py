@@ -444,7 +444,6 @@ def _pull_response(
         validation = body.post_commit_validation
         if lifecycle is BackendLifecycle.RETRY:
             if validation.result is not BackendLifecycle.REJECTED or validation.stage not in {
-                BackendLifecycle.PYDANTIC_VALIDATION,
                 BackendLifecycle.FIELD_VALIDATION,
                 BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED,
             }:
@@ -578,7 +577,6 @@ def update_pull_state(validation_request_record: BackendValidationRequestRecord)
         if validation.result is BackendLifecycle.ACCEPTED:
             BACKEND_LIFECYCLE = BackendLifecycle.COMPLETED
         elif validation.result is BackendLifecycle.REJECTED and validation.stage in {
-            BackendLifecycle.PYDANTIC_VALIDATION,
             BackendLifecycle.FIELD_VALIDATION,
             BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED,
         }:

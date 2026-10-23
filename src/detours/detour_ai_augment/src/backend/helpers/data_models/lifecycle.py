@@ -15,7 +15,6 @@ class BackendLifecycle(StrEnum):
         "configuration",
         "appendwatch_report_validation",
         "rollout_index",
-        "pydantic_validation",
         "field_validation",
         "researcher_resolution",
         "standardized_submission_required",
@@ -33,7 +32,6 @@ class BackendLifecycle(StrEnum):
     CONFIGURATION = "configuration"
     APPENDWATCH_REPORT_VALIDATION = "appendwatch_report_validation"
     ROLLOUT_INDEX = "rollout_index"
-    PYDANTIC_VALIDATION = "pydantic_validation"
     FIELD_VALIDATION = "field_validation"
     RESEARCHER_RESOLUTION = "researcher_resolution"
     STANDARDIZED_SUBMISSION_REQUIRED = "standardized_submission_required"
@@ -56,7 +54,6 @@ POST_COMMIT_VALIDATION_STAGES: Final = frozenset({
     BackendLifecycle.CONFIGURATION,
     BackendLifecycle.APPENDWATCH_REPORT_VALIDATION,
     BackendLifecycle.ROLLOUT_INDEX,
-    BackendLifecycle.PYDANTIC_VALIDATION,
     BackendLifecycle.FIELD_VALIDATION,
     BackendLifecycle.RESEARCHER_RESOLUTION,
     BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED,

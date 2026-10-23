@@ -183,7 +183,7 @@ def validation_http_record() -> BackendValidationRequestRecord:
     body = ValidationRequestBody(
         commit_request_record=commit,
         post_commit_validation=PostCommitValidation(
-            stage=BackendLifecycle.PYDANTIC_VALIDATION,
+            stage=BackendLifecycle.FIELD_VALIDATION,
             result=BackendLifecycle.REJECTED,
             detail="invalid submission",
             submission_type=None,
@@ -1368,7 +1368,7 @@ def test_outcome_finalizes_only_linked_commit_once(
         )
         assert (
             first.validation_request_body.post_commit_validation.stage
-            is BackendLifecycle.PYDANTIC_VALIDATION
+            is BackendLifecycle.FIELD_VALIDATION
         )
         retry_pull = store._append_authoritative_record(
             PullResponseRecord.from_http_request_log_record(
@@ -1591,7 +1591,7 @@ def test_initial_validation_is_lifecycle_scoped_and_replays_explicit_links(
             )
             assert (
                 first.validation_request_body.post_commit_validation.stage
-                is BackendLifecycle.PYDANTIC_VALIDATION
+                is BackendLifecycle.FIELD_VALIDATION
             )
             initial = store.current_replayed_record
             assert isinstance(initial, BackendValidationRequestRecord)
@@ -1685,7 +1685,7 @@ def test_failed_validation_projection_does_not_advance_store_validation_state(
             )
             assert (
                 initial.validation_request_body.post_commit_validation.stage
-                is BackendLifecycle.PYDANTIC_VALIDATION
+                is BackendLifecycle.FIELD_VALIDATION
             )
             retry_pull = store._append_authoritative_record(
                 PullResponseRecord.from_http_request_log_record(

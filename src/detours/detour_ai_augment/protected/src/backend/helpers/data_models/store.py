@@ -554,7 +554,6 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     if (
                         validation.result is not BackendLifecycle.REJECTED
                         or validation.stage not in {
-                        BackendLifecycle.PYDANTIC_VALIDATION,
                         BackendLifecycle.FIELD_VALIDATION,
                         BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED,
                         }

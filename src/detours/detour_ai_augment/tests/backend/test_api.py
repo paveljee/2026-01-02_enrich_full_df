@@ -6809,21 +6809,21 @@ def test_accepted_push_finishes_after_client_or_response_send_failure(
         ),
         (
             BackendLifecycle.REJECTED,
-            BackendLifecycle.PYDANTIC_VALIDATION,
+            BackendLifecycle.FIELD_VALIDATION,
             HTTPStatus.OK,
             ContentType.MARKDOWN,
             "unexpected",
         ),
         (
             BackendLifecycle.REJECTED,
-            BackendLifecycle.PYDANTIC_VALIDATION,
+            BackendLifecycle.FIELD_VALIDATION,
             HTTPStatus.OK,
             ContentType.MARKDOWN,
             "comments_extra",
         ),
         (
             BackendLifecycle.REJECTED,
-            BackendLifecycle.PYDANTIC_VALIDATION,
+            BackendLifecycle.FIELD_VALIDATION,
             HTTPStatus.OK,
             ContentType.MARKDOWN,
             "nested_evidence",
@@ -6882,7 +6882,7 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
 
     monkeypatch.setattr(subprocess, "run", scenario_guest_run)
     submission_body = valid_submission_body()
-    if stage is BackendLifecycle.PYDANTIC_VALIDATION:
+    if schema_case is not None:
         if schema_case == "unexpected":
             submission_body = {"unexpected": True}
         elif schema_case == "comments_extra":
@@ -7095,7 +7095,7 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
                 assert isinstance(original_pull, PullResponseRecord)
                 for submission, expected_stage, expected_result, expected_pull_status in (
                     (
-                        invalid_submission, BackendLifecycle.PYDANTIC_VALIDATION,
+                        invalid_submission, BackendLifecycle.FIELD_VALIDATION,
                         BackendLifecycle.REJECTED, HTTPStatus.OK,
                     ),
                     (
@@ -7103,7 +7103,7 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
                         BackendLifecycle.REJECTED, HTTPStatus.OK,
                     ),
                     (
-                        plain, BackendLifecycle.PYDANTIC_VALIDATION,
+                        plain, BackendLifecycle.FIELD_VALIDATION,
                         BackendLifecycle.REJECTED, HTTPStatus.OK,
                     ),
                     (
@@ -7208,6 +7208,115 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
     )
     replay._rebuild_from_log(api_runtime, reset_confirmed=True, confirm_replay=lambda: True)
     assert logical_database_snapshot(replay._detour_db_path) == live_database
+
+
+def test_rejected_retry_cannot_replace_unverified_field_narrative_pin(
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    api_push_capture: tuple[CodexRolloutRecord, aivm_audit._AivmAuditConfiguration],
+    threaded_loop: asyncio.Runner,
+) -> None:
+    """Keep the first narrative pin when a retry changes only its value.
+
+    Before 0bb0523, an evidence-rejected retry could still be applied to retry
+    history and replace the baseline value of a field whose evidence was not
+    fully accepted. Both pushes here are rejected for the same unmatched excerpt;
+    the regression is the baseline change, not the rejection status.
+    """
+    assert api_push_capture[0].line_count > 0
+    initial_submission = valid_submission_body()
+    initial_field = initial_submission[KTP_AI_AUGMENT_EDUCATION_COL]
+    assert isinstance(initial_field, dict)
+    initial_value = initial_field[FIELD_VALUE_FIELD]
+    assert isinstance(initial_value, str)
+    initial_excerpts = initial_field[FIELD_EVIDENCE_FIELD]
+    assert isinstance(initial_excerpts, list)
+    initial_excerpts.append({
+        EVIDENCE_EXCERPT_FIELD: "fabricated excerpt",
+        EVIDENCE_URL_FIELD: EXPECTED_EVIDENCE[0].url,
+    })
+    retry_submission = standardized_submission_body(initial_submission)
+    retry_field = retry_submission[KTP_AI_AUGMENT_EDUCATION_COL]
+    assert isinstance(retry_field, dict)
+    retry_field[FIELD_VALUE_FIELD] = "Different education narrative"
+    assert retry_field[FIELD_EVIDENCE_FIELD] == initial_excerpts
+    immutable_detail = Locale.EVIDENCE_ACCEPTED_FIELD_IMMUTABLE_TEMPLATE.format(
+        immutable=KTP_AI_AUGMENT_EDUCATION_COL,
+    )
+
+    with api_store._writable(api_runtime):
+
+        async def exercise() -> None:
+            api_store._loop = asyncio.get_running_loop()
+            app = api_application_for_test(api_runtime, api_store)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url=f"{SYNTHETIC_COMMIT_SCHEME}://{SYNTHETIC_COMMIT_HOST}",
+            ) as client:
+                first_pull = await client.get(PULL_PATH)
+                assert first_pull.status_code == HTTPStatus.OK
+                first_push = await client.post(PUSH_PATH, json=initial_submission)
+                assert first_push.status_code == HTTPStatus.ACCEPTED
+                await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+                first_validation = api_store.current_replayed_record
+                assert isinstance(first_validation, BackendValidationRequestRecord)
+                assert (
+                    first_validation.validation_request_body.post_commit_validation.result
+                    is BackendLifecycle.REJECTED
+                )
+                first_retry_pull = await client.get(PULL_PATH)
+                assert first_retry_pull.status_code == HTTPStatus.OK
+
+                initial_audit_rows = api_store._execute(
+                    f"SELECT {POST_COMMIT_VALIDATION_FIELD_AUDIT_COL} "
+                    f"FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE} "
+                    f"WHERE {POST_COMMIT_VALIDATION_FIELD_COL} = ? "
+                    f"ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}",
+                    [KTP_AI_AUGMENT_EDUCATION_COL],
+                ).fetchall()
+                assert len(initial_audit_rows) == 1
+                initial_audit = json.loads(initial_audit_rows[0][0])
+                assert initial_audit["state"]["narrative_value"] == initial_value
+                assert [
+                    item["outcome"] for item in initial_audit["state"]["evidence_obligations"]
+                ] == [EVIDENCE_OUTCOME_V1_EXACT, EVIDENCE_OUTCOME_UNMATCHED]
+                assert initial_audit["violations"] == []
+
+                retry_push = await client.post(PUSH_PATH, json=retry_submission)
+                assert retry_push.status_code == HTTPStatus.ACCEPTED
+                await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+                retry_validation = api_store.current_replayed_record
+                assert isinstance(retry_validation, BackendValidationRequestRecord)
+                retry_result = retry_validation.validation_request_body.post_commit_validation
+                assert retry_result.result is BackendLifecycle.REJECTED
+                assert retry_result.stage is BackendLifecycle.FIELD_VALIDATION
+                assert retry_result.submission_type == STANDARDIZED_SUBMISSION_TYPE
+                retry_pull = await client.get(PULL_PATH)
+                assert retry_pull.status_code == HTTPStatus.OK
+                assert immutable_detail in retry_pull.text
+
+                audit_rows = api_store._execute(
+                    f"SELECT {POST_COMMIT_VALIDATION_FIELD_AUDIT_COL} "
+                    f"FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE} "
+                    f"WHERE {POST_COMMIT_VALIDATION_FIELD_COL} = ? "
+                    f"ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}",
+                    [KTP_AI_AUGMENT_EDUCATION_COL],
+                ).fetchall()
+                assert len(audit_rows) == 2
+                retry_audit = json.loads(audit_rows[1][0])
+                assert retry_audit["state"]["narrative_value"] == initial_value
+                assert (
+                    retry_audit["state"]["evidence_obligations"]
+                    == initial_audit["state"]["evidence_obligations"]
+                )
+                assert retry_audit["violations"] == [
+                    {
+                        "submission_column": KTP_AI_AUGMENT_EDUCATION_COL,
+                        "message": immutable_detail,
+                    }
+                ]
+
+        threaded_loop.run(asyncio.wait_for(exercise(), timeout=30))
 
 
 def test_backend_stdin_accepts_one_canonical_session_id() -> None:

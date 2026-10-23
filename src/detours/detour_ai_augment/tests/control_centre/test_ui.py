@@ -458,7 +458,7 @@ def agent_runtime_attempt(
             stage=(
                 BackendLifecycle.ACCEPTED
                 if result is BackendLifecycle.ACCEPTED
-                else BackendLifecycle.PYDANTIC_VALIDATION
+                else BackendLifecycle.FIELD_VALIDATION
             ),
             result=result,
             detail=None if result is BackendLifecycle.ACCEPTED else "failed",
