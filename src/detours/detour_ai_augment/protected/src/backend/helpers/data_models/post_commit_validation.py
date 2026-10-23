@@ -347,6 +347,14 @@ class _FinalSubmission(FrozenStrictModel):
     fields: dict[_EvidenceSubmissionColumn, _FieldPinState]
 
     @property
+    def ready_for_standardized(self) -> bool:
+        required = _FieldPin.NARRATIVE | _FieldPin.EVIDENCE
+        return all(
+            (self.fields.get(column, _FieldPinState()).pins & required) == required
+            for column in _EvidenceSubmissionColumn
+        )
+
+    @property
     def complete(self) -> bool:
         required = _FieldPin.NARRATIVE | _FieldPin.EVIDENCE | _FieldPin.STANDARDIZED
         return all(
@@ -1866,7 +1874,13 @@ def _evaluate_submission_for_commit(
     commit_request_timestamp = utc_datetime_from_unix_usec(
         unix_usec_from_uuidv7(commit_request_record.record_id)
     )
-    retry_submission_expected = False
+    # Preserving from legacy times
+    # when standardized was required
+    # once initial Submission passed
+    # pydantic validation.
+    # Signed off: human
+    # retry_submission_expected = False
+    standardized_required = False
     stage = BackendLifecycle.APPENDWATCH_REPORT_VALIDATION
     submission_payload: Submission | StandardizedSubmission | None = None
     rollout_index: _RolloutIndex | None = None
@@ -1942,10 +1956,18 @@ def _evaluate_submission_for_commit(
                 assert previous_audits is None
                 raise error
             assert previous_audits is not None
-            retry_submission_expected = bool(previous_audits)
+            # Preserving from legacy times
+            # when standardized was required
+            # once initial Submission passed
+            # pydantic validation.
+            # Signed off: human
+            # retry_submission_expected = bool(previous_audits)
             previous_states = {
                 audit.submission_column: audit.state for audit in previous_audits
             }
+            standardized_required = _FinalSubmission(
+                fields=previous_states
+            ).ready_for_standardized
             with submission_http_context(ModelHttpInterceptor.current()):
                 (
                     field_submissions,
@@ -1954,7 +1976,13 @@ def _evaluate_submission_for_commit(
                     schema_issues,
                 ) = _validate_submission_fields(
                     push_request_body,
-                    standardized_required=retry_submission_expected,
+                    # Preserving from legacy times
+                    # when standardized was required
+                    # once initial Submission passed
+                    # pydantic validation.
+                    # Signed off: human
+                    # standardized_required=retry_submission_expected,
+                    standardized_required=standardized_required,
                 )
             _seed_evidence_random(inputs.config_facts.sample_seed)
             field_audits: list[_FieldAudit] = []
@@ -2009,7 +2037,13 @@ def _evaluate_submission_for_commit(
                     evidence_assessment,
                     progress_template=progress_template,
                     violations=retry_violations,
-                    include_retry_contract=bool(previous_audits or field_audits),
+                    # Preserving from legacy times
+                    # when standardized was required
+                    # once initial Submission passed
+                    # pydantic validation.
+                    # Signed off: human
+                    # include_retry_contract=bool(previous_audits or field_audits),
+                    include_retry_contract=final_submission.ready_for_standardized,
                 )
                 return result(
                     commit_request_record=commit_request_record,
@@ -2029,7 +2063,13 @@ def _evaluate_submission_for_commit(
                         evidence_assessment,
                         progress_template=progress_template,
                         violations=retry_violations,
-                        include_retry_contract=True,
+                        # Preserving from legacy times
+                        # when standardized was required
+                        # once initial Submission passed
+                        # pydantic validation.
+                        # Signed off: human
+                        # include_retry_contract=True,
+                        include_retry_contract=final_submission.ready_for_standardized,
                     ),
                 )
             stage = BackendLifecycle.RESEARCHER_RESOLUTION
@@ -2134,7 +2174,13 @@ def _evaluate_submission_for_commit(
                 output_row=output_row,
                 validation_result=BackendLifecycle.REJECTED,
                 detail=Locale.VALIDATION_ERROR_DETAIL
-                + (f"\n{RETRY_SUBMISSION_PUBLIC_GUIDANCE}" if retry_submission_expected else ""),
+                # Preserving from legacy times
+                # when standardized was required
+                # once initial Submission passed
+                # pydantic validation.
+                # Signed off: human
+                # + (f"\n{RETRY_SUBMISSION_PUBLIC_GUIDANCE}" if retry_submission_expected else ""),
+                + (f"\n{RETRY_SUBMISSION_PUBLIC_GUIDANCE}" if standardized_required else ""),
                 error=exc,
             )
         except (OSError, ValueError, duckdb.Error, subprocess.SubprocessError) as exc:

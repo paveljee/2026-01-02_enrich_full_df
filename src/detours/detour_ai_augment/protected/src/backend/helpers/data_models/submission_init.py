@@ -22,7 +22,9 @@ from .submission_mixin import SubmissionMixin
 
 class Submission(StrictModel, SubmissionMixin[FieldSubmission, CommentsSubmission]):
     """
-    To be used for the first submission only.
+    To be used ~~for the first submission only~~
+    until all narrative values and evidence
+    are accepted (as of 2026-10-23).
 
     Field descriptions are **not** supplied
     intentionally in order to enable free
@@ -30,8 +32,9 @@ class Submission(StrictModel, SubmissionMixin[FieldSubmission, CommentsSubmissio
     initial submission.
     
     Note: `class StandardizedFieldSubmission`,
-    to be used in resubmissions, is defined in
-    `pydantic_to_paste`.
+    to be used ~~in resubmissions~~ after
+    all evidence is accepted (as of 2026-10-23),
+    is defined in `pydantic_to_paste`.
 
     signed-off: human
     """

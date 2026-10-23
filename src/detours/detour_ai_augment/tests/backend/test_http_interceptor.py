@@ -452,9 +452,15 @@ def standardized_retry_commit(
         )
     )
     assert isinstance(retry_pull, PullResponseRecord)
+    submission = (
+        standardized_submission_body(payload)
+        if initial.validation_request_body.post_commit_validation.stage
+        is BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED
+        else payload
+    )
     return commit(
         store,
-        standardized_submission_body(payload),
+        submission,
         payload,
         retry_pull,
         session_id=session_id,
@@ -593,7 +599,30 @@ def test_live_validation_replays_with_only_referenced_http(
         retry_pull = store._append_authoritative_record(
             retry_pull.model_copy(update={"record_id": uuid7()})
         )
-        commit_id = commit(store, accepted, accepted, retry_pull)
+        evidence_clean = store._validate_commit(
+            commit(store, valid_submission_body(), accepted, retry_pull)
+        )
+        assert (
+            evidence_clean.validation_request_body.post_commit_validation.stage
+            is BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED
+        )
+        standardized_pull = store._append_authoritative_record(
+            PullResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(),
+                    method=HTTP_GET_METHOD,
+                    path=PULL_PATH,
+                    response_code=HTTPStatus.OK,
+                    response_headers={HTTP_CONTENT_TYPE_HEADER: ContentType.MARKDOWN_UTF8},
+                    response_body=(
+                        evidence_clean.validation_request_body.post_commit_validation.detail
+                        or ""
+                    ),
+                ),
+                validation_request_record=evidence_clean,
+            )
+        )
+        commit_id = commit(store, accepted, accepted, standardized_pull)
         result = store._validate_commit(commit_id)
         assert (
             result.validation_request_body.post_commit_validation.result

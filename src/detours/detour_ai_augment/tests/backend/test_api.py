@@ -1974,6 +1974,11 @@ def assert_captured_operator_push_contour(
         },
     }
     accepted_push_body = json.dumps(accepted_push, ensure_ascii=False).encode()
+    evidence_accepted = deepcopy(accepted_push)
+    for column in AI_AUGMENT_EVIDENCE_COLUMNS:
+        field = evidence_accepted[column]
+        assert isinstance(field, dict)
+        field.pop(FIELD_STANDARDIZED_VALUE_FIELD)
     accepted_values: dict[str, object] = {}
     for column in AI_AUGMENT_COLUMNS:
         field = accepted_push[column]
@@ -2084,6 +2089,8 @@ def assert_captured_operator_push_contour(
             tuple[int, bytes],
             tuple[int, bytes],
             tuple[int, bytes],
+            tuple[int, bytes],
+            tuple[int, bytes],
         ]:
             initial_pull = await authoritative_api_exchange(
                 runtime,
@@ -2104,6 +2111,19 @@ def assert_captured_operator_push_contour(
                 HTTP_GET_METHOD,
                 PULL_PATH,
             )
+            evidence_only_push = await authoritative_api_exchange(
+                runtime,
+                store,
+                HTTP_POST_METHOD,
+                PUSH_PATH,
+                json.dumps(evidence_accepted).encode(),
+            )
+            standardized_request_pull = await authoritative_api_exchange(
+                runtime,
+                store,
+                HTTP_GET_METHOD,
+                PULL_PATH,
+            )
             accepted = await authoritative_api_exchange(
                 runtime,
                 store,
@@ -2117,14 +2137,20 @@ def assert_captured_operator_push_contour(
                 HTTP_GET_METHOD,
                 PULL_PATH,
             )
-            return initial_pull, baseline_push, retry_pull, accepted, gone_pull
+            return (
+                initial_pull, baseline_push, retry_pull, evidence_only_push,
+                standardized_request_pull, accepted, gone_pull,
+            )
 
-        initial_pull, baseline_push, retry_pull, accepted, gone_pull = threaded_loop.run(
-            run_captured_contour()
-        )
+        (
+            initial_pull, baseline_push, retry_pull, evidence_only_push,
+            standardized_request_pull, accepted, gone_pull,
+        ) = threaded_loop.run(run_captured_contour())
         assert initial_pull[0] == status.HTTP_200_OK
         assert baseline_push[0] == status.HTTP_202_ACCEPTED
         assert retry_pull[0] == status.HTTP_200_OK
+        assert evidence_only_push[0] == status.HTTP_202_ACCEPTED
+        assert standardized_request_pull[0] == status.HTTP_200_OK
         assert accepted[0] == status.HTTP_202_ACCEPTED
         assert gone_pull == (status.HTTP_410_GONE, gone_response_text.encode())
 
@@ -2144,7 +2170,7 @@ def assert_captured_operator_push_contour(
             for record in authoritative_records
             if (record.method, record.path) == (HTTP_POST_METHOD, COMMIT_PATH)
         )
-        assert len(pushes) == len(commits) == 2
+        assert len(pushes) == len(commits) == 3
         assert isinstance(pushes[-1].request_body, str)
         assert pushes[-1].request_body == accepted_push_body.decode()
         assert commits[-1].request_body is not None
@@ -2175,7 +2201,7 @@ def assert_captured_operator_push_contour(
         validation_records = tuple(
             record for record in authoritative_records if record.path == VALIDATE_PATH
         )
-        assert len(validation_records) == 2
+        assert len(validation_records) == 3
         accepted_validation_http_record = validation_records[-1]
         assert accepted_validation_http_record.request_body is not None
         accepted_validation_body_json = _ValidationRequestBodyJson.model_validate_json(
@@ -4565,14 +4591,19 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
                     session_id=TEST_SESSION_ID,
                     synthetic_record_id_seed=synthetic_record_id_seed,
                 )
-                retry_expected = bool(store_for_connection(connection)._field_audits(
+                previous_audits = store_for_connection(connection)._field_audits(
                     commit_request_record,
                     original_pull_response_record=original_pull,
                     init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
-                ))
+                )
+                standardized_required = post_commit_validation._FinalSubmission(
+                    fields={
+                        audit.submission_column: audit.state for audit in previous_audits
+                    }
+                ).ready_for_standardized
                 submission: Submission | StandardizedSubmission = (
                     StandardizedSubmission.model_validate(standardized_submission_body(plain_body))
-                    if retry_expected
+                    if standardized_required
                     else Submission.model_validate(plain_body)
                 )
                 assessment = post_commit_validation.assess_submission_evidence(
@@ -7103,7 +7134,11 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
                         BackendLifecycle.REJECTED, HTTPStatus.OK,
                     ),
                     (
-                        plain, BackendLifecycle.FIELD_VALIDATION,
+                        standardized, BackendLifecycle.FIELD_VALIDATION,
+                        BackendLifecycle.REJECTED, HTTPStatus.OK,
+                    ),
+                    (
+                        plain, BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED,
                         BackendLifecycle.REJECTED, HTTPStatus.OK,
                     ),
                     (
@@ -7146,20 +7181,27 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
                         ).fetchone()
                         assert audit_count_row is not None
                         assert audit_count_row[0] >= len(AI_AUGMENT_EVIDENCE_COLUMNS)
+                    elif submission is standardized:
+                        assert outcome.submission_type is None
                     pull = await client.get(PULL_PATH)
                     assert pull.status_code == expected_pull_status
                     if submission is rejected_evidence:
-                        assert post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE in pull.text
+                        assert (
+                            post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE
+                            not in pull.text
+                        )
                     elif submission is invalid_submission:
                         assert (
                             post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE
                             not in pull.text
                         )
-                    elif submission is plain:
+                    elif submission is standardized:
                         assert (
-                            f"{KTP_AI_AUGMENT_EDUCATION_COL}.{FIELD_STANDARDIZED_VALUE_FIELD}"
-                            in pull.text
+                            post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE
+                            not in pull.text
                         )
+                    elif submission is plain:
+                        assert post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE in pull.text
                     elif submission is standardized_age_invalid:
                         assert (
                             f"{KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL}: "
@@ -7235,7 +7277,7 @@ def test_rejected_retry_cannot_replace_unverified_field_narrative_pin(
         EVIDENCE_EXCERPT_FIELD: "fabricated excerpt",
         EVIDENCE_URL_FIELD: EXPECTED_EVIDENCE[0].url,
     })
-    retry_submission = standardized_submission_body(initial_submission)
+    retry_submission = deepcopy(initial_submission)
     retry_field = retry_submission[KTP_AI_AUGMENT_EDUCATION_COL]
     assert isinstance(retry_field, dict)
     retry_field[FIELD_VALUE_FIELD] = "Different education narrative"
@@ -7290,7 +7332,7 @@ def test_rejected_retry_cannot_replace_unverified_field_narrative_pin(
                 retry_result = retry_validation.validation_request_body.post_commit_validation
                 assert retry_result.result is BackendLifecycle.REJECTED
                 assert retry_result.stage is BackendLifecycle.FIELD_VALIDATION
-                assert retry_result.submission_type == STANDARDIZED_SUBMISSION_TYPE
+                assert retry_result.submission_type == SUBMISSION_TYPE
                 retry_pull = await client.get(PULL_PATH)
                 assert retry_pull.status_code == HTTPStatus.OK
                 assert immutable_detail in retry_pull.text
