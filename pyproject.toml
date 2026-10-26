@@ -935,6 +935,16 @@ class TableColumn(StrEnum):
     AI_AUGMENT_FOOTNOTES = "ai_augment_footnotes"
 
 
+LINEBREAKS_LUA = "\\n".join((
+    "function RawInline(el)",
+    "  if el.format == [[html]] and",
+    "     el.text:lower():match([[^<br%s*/?>$]]) then",
+    "    return pandoc.LineBreak()",
+    "  end",
+    "end",
+))
+
+
 completed = subprocess.run(
     ["pixi", "run", "-e", "detour-ai-augment", "table-markdown", sys.argv[1]],
     check=True,
@@ -944,14 +954,12 @@ completed = subprocess.run(
 markdown_path = Path(completed.stdout.strip())
 config_path = Path(os.environ.get("AI_AUGMENT_EVAL_CONFIG", "config_ai_augment.json"))
 config = json.loads(config_path.read_text(encoding="utf-8"))
-html = subprocess.check_output(
-    ["pandoc", "-f", "markdown", "-t", "html"],
-    input=markdown_path.read_bytes(),
-)
 document = Document(BytesIO(subprocess.check_output(
-    ["pandoc", "-f", "html", "-t", "docx",
-     "--reference-doc", str(Path(config["pandoc_reference_docx"]))],
-    input=html,
+    ["pandoc", "-f", "markdown", "-t", "docx",
+     "--lua-filter=/dev/stdin",
+     "--reference-doc", str(Path(config["pandoc_reference_docx"])),
+     str(markdown_path)],
+    input=LINEBREAKS_LUA.encode("utf-8"),
 )))
 widths = tuple(Cm(width) for width in (3.3, 4.4, 4.4, 4.4))
 for table in document.tables:
