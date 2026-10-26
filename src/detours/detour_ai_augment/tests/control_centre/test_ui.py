@@ -815,6 +815,7 @@ class FakeCodex:
         handle = SimpleNamespace(
             run=run,
             remote_pid=None,
+            rollout_jsonl=ROLLOUT_PATH,
             process=SimpleNamespace(returncode=None),
         )
         if on_handle is not None:
@@ -835,8 +836,11 @@ class FakeCodex:
         self.order.append("codex-cancel")
         cast(Any, handle).process.returncode = -15
 
-    async def archive_session(self, session_id: UUID) -> None:
+    async def archive_session(
+        self, session_id: UUID, rollout_jsonl: PurePosixPath,
+    ) -> None:
         assert session_id == SESSION_ID
+        assert rollout_jsonl == ROLLOUT_PATH
         self.order.append("codex-archive")
 
     async def terminate_abandoned_run(self, _run: run_event_models.Run) -> None:
@@ -1975,8 +1979,10 @@ async def test_archive_failure_does_not_change_completed_run_outcome(
     order: list[str] = []
 
     class ArchiveFailingCodex(FakeCodex):
-        async def archive_session(self, session_id: UUID) -> None:
-            await super().archive_session(session_id)
+        async def archive_session(
+            self, session_id: UUID, rollout_jsonl: PurePosixPath,
+        ) -> None:
+            await super().archive_session(session_id, rollout_jsonl)
             raise OSError("archive unavailable")
 
     subject = controller(
@@ -2780,9 +2786,63 @@ async def test_codex_runner_archives_recorded_session_with_guest_cli(
         return b""
 
     monkeypatch.setattr(runner, "_remote_command", remote_command)
-    await runner.archive_session(SESSION_ID)
+    await runner.archive_session(SESSION_ID, ROLLOUT_PATH)
 
-    assert commands == [f"{CODEX_CLI_BIN_PATH} archive {SESSION_ID}"]
+    assert commands == [f"{CODEX_CLI_BIN_PATH} archive {SESSION_ID}", *(
+        f"if [ -d {directory} ] && "
+        f'[ -z "$(find {directory} -mindepth 1 -maxdepth 1 '
+        '-printf . -quit)" ]; '
+        f"then rmdir --ignore-fail-on-non-empty -- {directory}; fi"
+        for directory in (
+            ROLLOUT_PATH.parent,
+            ROLLOUT_PATH.parent.parent,
+            ROLLOUT_PATH.parent.parent.parent,
+        )
+    )]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("keep_sibling", "archive_prunes_date_directory"),
+    ((False, False), (True, False), (False, True)),
+)
+async def test_codex_archive_prunes_only_empty_dated_directories(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    keep_sibling: bool,
+    archive_prunes_date_directory: bool,
+) -> None:
+    date_directory = tmp_path / "sessions" / "2026" / "10" / "23"
+    date_directory.mkdir(parents=True)
+    rollout = date_directory / "rollout.jsonl"
+    rollout.write_text("session", encoding=CONTROL_TEXT_ENCODING)
+    if keep_sibling:
+        (date_directory / "other-session.jsonl").write_text(
+            "other", encoding=CONTROL_TEXT_ENCODING,
+        )
+    runner = control_ui._CodexRunner(timezone=ZoneInfo("UTC"))
+
+    async def remote_command(command: str) -> bytes:
+        if command == f"{CODEX_CLI_BIN_PATH} archive {SESSION_ID}":
+            rollout.rename(tmp_path / "archived.jsonl")
+            if archive_prunes_date_directory:
+                date_directory.rmdir()
+            return b""
+        completed = subprocess.run(
+            ["bash", "-c", command],
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+        return completed.stdout
+
+    monkeypatch.setattr(runner, "_remote_command", remote_command)
+    await runner.archive_session(SESSION_ID, PurePosixPath(rollout))
+
+    assert (tmp_path / "archived.jsonl").is_file()
+    assert date_directory.exists() is keep_sibling
+    assert date_directory.parent.exists() is keep_sibling
+    assert date_directory.parent.parent.exists() is keep_sibling
 
 
 @pytest.mark.anyio

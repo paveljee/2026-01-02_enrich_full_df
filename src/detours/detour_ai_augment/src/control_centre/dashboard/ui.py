@@ -1577,13 +1577,31 @@ class _CodexRunner:
         output = await self._remote_command(CODEX_REMOTE_BUSY_COMMAND)
         return output.decode(TEXT_ENCODING) == CODEX_REMOTE_BUSY_MARKER
 
-    async def archive_session(self, session_id: UUID) -> None:
+    async def archive_session(
+        self, session_id: UUID, rollout_jsonl: PurePosixPath,
+    ) -> None:
         await asyncio.wait_for(
             self._remote_command(
                 shlex.join((str(CODEX_CLI_BIN_PATH), "archive", str(session_id)))
             ),
             timeout=CODEX_ARCHIVE_TIMEOUT_SECONDS,
         )
+        for directory in (
+            rollout_jsonl.parent,
+            rollout_jsonl.parent.parent,
+            rollout_jsonl.parent.parent.parent,
+        ):
+            # Remove empty dirs
+            quoted_directory = shlex.quote(str(directory))
+            await asyncio.wait_for(
+                self._remote_command(
+                    f"if [ -d {quoted_directory} ] && "
+                    f'[ -z "$(find {quoted_directory} -mindepth 1 -maxdepth 1 '
+                    '-printf . -quit)" ]; '
+                    f"then rmdir --ignore-fail-on-non-empty -- {quoted_directory}; fi"
+                ),
+                timeout=CODEX_ARCHIVE_TIMEOUT_SECONDS,
+            )
 
     async def start(
         self,
@@ -2444,7 +2462,10 @@ class _ControlCentreController:
             session_id = self._runs[run_id].session_id
             if session_id is not None:
                 try:
-                    await self._codex.archive_session(session_id)
+                    assert active_codex.rollout_jsonl is not None
+                    await self._codex.archive_session(
+                        session_id, active_codex.rollout_jsonl,
+                    )
                 except (OSError, RuntimeError, TimeoutError) as exc:
                     message = Locale.CODEX_ARCHIVE_FAILED_TEMPLATE.format(
                         run_id=run_id, session_id=session_id, error=exc,

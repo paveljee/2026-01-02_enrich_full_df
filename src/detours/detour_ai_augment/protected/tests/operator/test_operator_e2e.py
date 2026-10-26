@@ -1145,6 +1145,25 @@ def _guest_rollouts(root: PurePosixPath, filename: str) -> tuple[str, ...]:
     return tuple(completed.stdout.splitlines())
 
 
+def _guest_empty_session_date_directories() -> frozenset[str]:
+    completed = subprocess.run(
+        [
+            *AIVM_SSH_CONNECTION_COMMAND,
+            AIVM_SSH_TARGET,
+            shlex.join((
+                "find", str(CODEX_SESSIONS_ROOT), "-mindepth", "3", "-maxdepth", "3",
+                "-type", "d", "-empty", "-print",
+            )),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding=TEXT_ENCODING,
+        timeout=SSH_TIMEOUT_SECONDS,
+    )
+    return frozenset(completed.stdout.splitlines())
+
+
 def wait_for_saved_session(
     operator_runtime: OperatorRuntime, dashboard: DashboardProcess,
 ) -> tuple[UUID, UUID]:
