@@ -692,6 +692,96 @@ print(f"Exported {input_path!r} to {str(output_path)!r}")
 """
 cwd = "."
 
+[tool.pixi.feature.detour-ai-augment.tasks.table-docx]
+description = '''Usage: pixi run -e detour-ai-augment table-docx '{"ktp.first_name":"Antoine","ktp.last_name":"Guisan"}' (uses current Dashboard storage)'''
+cmd = """
+python -c '
+import json
+import os
+import subprocess
+import sys
+from io import BytesIO
+from pathlib import Path
+
+from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Cm
+
+from src.detours.detour_ai_augment.src.control_centre.dashboard.ui import (
+    GRID_AI_VALUE_FIELD,
+)
+from src.helpers.cards import render_docx_bytes
+
+completed = subprocess.run(
+    ["pixi", "run", "-e", "detour-ai-augment", "table-markdown", sys.argv[1]],
+    check=True,
+    stdout=subprocess.PIPE,
+    text=True,
+)
+markdown_path = Path(completed.stdout.strip())
+config_path = Path(os.environ.get("AI_AUGMENT_EVAL_CONFIG", "config_ai_augment.json"))
+config = json.loads(config_path.read_text(encoding="utf-8"))
+document = Document(BytesIO(render_docx_bytes(
+    markdown_path.read_text(encoding="utf-8"),
+    Path(config["pandoc_reference_docx"]),
+)))
+widths = tuple(Cm(width) for width in (3.3, 4.4, 4.4, 4.4))
+for table in document.tables:
+    if len(table.columns) != 4 or table.cell(0, 0).text != GRID_AI_VALUE_FIELD:
+        continue
+    table.autofit = False
+    for column, width in zip(table.columns, widths):
+        column.width = width
+    for row in table.rows:
+        for cell, width in zip(row.cells, widths):
+            cell.width = width
+    borders = table._tbl.tblPr.find(qn("w:tblBorders"))
+    if borders is None:
+        borders = OxmlElement("w:tblBorders")
+        table._tbl.tblPr.append(borders)
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        element = borders.find(qn(f"w:{edge}"))
+        if element is None:
+            element = OxmlElement(f"w:{edge}")
+            borders.append(element)
+        for attribute, value in (("val", "single"), ("sz", "8"), ("color", "000000")):
+            element.set(qn(f"w:{attribute}"), value)
+output = markdown_path.with_suffix(".docx")
+document.save(output)
+print(output.resolve())
+'
+"""
+cwd = "."
+
+[tool.pixi.feature.detour-ai-augment.tasks.test-table-docx]
+description = '''Usage: pixi run -e detour-ai-augment test-table-docx tmp/test.ujpfoijf '{"ktp.first_name":"Antoine","ktp.last_name":"Guisan"}' (uses copied retained NiceGUI storage)'''
+cmd = """
+python -c '
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+from src.detours.detour_ai_augment.protected.tests.pytest_plugin import nicegui_test_environment
+
+run_dir = Path(sys.argv[1]).resolve()
+with tempfile.TemporaryDirectory(prefix="test-table-docx-", dir="tmp") as directory:
+    storage_path = Path(directory) / "nicegui"
+    storage_path.mkdir()
+    shutil.copy2(run_dir / "nicegui" / "storage-general.json", storage_path)
+    environment = nicegui_test_environment(storage_path)
+    environment["AI_AUGMENT_EVAL_CONFIG"] = str(run_dir / "config.operator.json")
+    subprocess.run(
+        ["pixi", "run", "-e", "detour-ai-augment", "table-docx", sys.argv[2]],
+        check=True,
+        env=environment,
+    )
+'
+"""
+cwd = "."
+
 # Set OPENALEX_API_KEY if you need it:
 # ~~~
 # OPENALEX_API_KEY="$(pixi run python -c '
