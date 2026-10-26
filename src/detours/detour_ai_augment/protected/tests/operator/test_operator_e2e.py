@@ -81,6 +81,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
     LIMA_SSH_CONFIG_PATH,
     LOCATION_HEADER,
+    NAME_KEY_HEADER,
     POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL,
     POST_COMMIT_VALIDATION_FIELD_AUDIT_COL,
     POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE,
@@ -177,7 +178,11 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 )
 from src.helpers.architecture import FrozenStrictModel, nameof
 from src.helpers.data_models import HttpRequestLogRecord, NameKey
-from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1, KTP_LAST_NAME_COL
+from src.helpers.vars import (
+    KTP_FIRST_NAME_COL,
+    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+    KTP_LAST_NAME_COL,
+)
 
 CONTROL_CENTRE_MODULE = "src.detours.detour_ai_augment.src.control_centre.dashboard.ui"
 CONTROL_CENTRE_COMMAND_PREFIX = (
@@ -677,6 +682,7 @@ def running_dashboard(runtime: OperatorRuntime) -> Generator[DashboardProcess]:
 
 def target_namekey(
     runtime: OperatorRuntime, *, randomize_target: bool = False,
+    exclude_namekey: NameKey | None = None,
 ) -> NameKey:
     _operator_log("selecting the operator workflow target")
     configuration = AiAugmentBackendContext(
@@ -714,7 +720,10 @@ def target_namekey(
             f"added to workflow candidates: "
             f"{namekey.model_dump_json(by_alias=True)}"
         )
-        namekey = Random().choice((namekey, *(item.namekey for item in first_five)))
+        namekey = Random().choice(tuple(
+            candidate for candidate in (namekey, *(item.namekey for item in first_five))
+            if candidate != exclude_namekey
+        ))
     _operator_log(f"randomly selected workflow target {namekey}")
     return namekey
 
@@ -775,8 +784,9 @@ def queue_in_browser(
             start_queue = page.get_by_role(
                 "button", name=Locale.ACTION_START_QUEUE_PROCESSING, exact=True,
             )
-            expect(start_queue).to_be_enabled()
-            start_queue.click()
+            if start_queue.is_visible():
+                expect(start_queue).to_be_enabled()
+                start_queue.click()
             expect(page.get_by_role(
                 "button", name=Locale.ACTION_STOP_QUEUE_PROCESSING, exact=True,
             )).to_be_visible()
@@ -824,14 +834,18 @@ def raise_for_dashboard_failure(dashboard: DashboardProcess) -> None:
 def wait_for_gone_pull(
     runtime: OperatorRuntime,
     dashboard: DashboardProcess,
+    *,
+    after_record_count: int,
 ) -> tuple[HttpRequestLogRecord, ...]:
     _operator_log("waiting for Backend GET /pull -> 410 Gone")
     started_at = time.monotonic()
     deadline = time.monotonic() + FULL_WORKFLOW_TIMEOUT_SECONDS
     next_heartbeat = started_at + OPERATOR_HEARTBEAT_SECONDS
-    previous_record_count = 0
+    previous_record_count = after_record_count
     previous_exchange: tuple[str, str, int | None] | None = None
-    _operator_log("authoritative request log initially contains 0 record(s)")
+    _operator_log(
+        f"authoritative request log initially contains {after_record_count} record(s)"
+    )
     while time.monotonic() < deadline:
         raise_for_dashboard_failure(dashboard)
         records = authoritative_records(runtime.replay_log_path)
@@ -860,7 +874,7 @@ def wait_for_gone_pull(
                 PULL_PATH,
                 status.HTTP_410_GONE,
             )
-            for record in records
+            for record in records[after_record_count:]
         ):
             _operator_log("Backend reached GET /pull -> 410 Gone")
             return records
@@ -883,8 +897,11 @@ def run_workflow_to_gone_pull(
     dashboard: DashboardProcess,
     namekey: NameKey,
 ) -> WorkflowCheckpoint:
+    after_record_count = len(authoritative_records(runtime.replay_log_path))
     queued_at_monotonic = queue_in_browser(namekey, runtime, dashboard)
-    wait_for_gone_pull(runtime, dashboard)
+    wait_for_gone_pull(
+        runtime, dashboard, after_record_count=after_record_count,
+    )
     return WorkflowCheckpoint(
         queued_at_monotonic=queued_at_monotonic,
     )
@@ -989,6 +1006,7 @@ def capture_completed_researcher_card(
     *,
     namekey: NameKey,
     queued_at_monotonic: float,
+    expected_completed_count: int,
 ) -> tuple[str, str]:
     _operator_log("opening the completed workflow in Playwright")
     with sync_playwright() as playwright:
@@ -1014,6 +1032,9 @@ def capture_completed_researcher_card(
                 dashboard,
                 runtime,
                 queued_at_monotonic=queued_at_monotonic,
+            )
+            expect(page.get_by_test_id(control_ui.PAGE_SUMMARY_TEST_ID)).to_contain_text(
+                f"completed {expected_completed_count} · failed 0"
             )
             history = page.get_by_test_id(control_ui.RUN_OUTCOME_HISTORY_TABLE_TEST_ID)
             expect(history).to_be_visible()
@@ -1390,6 +1411,7 @@ def validate_workflow_artifacts(
     expected_run_outcome_path: RunOutcomePath | None = None,
     card_text: str | None = None,
     browser_run_outcome_response_body: str | None = None,
+    expected_completed_count: int = 1,
 ) -> None:
     _operator_log("validating authoritative workflow artifacts")
     assert not operator_runtime.dashboard_socket_path.exists()
@@ -1421,16 +1443,6 @@ def validate_workflow_artifacts(
     assert all(record.record_id.version == 7 for record in records)
     validations = _validate_workflow_http_records(records)
 
-    gone_pull = next(
-        record
-        for record in reversed(records)
-        if (record.method, record.path, record.response_code)
-        == (
-            HTTP_GET_METHOD,
-            PULL_PATH,
-            status.HTTP_410_GONE,
-        )
-    )
     records_by_id = {record.record_id: record for record in records}
     runtime = AiAugmentBackendContext(
         pipeline_config=AiAugmentDetourConfig.from_json(
@@ -1492,7 +1504,12 @@ def validate_workflow_artifacts(
                 validation_request_body["post_commit_validation"]["result"]
                 == BackendLifecycle.ACCEPTED
             ):
-                accepted_commits.append((record, body))
+                if AiAugmentBackendStore._parse_name_key_header(
+                    backend_api._http_header_value(
+                        record.request_headers, NAME_KEY_HEADER,
+                    )
+                ) == namekey:
+                    accepted_commits.append((record, body))
     assert len(accepted_commits) == 1
     commit_request_record, commit_request_body = accepted_commits[0]
     session = commit_request_body.codex_session_record
@@ -1503,6 +1520,28 @@ def validate_workflow_artifacts(
     pull_ordinal = _record_ordinal(records, commit_request_body.pull_record_id)
     push_ordinal = _record_ordinal(records, commit_request_body.push_record_id)
     commit_ordinal = _record_ordinal(records, commit_request_record.record_id)
+    run_outcome_records = tuple(
+        record
+        for record in records
+        if (record.method, record.path)
+        in {
+            (HTTP_POST_METHOD, path)
+            for path in run_outcome_models.RUN_OUTCOME_PATHS
+        }
+        and AiAugmentBackendStore._parse_name_key_header(
+            backend_api._http_header_value(
+                record.request_headers, NAME_KEY_HEADER,
+            )
+        ) == namekey
+    )
+    assert run_outcome_records
+    run_outcome_record = run_outcome_records[-1]
+    run_outcome_ordinal = _record_ordinal(records, run_outcome_record.record_id)
+    gone_pull = next(
+        record for record in records[commit_ordinal + 1:run_outcome_ordinal]
+        if (record.method, record.path, record.response_code)
+        == (HTTP_GET_METHOD, PULL_PATH, status.HTTP_410_GONE)
+    )
     gone_pull_ordinal = _record_ordinal(records, gone_pull.record_id)
     assert pull_ordinal < push_ordinal < commit_ordinal < gone_pull_ordinal
     push_record = records[push_ordinal]
@@ -1522,17 +1561,6 @@ def validate_workflow_artifacts(
     assert gone_pull.response_body
     assert json.loads(gone_pull.response_body.splitlines()[0])
 
-    run_outcome_records = tuple(
-        record
-        for record in records
-        if (record.method, record.path)
-        in {
-            (HTTP_POST_METHOD, path)
-            for path in run_outcome_models.RUN_OUTCOME_PATHS
-        }
-    )
-    assert run_outcome_records
-    run_outcome_record = run_outcome_records[-1]
     if expected_run_outcome_path is not None:
         assert run_outcome_record.path == expected_run_outcome_path
         assert run_outcome_record.response_code == status.HTTP_200_OK
@@ -1626,8 +1654,12 @@ def validate_workflow_artifacts(
             output_rows = backend_store._query_mappings(
                 f"SELECT * FROM {CODEX_OUTPUT_ROWS_TABLE}"
             )
-            assert len(output_rows) == 1
-            output = output_rows[0]
+            assert len(output_rows) == expected_completed_count
+            output = next(
+                row for row in output_rows
+                if row[KTP_FIRST_NAME_COL] == namekey.first_name
+                and row[KTP_LAST_NAME_COL] == namekey.last_name
+            )
             post_commit_validation = validation_body["post_commit_validation"]
             submission_type = post_commit_validation[
                 nameof(lambda: PostCommitValidation.submission_type)
@@ -1682,8 +1714,11 @@ def validate_workflow_artifacts(
         assert stored_codex[0][nameof(lambda: CodexInnerDict.innerdict)] == output
         _operator_log("completed output matches the saved Dashboard snapshot")
         stored_runs = stored[RUNS_STORAGE_KEY]
-        assert len(stored_runs) == 1
-        stored_run = stored_runs[0]
+        assert len(stored_runs) == expected_completed_count
+        stored_run = next(
+            run for run in stored_runs
+            if run[nameof(lambda: Run.namekey)] == namekey.model_dump(mode="json")
+        )
         assert stored_run[nameof(lambda: Run.namekey)] == namekey.model_dump(mode="json")
         assert stored_run[nameof(lambda: Run.session_id)] == str(session.codex_session_id)
         assert stored_run[nameof(lambda: Run.lifecycle)] == RunLifecycle.COMPLETED.value
@@ -1729,6 +1764,7 @@ def assert_completed_workflow_artifacts(
     namekey: NameKey,
     card_text: str,
     browser_run_outcome_response_body: str,
+    expected_completed_count: int = 1,
 ) -> None:
     logged_init_requests = tuple(
         BackendInitRequestRecord.from_http_request_log_record(
@@ -1737,8 +1773,8 @@ def assert_completed_workflow_artifacts(
         for record in authoritative_records(operator_runtime.replay_log_path)
         if (record.method, record.path) == (HTTP_POST_METHOD, INIT_PATH)
     )
-    assert len(logged_init_requests) == 1
-    assert logged_init_requests[0].namekey == namekey
+    assert len(logged_init_requests) == expected_completed_count
+    assert sum(record.namekey == namekey for record in logged_init_requests) == 1
 
     validate_workflow_artifacts(
         operator_runtime,
@@ -1746,6 +1782,7 @@ def assert_completed_workflow_artifacts(
         expected_run_outcome_path=run_outcome_models.COMPLETED_PATH,
         card_text=card_text,
         browser_run_outcome_response_body=browser_run_outcome_response_body,
+        expected_completed_count=expected_completed_count,
     )
 
 
@@ -1793,6 +1830,52 @@ def assert_final_replay_rebuilds(operator_runtime: OperatorRuntime) -> None:
         )
 
 
+def run_completed_workflow(
+    operator_runtime: OperatorRuntime,
+    dashboard: DashboardProcess,
+    *,
+    namekey: NameKey,
+    expected_completed_count: int,
+) -> tuple[str, str, UUID]:
+    checkpoint = run_workflow_to_gone_pull(operator_runtime, dashboard, namekey)
+    card_text, browser_run_outcome_response_body = capture_completed_researcher_card(
+        dashboard,
+        operator_runtime,
+        namekey=namekey,
+        queued_at_monotonic=checkpoint.queued_at_monotonic,
+        expected_completed_count=expected_completed_count,
+    )
+    emit_researcher_card(card_text)
+    completed_outcomes = tuple(
+        record for record in authoritative_records(operator_runtime.replay_log_path)
+        if (record.method, record.path, record.response_code) == (
+            HTTP_POST_METHOD, run_outcome_models.COMPLETED_PATH, status.HTTP_200_OK,
+        )
+    )
+    assert len(completed_outcomes) == expected_completed_count
+    completed_outcome = RunOutcomeResponseRecord.from_http_request_log_record(
+        completed_outcomes[-1]
+    )
+    assert AiAugmentBackendStore._parse_name_key_header(
+        backend_api._http_header_value(
+            completed_outcomes[-1].request_headers, NAME_KEY_HEADER,
+        )
+    ) == namekey
+    session_id = completed_outcome.run_outcome_request_record.session_id
+    assert session_id is not None
+    source_key = backend_api._http_header_value(
+        completed_outcome.response_headers, SOURCE_KEY_HEADER,
+    )
+    filename, _ = AiAugmentBackendStore._parse_source_key_header(source_key)
+    _assert_guest_session_archived(operator_runtime, session_id, filename)
+    elapsed_seconds = time.monotonic() - checkpoint.queued_at_monotonic
+    _operator_log(
+        "full end-to-end execution elapsed time from queue submission through "
+        f"final Playwright verification: {elapsed_seconds:.3f}s"
+    )
+    return card_text, browser_run_outcome_response_body, session_id
+
+
 def assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
     operator_runtime: OperatorRuntime,
 ) -> None:
@@ -1801,36 +1884,9 @@ def assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
     namekey = target_namekey(operator_runtime, randomize_target=True)
 
     with running_dashboard(operator_runtime) as dashboard:
-        checkpoint = run_workflow_to_gone_pull(
-            operator_runtime,
-            dashboard,
-            namekey,
+        card_text, browser_run_outcome_response_body, _ = run_completed_workflow(
+            operator_runtime, dashboard, namekey=namekey, expected_completed_count=1,
         )
-        card_text, browser_run_outcome_response_body = capture_completed_researcher_card(
-            dashboard,
-            operator_runtime,
-            namekey=namekey,
-            queued_at_monotonic=checkpoint.queued_at_monotonic,
-        )
-        emit_researcher_card(card_text)
-        completed_outcomes = tuple(
-            record for record in authoritative_records(operator_runtime.replay_log_path)
-            if (record.method, record.path, record.response_code) == (
-                HTTP_POST_METHOD, run_outcome_models.COMPLETED_PATH, status.HTTP_200_OK,
-            )
-        )
-        assert len(completed_outcomes) == 1
-        completed_outcome = RunOutcomeResponseRecord.from_http_request_log_record(
-            completed_outcomes[0]
-        )
-        session_id = completed_outcome.run_outcome_request_record.session_id
-        assert session_id is not None
-        source_key = backend_api._http_header_value(
-            completed_outcome.response_headers, SOURCE_KEY_HEADER,
-        )
-        filename, _ = AiAugmentBackendStore._parse_source_key_header(source_key)
-        _assert_guest_session_archived(operator_runtime, session_id, filename)
-        elapsed_seconds = time.monotonic() - checkpoint.queued_at_monotonic
 
     assert_completed_workflow_artifacts(
         operator_runtime,
@@ -1839,16 +1895,65 @@ def assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
         browser_run_outcome_response_body=browser_run_outcome_response_body,
     )
     assert_final_replay_rebuilds(operator_runtime)
-    _operator_log(
-        "full end-to-end execution elapsed time from queue submission through "
-        f"final Playwright verification: {elapsed_seconds:.3f}s"
-    )
 
 
 @pytest.mark.requires_codex_auth
+@pytest.mark.excluded_from_suites
 def test_completed_dashboard_backend_codex_workflow_renders_researcher_card(
     operator_runtime: OperatorRuntime,
 ) -> None:
     assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
         operator_runtime
     )
+
+
+@pytest.mark.requires_codex_auth
+def test_two_researchers_complete_sequential_dashboard_backend_codex_workflows(
+    operator_runtime: OperatorRuntime,
+) -> None:
+    _assert_deployed_appendwatch_topology(operator_runtime)
+    _operator_log("preparing isolated two-researcher workflow runtime")
+    first_namekey = target_namekey(operator_runtime, randomize_target=True)
+    empty_date_directories_before = _guest_empty_session_date_directories()
+    completed: list[tuple[NameKey, str, str, UUID]] = []
+
+    with running_dashboard(operator_runtime) as dashboard:
+        namekey = first_namekey
+        for expected_completed_count in (1, 2):
+            card_text, response_body, session_id = run_completed_workflow(
+                operator_runtime,
+                dashboard,
+                namekey=namekey,
+                expected_completed_count=expected_completed_count,
+            )
+            completed.append((namekey, card_text, response_body, session_id))
+            assert (
+                _guest_empty_session_date_directories()
+                <= empty_date_directories_before
+            )
+            assert_completed_workflow_artifacts(
+                operator_runtime,
+                namekey=namekey,
+                card_text=card_text,
+                browser_run_outcome_response_body=response_body,
+                expected_completed_count=expected_completed_count,
+            )
+            if expected_completed_count == 1:
+                assert_final_replay_rebuilds(operator_runtime)
+                namekey = target_namekey(
+                    operator_runtime,
+                    randomize_target=True,
+                    exclude_namekey=first_namekey,
+                )
+                assert namekey != first_namekey
+
+    assert len({item[3] for item in completed}) == 2
+    for namekey, card_text, response_body, _session_id in completed:
+        assert_completed_workflow_artifacts(
+            operator_runtime,
+            namekey=namekey,
+            card_text=card_text,
+            browser_run_outcome_response_body=response_body,
+            expected_completed_count=2,
+        )
+    assert_final_replay_rebuilds(operator_runtime)

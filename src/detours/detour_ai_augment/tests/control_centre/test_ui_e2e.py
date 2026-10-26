@@ -268,6 +268,7 @@ def test_completed_grid_row_uses_real_query_ipc(
             operator.capture_completed_researcher_card(
                 dashboard, runtime, namekey=STARTUP_NAMEKEY,
                 queued_at_monotonic=time.monotonic(),
+                expected_completed_count=1,
             )
         )
         (files.config.parent / "card-rendered.txt").write_text(
