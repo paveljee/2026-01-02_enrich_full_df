@@ -692,306 +692,9 @@ print(f"Exported {input_path!r} to {str(output_path)!r}")
 """
 cwd = "."
 
-[tool.pixi.feature.detour-ai-augment.tasks.table-markdown]
-description = '''Usage: pixi run -e detour-ai-augment table-markdown '{"ktp.first_name":"Antoine","ktp.last_name":"Guisan"}' (uses current Dashboard storage)'''
-cmd = """
-python -c '
-import json
-import os
-import re
-import sys
-from collections.abc import Callable
-from datetime import datetime
-from enum import StrEnum
-from pathlib import Path
-from zoneinfo import ZoneInfo
-
-from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
-from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
-    AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
-    CARD_EXCLUDED_COLUMNS,
-    DOCX_TO_AI_AUGMENT_COLUMNS,
-    KTP_AI_AUGMENT_COMMENTS_COL,
-    KTP_AI_AUGMENT_FOOTNOTES_COL,
-)
-from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
-    Locale,
-)
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
-    ai_augment_dashboard_storage,
-)
-from src.detours.detour_ai_augment.src.control_centre.dashboard.ui import (
-    FOOTNOTE_MARKER,
-    martin_serialize_standardized_cell,
-)
-from src.helpers.cards import build_cards
-from src.helpers.data_models import NameKey, OuterDict
-from src.helpers.vars import CARD_INTRODUCTION, KTP_FILENAME_COL
-
-
-class TableColumn(StrEnum):
-    RESEARCHER_VARIABLE = "researcher_variable"
-    MANUAL_TABLE_1_VALUE = "manual_table_1_value"
-    AI_AUGMENT_VALUE = "ai_augment_value"
-    AI_AUGMENT_FOOTNOTES = "ai_augment_footnotes"
-
-
-MISSING_MANUAL_EXTRACTION = "[MISSING MANUAL EXTRACTION]"
-MISSING_AI_FOOTNOTES = "[MISSING AI FOOTNOTES]"
-AI_WEB_SEARCH_EXCERPTS_PREFIX = "AI web search excerpts:\\n\\n"
-EXTRACTED_LABEL_TEMPLATE = "**{names} extracted**:"
-
-
-NARRATIVE_VALUE_DEF: Callable[[str], str] = lambda value: (
-    value.removeprefix(codex_parse.AI_GENERATED_TEXT_PREFIX).removeprefix(" ")
-)
-
-
-def pipe_table(rows):
-    def code_span(line):
-        if not line:
-            return ""
-        longest = max((len(match.group()) for match in re.finditer(r"`+", line)), default=0)
-        ticks = "`" * (longest + 1)
-        return ticks + line + ticks
-
-    def cell_markdown(cell):
-        parts = re.split(r"```\\n(.*?)\\n```", str(cell), flags=re.DOTALL)
-        rendered = []
-        for index, part in enumerate(parts):
-            if index % 2:
-                rendered.append("<br>".join(
-                    code_span(line)
-                    for line in part.split("\\n")
-                ))
-            else:
-                rendered.append(
-                    part.replace(r"\\|", "|").replace("|", r"\\|")
-                    .replace(r"\\_", "_").replace("_", r"\\_")
-                    .replace("\\n", "<br>")
-                )
-        return "".join(rendered)
-
-    return "\\n".join(
-        ["| " + " | ".join(cell_markdown(cell) for cell in rows[0]) + " |",
-         "| " + " | ".join("---" for _ in rows[0]) + " |",
-         *("| " + " | ".join(cell_markdown(cell) for cell in row) + " |"
-           for row in rows[1:])]
-    )
-
-
-namekey = NameKey.from_json_key(sys.argv[1])
-snapshot = ai_augment_dashboard_storage.AiAugmentDashboardStorage().load_query_snapshot()
-if snapshot is None:
-    raise ValueError("Dashboard has no query snapshot")
-researcher = snapshot.researchers_by_namekey[namekey.to_json_key()]
-if not researcher.codex_innerdicts:
-    raise ValueError("Researcher needs a completed AI run")
-
-docx_columns = {ai_column: docx_column
-                for docx_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS}
-table_columns = {column for pair in AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS
-                 for column in pair}
-first_narrative = AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS[0][0]
-tables = {}
-codex_innerdicts = []
-for index, item in enumerate(researcher.codex_innerdicts):
-    values = item.innerdict.data
-    if first_narrative not in values:
-        raise ValueError(f"AI section lacks {first_narrative}")
-    rows = [list(TableColumn)]
-    for ai_column, standardized_column in (
-        *AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
-        (KTP_AI_AUGMENT_COMMENTS_COL, None),
-    ):
-        ground_truth = []
-        if standardized_column is None:
-            ai_value = str(values[ai_column])
-        else:
-            standardized = martin_serialize_standardized_cell(
-                str(values[standardized_column])
-            )
-            narrative = NARRATIVE_VALUE_DEF(str(values[ai_column]))
-            ai_value = standardized + "\\n\\n" + narrative
-            multiline = standardized.startswith(
-                codex_parse.AI_GENERATED_TEXT_PREFIX + chr(10) * 2
-            )
-            docx_column = docx_columns[ai_column]
-            for docx in researcher.docx_innerdicts:
-                filename = str(docx.data[KTP_FILENAME_COL])
-                extractors = tuple(dict.fromkeys(re.findall(
-                    r"(?<![A-Za-z])(?:DR|HI)(?![A-Za-z])", filename
-                )))
-                if not extractors:
-                    raise ValueError(f"DOCX filename has no DR/HI extractor: {filename}")
-                names_by_initial = {}
-                for name in re.findall(
-                    r"\\*\\*([^*]+)\\*\\*\\s+commented on\\b",
-                    str(docx.data.get(docx_columns[KTP_AI_AUGMENT_COMMENTS_COL]) or ""),
-                ):
-                    parts = name.split()
-                    if len(parts) >= 2:
-                        initials = (parts[0][0] + parts[-1][0]).upper()
-                        names_by_initial.setdefault(initials, set()).add(name)
-                labels = [
-                    next(iter(names_by_initial[extractor]))
-                    if len(names_by_initial.get(extractor, ())) == 1 else extractor
-                    for extractor in extractors
-                ]
-                prefix = EXTRACTED_LABEL_TEMPLATE.format(names=", ".join(labels))
-                value = docx.data.get(docx_column)
-                if value is None or not str(value).strip():
-                    ground_truth.append(MISSING_MANUAL_EXTRACTION)
-                elif multiline:
-                    ground_truth.append(
-                        f"{prefix}{chr(10) * 2}```{chr(10)}{value}{chr(10)}```"
-                    )
-                else:
-                    ground_truth.append(
-                        f"{prefix} `{json.dumps(str(value), ensure_ascii=False)}`"
-                    )
-        match = FOOTNOTE_MARKER.search(str(values[ai_column]))
-        prefixes = (
-            tuple(f"{number}. " for number in match.group("numbers").split(","))
-            if match else ()
-        )
-        footnotes = "\\n\\n".join(
-            line for line in str(values[KTP_AI_AUGMENT_FOOTNOTES_COL]).splitlines()
-            if line.startswith(prefixes) and prefixes
-        )
-        footnotes = (
-            AI_WEB_SEARCH_EXCERPTS_PREFIX + footnotes
-            if footnotes else MISSING_AI_FOOTNOTES
-        )
-        row = {
-            TableColumn.RESEARCHER_VARIABLE: ai_column,
-            TableColumn.MANUAL_TABLE_1_VALUE: "\\n\\n".join(ground_truth)
-            if ground_truth else MISSING_MANUAL_EXTRACTION,
-            TableColumn.AI_AUGMENT_VALUE: ai_value,
-            TableColumn.AI_AUGMENT_FOOTNOTES: footnotes,
-        }
-        rows.append([row[column] for column in TableColumn])
-    marker = f"table_marker_{index}"
-    data = {}
-    for column, value in values.items():
-        if column == first_narrative:
-            data[marker] = marker
-        if column not in table_columns and column != KTP_AI_AUGMENT_COMMENTS_COL:
-            data[column] = value
-    tables[marker] = pipe_table(rows)
-    codex_innerdicts.append(item.innerdict.model_copy(update={"data": data}))
-
-outer = OuterDict(data={namekey.to_json_key(): [
-    *researcher.xlsx_innerdicts,
-    *researcher.docx_innerdicts,
-    *researcher.ssn_innerdicts,
-    *codex_innerdicts,
-]})
-config_path = Path(os.environ.get("AI_AUGMENT_EVAL_CONFIG", "config_ai_augment.json"))
-config = json.loads(config_path.read_text(encoding="utf-8"))
-intro = CARD_INTRODUCTION.format(
-    datetime.now(ZoneInfo(config["timezone"])).strftime(Locale.CARD_INTRO_DATE_FORMAT)
-)
-filename, markdown = next(iter(build_cards(
-    outer,
-    total_draws=config["total_draws"],
-    intro=intro,
-    excluded_cols=CARD_EXCLUDED_COLUMNS,
-).items()))
-for marker, table in tables.items():
-    rendered_marker = f"**`{marker}`**: {marker}\\n\\n"
-    if markdown.count(rendered_marker) != 1:
-        raise ValueError(f"Expected one AI table position for {marker}")
-    markdown = markdown.replace(rendered_marker, table + "\\n\\n", 1)
-output = Path("tmp") / f"{filename}_table.md"
-output.write_text(markdown, encoding="utf-8", newline="\\n")
-print(output.resolve())
-'
-"""
-cwd = "."
-
-[tool.pixi.feature.detour-ai-augment.tasks.table-docx]
-description = '''Usage: pixi run -e detour-ai-augment table-docx '{"ktp.first_name":"Antoine","ktp.last_name":"Guisan"}' (uses current Dashboard storage)'''
-cmd = """
-python -c '
-import json
-import os
-import subprocess
-import sys
-from enum import StrEnum
-from io import BytesIO
-from pathlib import Path
-
-from docx import Document
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-from docx.shared import Cm
-
-
-class TableColumn(StrEnum):
-    RESEARCHER_VARIABLE = "researcher_variable"
-    MANUAL_TABLE_1_VALUE = "manual_table_1_value"
-    AI_AUGMENT_VALUE = "ai_augment_value"
-    AI_AUGMENT_FOOTNOTES = "ai_augment_footnotes"
-
-
-LINEBREAKS_LUA = "\\n".join((
-    "function RawInline(el)",
-    "  if el.format == [[html]] and",
-    "     el.text:lower():match([[^<br%s*/?>$]]) then",
-    "    return pandoc.LineBreak()",
-    "  end",
-    "end",
-))
-
-
-completed = subprocess.run(
-    ["pixi", "run", "-e", "detour-ai-augment", "table-markdown", sys.argv[1]],
-    check=True,
-    stdout=subprocess.PIPE,
-    text=True,
-)
-markdown_path = Path(completed.stdout.strip())
-config_path = Path(os.environ.get("AI_AUGMENT_EVAL_CONFIG", "config_ai_augment.json"))
-config = json.loads(config_path.read_text(encoding="utf-8"))
-document = Document(BytesIO(subprocess.check_output(
-    ["pandoc", "-f", "markdown", "-t", "docx",
-     "--lua-filter=/dev/stdin",
-     "--reference-doc", str(Path(config["pandoc_reference_docx"])),
-     str(markdown_path)],
-    input=LINEBREAKS_LUA.encode("utf-8"),
-)))
-widths = tuple(Cm(width) for width in (3.3, 4.4, 4.4, 4.4))
-for table in document.tables:
-    if len(table.columns) != 4 or table.cell(0, 0).text != TableColumn.RESEARCHER_VARIABLE:
-        continue
-    table.autofit = False
-    for column, width in zip(table.columns, widths):
-        column.width = width
-    for row in table.rows:
-        for cell, width in zip(row.cells, widths):
-            cell.width = width
-    borders = table._tbl.tblPr.find(qn("w:tblBorders"))
-    if borders is None:
-        borders = OxmlElement("w:tblBorders")
-        table._tbl.tblPr.append(borders)
-    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
-        element = borders.find(qn(f"w:{edge}"))
-        if element is None:
-            element = OxmlElement(f"w:{edge}")
-            borders.append(element)
-        for attribute, value in (("val", "single"), ("sz", "8"), ("color", "000000")):
-            element.set(qn(f"w:{attribute}"), value)
-output = markdown_path.with_suffix(".docx")
-document.save(output)
-print(output.resolve())
-'
-"""
-cwd = "."
-
-[tool.pixi.feature.detour-ai-augment.tasks.test-table-docx]
-description = '''Usage: pixi run -e detour-ai-augment test-table-docx tmp/test.ujpfoijf '{"ktp.first_name":"Antoine","ktp.last_name":"Guisan"}' (uses copied retained NiceGUI storage)'''
-cmd = """
+[tool.pixi.feature.detour-ai-augment.tasks.preview-publish]
+description = '''Usage: pixi run -e detour-ai-augment preview-publish tmp/test.ujpfoijf '{"ktp.first_name":"Antoine","ktp.last_name":"Guisan"}' (uses copied retained NiceGUI storage)'''
+cmd = '''
 python -c '
 import shutil
 import subprocess
@@ -1002,19 +705,80 @@ from pathlib import Path
 from src.detours.detour_ai_augment.protected.tests.pytest_plugin import nicegui_test_environment
 
 run_dir = Path(sys.argv[1]).resolve()
-with tempfile.TemporaryDirectory(prefix="test-table-docx-", dir="tmp") as directory:
+with tempfile.TemporaryDirectory(prefix="preview-publish-", dir="tmp") as directory:
     storage_path = Path(directory) / "nicegui"
     storage_path.mkdir()
     shutil.copy2(run_dir / "nicegui" / "storage-general.json", storage_path)
-    environment = nicegui_test_environment(storage_path)
-    environment["AI_AUGMENT_EVAL_CONFIG"] = str(run_dir / "config.operator.json")
+    script = r"""
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import CARD_EXCLUDED_COLUMNS
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
+    Locale,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
+    selected_card_outer_dict,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.ai_augment_dashboard_storage import (  # noqa: E501
+    AiAugmentDashboardStorage,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.render import (
+    ai_augment_field_renderer,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.ui import _ResearcherCardView
+from src.helpers.cards import build_cards
+from src.helpers.data_models import NameKey
+from src.helpers.vars import CARD_INTRODUCTION
+
+SNAPSHOT_MISSING_ERROR = "Dashboard has no query snapshot"
+COMPLETED_AI_RUN_REQUIRED_ERROR = "Researcher needs a completed AI run"
+TASK_SUFFIX = "_preview"
+
+namekey = NameKey.from_json_key(sys.argv[1])
+config = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+snapshot = AiAugmentDashboardStorage().load_query_snapshot()
+if snapshot is None:
+    raise ValueError(SNAPSHOT_MISSING_ERROR)
+researcher = snapshot.researchers_by_namekey[namekey.to_json_key()]
+if not researcher.codex_innerdicts:
+    raise ValueError(COMPLETED_AI_RUN_REQUIRED_ERROR)
+
+cards = build_cards(
+    selected_card_outer_dict(researcher),
+    total_draws=config["total_draws"],
+    intro=CARD_INTRODUCTION.format(
+        datetime.now(ZoneInfo(config["timezone"])).strftime(
+            Locale.CARD_INTRO_DATE_FORMAT
+        )
+    ),
+    excluded_cols=CARD_EXCLUDED_COLUMNS,
+    field_renderer=ai_augment_field_renderer(researcher),
+)
+if len(cards) != 1:
+    raise RuntimeError(Locale.BACKEND_CARD_MISSING)
+card = _ResearcherCardView(
+    researcher=researcher,
+    card_markdown=next(iter(cards.values())),
+)
+
+markdown_path = Path("tmp") / f"{card.filename_stem}{TASK_SUFFIX}.md"
+docx_path = markdown_path.with_suffix(".docx")
+markdown_path.write_text(card.card_markdown, encoding="utf-8", newline="\n")
+docx_path.write_bytes(card.render_docx(Path(config["pandoc_reference_docx"])))
+print(markdown_path.resolve())
+print(docx_path.resolve())
+"""
     subprocess.run(
-        ["pixi", "run", "-e", "detour-ai-augment", "table-docx", sys.argv[2]],
+        [sys.executable, "-c", script, sys.argv[2], str(run_dir / "config.operator.json")],
         check=True,
-        env=environment,
+        env=nicegui_test_environment(storage_path),
     )
 '
-"""
+'''
 cwd = "."
 
 # Set OPENALEX_API_KEY if you need it:

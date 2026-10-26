@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import shutil
+from io import BytesIO
 from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
+from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 from src.helpers import cards as cards_module
 from src.helpers.cards import (
@@ -116,6 +120,103 @@ def test_build_cards_includes_intro_and_fun_fact() -> None:
     ) in card
     assert "Early work" in card
     assert "https://openalex.org/W1568216332" in card
+
+
+def test_build_cards_field_renderer_can_replace_missing_values_and_omit_fields() -> None:
+    name_key = NameKey(first_name="Ada", last_name="Lovelace")
+    inner = InnerDict.from_mapping(
+        {
+            DRAW_LABEL: 1,
+            "table_position": None,
+            "standalone_value": "must be moved into the table",
+            "other_value": "still visible",
+            "excluded": "must stay excluded",
+        },
+        DummyProcedure(),
+    )
+    outer = OuterDict(data={name_key.to_json_key(): [inner]})
+    seen: list[str] = []
+
+    def render_field(candidate: InnerDict, column: str) -> str | None:
+        assert candidate is inner
+        seen.append(column)
+        if column == "table_position":
+            return "| field | value |\n| --- | --- |\n| row | replacement |\n\n"
+        if column == "standalone_value":
+            return ""
+        return None
+
+    card = next(iter(build_cards(
+        outer,
+        total_draws=1,
+        intro="Introduction",
+        excluded_cols={"excluded"},
+        field_renderer=render_field,
+    ).values()))
+
+    assert "| row | replacement |" in card
+    assert "standalone_value" not in card
+    assert "must be moved into the table" not in card
+    assert "**`other_value`**: still visible" in card
+    assert "excluded" not in card
+    assert "excluded" not in seen
+    assert "table_position" in seen
+
+
+def test_render_docx_bytes_preserves_table_linebreaks_and_adds_plain_borders(
+    tmp_path: Path,
+) -> None:
+    if shutil.which("pandoc") is None:
+        pytest.skip("pandoc not available")
+
+    reference_docx = tmp_path / "reference.docx"
+    Document().save(str(reference_docx))
+    rendered = render_docx_bytes(
+        "| field | value |\n| --- | --- |\n| row | first<br>second |\n",
+        reference_docx,
+    )
+    document = Document(BytesIO(rendered))
+    assert len(document.tables) == 1
+    table = document.tables[0]
+    assert table.cell(1, 1).text == "first\nsecond"
+    borders = table._tbl.tblPr.find(qn("w:tblBorders"))
+    assert borders is not None
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        border = borders.find(qn(f"w:{edge}"))
+        assert border is not None
+        assert border.get(qn("w:val")) == "single"
+        assert border.get(qn("w:sz")) == "4"
+        assert border.get(qn("w:color")) == "000000"
+
+
+def test_plain_table_borders_leave_existing_borders_and_other_docx_parts_unchanged() -> None:
+    document = Document()
+    existing = document.add_table(rows=1, cols=1)
+    borders = OxmlElement("w:tblBorders")
+    top = OxmlElement("w:top")
+    top.set(qn("w:val"), "double")
+    top.set(qn("w:color"), "FF0000")
+    borders.append(top)
+    existing._tbl.tblPr.append(borders)
+    document.add_table(rows=1, cols=1)
+    source = BytesIO()
+    document.save(source)
+
+    revised = cards_module._add_plain_table_borders(source.getvalue())
+    assert cards_module._add_plain_table_borders(revised) == revised
+    with ZipFile(BytesIO(source.getvalue())) as before, ZipFile(BytesIO(revised)) as after:
+        assert before.namelist() == after.namelist()
+        for part in before.namelist():
+            if part != "word/document.xml":
+                assert before.read(part) == after.read(part)
+
+    tables = Document(BytesIO(revised)).tables
+    preserved = tables[0]._tbl.tblPr.find(qn("w:tblBorders"))
+    assert preserved is not None
+    assert len(preserved) == 1
+    assert preserved[0].get(qn("w:val")) == "double"
+    assert preserved[0].get(qn("w:color")) == "FF0000"
+    assert tables[1]._tbl.tblPr.find(qn("w:tblBorders")) is not None
 
 
 def test_write_cards_zip_txt(tmp_path: Path) -> None:

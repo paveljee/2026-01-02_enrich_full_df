@@ -201,8 +201,8 @@ def selected_card_outer_dict(
     return OuterDict(data={
         singular_outerdict.namekey.to_json_key(): [
             *singular_outerdict.xlsx_innerdicts,
-            *(item.innerdict for item in singular_outerdict.codex_innerdicts),
             *singular_outerdict.docx_innerdicts,
             *singular_outerdict.ssn_innerdicts,
+            *(item.innerdict for item in singular_outerdict.codex_innerdicts),
         ],
     })

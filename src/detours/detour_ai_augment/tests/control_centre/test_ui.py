@@ -82,8 +82,11 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     HTTP_CONTENT_TYPE_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
+    KTP_AI_AUGMENT_COMMENTS_COL,
+    KTP_AI_AUGMENT_EDUCATION_COL,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
+    KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
     NAME_KEY_HEADER,
@@ -218,9 +221,16 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
     RunOutcomeResponseRecord,
     _RunOutcomeResponseBodyJson,
 )
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.render import (  # noqa: E501
+    martin_serialize_standardized_cell,
+)
 from src.helpers.cards import build_cards
 from src.helpers.data_models import HttpRequestLogRecord, InnerDict, NameKey
-from src.helpers.procedures import DocxMatchProcedure, XlsxMatchProcedure
+from src.helpers.procedures import (
+    DocxMatchProcedure,
+    ParquetMatchProcedure,
+    XlsxMatchProcedure,
+)
 from src.helpers.vars import (
     CARD_INTRODUCTION,
     DRAW_LABEL,
@@ -2318,7 +2328,7 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
 ) -> None:
     run_id = uuid7()
     accepted_commit_request_record_id = uuid7()
-    accepted_value = "Professor Sir Aziz Sheikh OBE"
+    accepted_value = "Professor Jane Doe"
     researcher_var = control_ui.RESEARCHER_VARS[0]
     codex_waiting = asyncio.Event()
     allow_codex_exit = asyncio.Event()
@@ -3294,6 +3304,8 @@ async def test_researcher_card_uses_linked_run_outcome_response_bodies_for_disti
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, inline_controller_io: None,
 ) -> None:
     source = researcher()
+    completed_template, _ = completed_query_researcher(source)
+    complete_ai_values = completed_template.codex_innerdicts[0].innerdict.data
     sessions = (SESSION_ID, uuid7(), uuid7())
     records: list[AgentRuntimeAttempt] = []
     committed: list[CodexInnerDict] = []
@@ -3311,6 +3323,7 @@ async def test_researcher_card_uses_linked_run_outcome_response_bodies_for_disti
             )
             committed.append(CodexInnerDict(
                 innerdict=InnerDict.from_mapping({
+                    **complete_ai_values,
                     KTP_NAMEKEY_COL: NAMEKEY.to_json_key(),
                     KTP_FILENAME_COL: filename,
                     KTP_FRAGMENT_COL: fragment,
@@ -3374,6 +3387,13 @@ async def test_researcher_card_uses_linked_run_outcome_response_bodies_for_disti
             assert isinstance(record, AgentRuntimeAttempt)
             assert str(outcome._codex_session_record().session_id) in card.card_markdown
     count = len(committed)
+    if count:
+        comments_rows = [
+            line for line in card.card_markdown.splitlines()
+            if line.startswith("| ktp.ai\\_augment\\_comments |")
+        ]
+        assert len(comments_rows) == count
+        assert all("None" not in row for row in comments_rows)
     metadata_heading = f"**`{KTP_AI_AUGMENT_SESSION_METADATA_COL}`**"
     assert card.card_markdown.count(metadata_heading) == count
     outcome_heading = f"**`{KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL}`**"
@@ -3410,6 +3430,105 @@ def test_card_without_commits_matches_shared_renderer_unchanged(tmp_path: Path) 
     assert "ktp.ai_augment_validation_record_id" not in markdown
     assert "ktp.ai_augment_run_outcome_record_id" not in markdown
     assert snapshot.model_dump_json() == before
+
+
+def test_completed_card_renders_ordered_ai_table_with_redacted_footnotes(
+    tmp_path: Path,
+) -> None:
+    source = researcher()
+    race_column = KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
+    education_column = KTP_AI_AUGMENT_EDUCATION_COL
+    education_standardized_column = dict(
+        AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS
+    )[education_column]
+    completed, _ = completed_query_researcher(source, ai_field_values={
+        race_column: render_footnoted_submission_value(
+            "Sensitive narrative", (5,), column=race_column,
+        ),
+        KTP_AI_AUGMENT_FOOTNOTES_COL: "5. Confirmed excerpt from the web source",
+        education_standardized_column: render_standardized_submission_value(
+            json.dumps(["Bachelor", "Master"])
+        ),
+        KTP_AI_AUGMENT_COMMENTS_COL: (
+            '- **AI-generated text**: "Review note" (2026-10-26T00:00:00.000Z)'
+        ),
+    })
+    author_docx_column = DOCX_TO_AI_AUGMENT_COLUMNS[0][0]
+    education_docx_column = next(
+        docx_column for docx_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS
+        if ai_column == education_column
+    )
+    comments_docx_column = DOCX_TO_AI_AUGMENT_COLUMNS[-1][0]
+    docx_innerdicts = (
+        InnerDict.from_mapping({
+            KTP_NAMEKEY_COL: NAMEKEY.to_json_key(),
+            KTP_FILENAME_COL: "manual_DR.docx",
+            author_docx_column: "First manual author",
+            education_docx_column: "Manual degree\nInstitution",
+            comments_docx_column: "**Dwayne Robinson** commented on the record.",
+        }, DocxMatchProcedure()),
+        InnerDict.from_mapping({
+            KTP_NAMEKEY_COL: NAMEKEY.to_json_key(),
+            KTP_FILENAME_COL: "manual_HI.docx",
+            author_docx_column: "Second manual author",
+            comments_docx_column: "**Hermione Isildur** commented on the record.",
+        }, DocxMatchProcedure()),
+    )
+    ssn_innerdict = InnerDict.from_mapping({
+        KTP_NAMEKEY_COL: NAMEKEY.to_json_key(),
+        KTP_FILENAME_COL: "source.parquet",
+    }, ParquetMatchProcedure())
+    completed = completed.model_copy(update={
+        "docx_innerdicts": docx_innerdicts,
+        "ssn_innerdicts": (ssn_innerdict,),
+    })
+    before = completed.model_dump_json()
+    client = control_ui._BackendDatabaseClient(
+        socket_path=tmp_path / "absent.sock",
+        pipeline_config=configured_pipeline_config(),
+    )
+
+    markdown = client.card(completed)
+
+    rows = [line for line in markdown.splitlines() if line.startswith("| ")]
+    assert len(rows) == len(AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS) + 3
+    assert rows[0] == (
+        "| researcher\\_variable | manual\\_table\\_1\\_value | "
+        "ai\\_augment\\_value | ai\\_augment\\_footnotes |"
+    )
+    assert (
+        markdown.index("manual_DR.docx")
+        < markdown.index("manual_HI.docx")
+        < markdown.index("source.parquet")
+        < markdown.index(rows[0])
+    )
+    author_column = AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS[0][0]
+    author_row = next(row for row in rows if author_column.replace("_", "\\_") in row)
+    assert "Dwayne Robinson extracted" in author_row
+    assert "Hermione Isildur extracted" in author_row
+    assert author_row.index("First manual author") < author_row.index("Second manual author")
+    race_row = next(row for row in rows if race_column.replace("_", "\\_") in row)
+    assert "[REDACTED]^5^" in race_row
+    assert "[MISSING MANUAL EXTRACTION]" in race_row
+    assert "Sensitive narrative" not in markdown
+    assert "AI web search excerpts:" in race_row
+    assert "5. Confirmed excerpt from the web source" in race_row
+    assert "[MISSING AI FOOTNOTES]" not in race_row
+    assert f"**`{race_column}`**:" not in markdown
+    education_row = next(
+        row for row in rows if education_column.replace("_", "\\_") in row
+    )
+    assert "`Bachelor`<br>`Master`" in education_row
+    assert "`Manual degree`<br>`Institution`" in education_row
+    comments_row = next(
+        row for row in rows
+        if KTP_AI_AUGMENT_COMMENTS_COL.replace("_", "\\_") in row
+    )
+    assert "Review note" in comments_row
+    assert "[MISSING AI FOOTNOTES]" in comments_row
+    assert markdown.index(f"**`{KTP_AI_AUGMENT_SESSION_METADATA_COL}`**") < markdown.index(rows[0])
+    assert markdown.index(rows[-1]) < markdown.index(f"**`{KTP_AI_AUGMENT_FOOTNOTES_COL}`**")
+    assert completed.model_dump_json() == before
 
 
 @pytest.mark.anyio
@@ -3860,7 +3979,7 @@ def test_martin_standardized_serializer_formats_fixture_and_preserves_single_val
             value, ensure_ascii=False, separators=COMPACT_JSON_SEPARATORS,
         ))
 
-    assert control_ui.martin_serialize_standardized_cell(cell("gender")) == cell("gender")
+    assert martin_serialize_standardized_cell(cell("gender")) == cell("gender")
     age = submission.age_first_publication.standardized_value
     assert isinstance(age, AgeFromBirth)
     age_json = json.dumps(
@@ -3868,20 +3987,20 @@ def test_martin_standardized_serializer_formats_fixture_and_preserves_single_val
         ensure_ascii=False,
         separators=COMPACT_JSON_SEPARATORS,
     )
-    assert control_ui.martin_serialize_standardized_cell(cell("age_first_publication")) == (
+    assert martin_serialize_standardized_cell(cell("age_first_publication")) == (
         f"{AI_GENERATED_TEXT_PREFIX}\n\n```\n"
         f"{age_json}\n"
         f"reported, {age.birth.reported}, {age.birth.age_numeral}\n"
         "```"
     )
     multiline_scalar = render_standardized_submission_value(json.dumps("line one\nline two"))
-    assert control_ui.martin_serialize_standardized_cell(multiline_scalar) == multiline_scalar
-    assert control_ui.martin_serialize_standardized_cell(
+    assert martin_serialize_standardized_cell(multiline_scalar) == multiline_scalar
+    assert martin_serialize_standardized_cell(
         cell("race_ethnicity_language_culture")
     ) == (
         f"{AI_GENERATED_TEXT_PREFIX}\n\n```\nNA\nNA\neng, cmn\nNA\n```"
     )
-    assert control_ui.martin_serialize_standardized_cell(cell("education")) == (
+    assert martin_serialize_standardized_cell(cell("education")) == (
         f"{AI_GENERATED_TEXT_PREFIX}\n\n```\n"
         "B.A. Physics\n6\nPrinceton University, https://openalex.org/I20089843, "
         "https://ror.org/00hx57361\n1999\n\n"
@@ -3890,13 +4009,13 @@ def test_martin_standardized_serializer_formats_fixture_and_preserves_single_val
         "Ph.D. Electrical Engineering\n8\nCalifornia Institute of Technology, "
         "https://openalex.org/I122411786, https://ror.org/05dxps055\n2005\n```"
     )
-    assert control_ui.martin_serialize_standardized_cell(cell("links")) == (
+    assert martin_serialize_standardized_cell(cell("links")) == (
         f"{AI_GENERATED_TEXT_PREFIX}\n\n```\n"
         "https://profiles.stanford.edu/fei-fei-li\nfalse\n\n"
         "https://openalex.org/A5100450462\nfalse\n\n"
         "https://ai-4-all.org/our-people/fei-fei-li/\nfalse\n```"
     )
-    assert control_ui.martin_serialize_standardized_cell(cell("social_capital")) == (
+    assert martin_serialize_standardized_cell(cell("social_capital")) == (
         f"{AI_GENERATED_TEXT_PREFIX}\n\n```\n"
         "Founding Co-Director, Stanford HAI\nCo-founder and Chair, AI4ALL\n"
         "Member, National Academy of Engineering\n"
@@ -3908,10 +4027,10 @@ def test_martin_standardized_serializer_formats_fixture_and_preserves_single_val
     deeper = render_standardized_submission_value(json.dumps({
         "first": {"nested": {"value": "NA"}}, "second": "NR",
     }))
-    assert control_ui.martin_serialize_standardized_cell(deeper) == (
+    assert martin_serialize_standardized_cell(deeper) == (
         f'{AI_GENERATED_TEXT_PREFIX}\n\n```\n{{"nested":{{"value":"NA"}}}}\nNR\n```'
     )
-    assert control_ui.martin_serialize_standardized_cell("unrecognized cell") == (
+    assert martin_serialize_standardized_cell("unrecognized cell") == (
         "unrecognized cell"
     )
 

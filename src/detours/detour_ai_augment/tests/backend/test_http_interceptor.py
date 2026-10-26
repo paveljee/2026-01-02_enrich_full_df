@@ -1271,7 +1271,7 @@ def test_outcome_materializes_persisted_ids_identically_live_and_replay(
             assert (
                 api.selected_card_outer_dict(singular_outerdict).get_inner_by_key(
                     singular_outerdict.namekey.to_json_key()
-                )[len(singular_outerdict.xlsx_innerdicts)]
+                )[-1]
                 is innerdict.innerdict
             )
             run_outcome_json = store._execute(

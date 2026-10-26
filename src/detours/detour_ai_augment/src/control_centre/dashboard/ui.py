@@ -7,7 +7,6 @@ import http.client
 import json
 import logging
 import os
-import re
 import shlex
 import signal
 import socket
@@ -29,9 +28,6 @@ from fastapi import status
 from nicegui import app, ui
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
-from src.detours.detour_ai_augment.protected.src.backend.helpers.codex_parse import (  # noqa: E501
-    AI_GENERATED_TEXT_PREFIX,
-)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
@@ -49,7 +45,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     CARD_EXCLUDED_COLUMNS,
     CODEX_OUTPUT_SCHEMA,
     CODEX_SESSIONS_ROOT_ENV_NAME,
-    COMPACT_JSON_SEPARATORS,
     DASHBOARD_IPC_HOST,
     DASHBOARD_QUERY_PATH,
     DASHBOARD_SOCKET_PATH,
@@ -133,7 +128,6 @@ from src.detours.detour_ai_augment.protected.src.shared import (
 )
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.cards import (
-    MARKDOWN_CODE_DELIMITER,
     build_cards,
     card_filename,
     render_docx_bytes,
@@ -171,6 +165,11 @@ from .helpers.data_models.run_outcome_event import (
     RunOutcomeResponseRecord,
     _request_uuid,
 )
+from .helpers.render import (
+    FOOTNOTE_MARKER,
+    ai_augment_field_renderer,
+    martin_serialize_standardized_cell,
+)
 
 type _Researcher = AiAugmentSingularOuterDict
 
@@ -206,7 +205,6 @@ BACKEND_PORT: Final = SERVER_PORT
 
 LIMA_APPENDWATCH_REPORT_PARAM: Final = APPENDWATCH_REPORT_ENV_NAME
 
-FOOTNOTE_MARKER = re.compile(r"\^(?P<numbers>[0-9]+(?:,[0-9]+)*)\^")
 UI_REFRESH_SECONDS: Final = 1
 PROBE_TIMEOUT_SECONDS: Final = 3
 SSH_PROBE_MARKER: Final = b"ai-augment-probe"
@@ -1102,9 +1100,8 @@ class _BackendDatabaseClient:
             connection.close()
 
     def card(self, researcher: _Researcher) -> str:
-        selected = selected_card_outer_dict(researcher)
         cards = build_cards(
-            selected,
+            selected_card_outer_dict(researcher),
             total_draws=self._pipeline_config.total_draws,
             intro=CARD_INTRODUCTION.format(
                 datetime.now(ZoneInfo(self._pipeline_config.timezone)).strftime(
@@ -1112,11 +1109,11 @@ class _BackendDatabaseClient:
                 )
             ),
             excluded_cols=CARD_EXCLUDED_COLUMNS,
+            field_renderer=ai_augment_field_renderer(researcher),
         )
         if len(cards) != 1:
             raise RuntimeError(Locale.BACKEND_CARD_MISSING)
-        markdown = next(iter(cards.values()))
-        return markdown
+        return next(iter(cards.values()))
 
 
 # =============================================================================
@@ -3917,39 +3914,6 @@ def spreadsheet_completed(services: _ApplicationServices, *, martin: bool = Fals
         f"[1/1] Written {destination}: {destination.stat().st_size} bytes",
     )
     logger.info(Locale.PUBLISH_WRITTEN_LOG, 1, 1, destination)
-
-
-def martin_serialize_standardized_cell(cell: str) -> str:
-    opening = f"{AI_GENERATED_TEXT_PREFIX} {MARKDOWN_CODE_DELIMITER}"
-    if not (cell.startswith(opening) and cell.endswith(MARKDOWN_CODE_DELIMITER)):
-        return cell
-
-    value = json.loads(cell[len(opening):-len(MARKDOWN_CODE_DELIMITER)])
-
-    def inline(item: object) -> str:
-        if isinstance(item, str):
-            return item
-        if isinstance(item, (dict, list)):
-            parts = item.values() if isinstance(item, dict) else item
-            if all(not isinstance(part, (dict, list)) for part in parts):
-                return ", ".join(inline(part) for part in parts)
-        return json.dumps(item, ensure_ascii=False, separators=COMPACT_JSON_SEPARATORS)
-
-    def block(item: object) -> str:
-        return (
-            "\n".join(inline(part) for part in item.values())
-            if isinstance(item, dict) else inline(item)
-        )
-
-    if isinstance(value, list):
-        separator = "\n\n" if all(isinstance(item, dict) for item in value) else "\n"
-        body = separator.join(block(item) for item in value)
-    else:
-        body = block(value)
-    if not isinstance(value, (dict, list)) or "\n" not in body:
-        return cell
-    fence = MARKDOWN_CODE_DELIMITER * 3
-    return f"{AI_GENERATED_TEXT_PREFIX}\n\n{fence}\n{body}\n{fence}"
 
 
 async def publish_and_shutdown() -> None:
