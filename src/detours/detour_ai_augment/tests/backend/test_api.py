@@ -3441,11 +3441,11 @@ def test_initial_submission_redacts_selected_narrative_without_standardized_valu
     assert initial.race_ethnicity_language_culture.value not in card
 
 
-def test_report_redaction_omits_ai_prefix_and_footnote_marker() -> None:
+def test_report_redaction_omits_ai_prefix_but_keeps_footnote_marker() -> None:
     race_column = KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
     assert codex_parse.render_footnoted_submission_value(
         "Sensitive narrative", (1, 2), column=race_column,
-    ) == "[REDACTED]"
+    ) == "[REDACTED]^1,2^"
     assert codex_parse.render_footnoted_submission_value(
         "Public narrative", (1, 2), column=KTP_AI_AUGMENT_GENDER_COL,
     ) == '**AI-generated text**: "Public narrative"^1,2^'

@@ -111,11 +111,11 @@ def strip_citation_markup(
 def render_footnoted_submission_value(
     value: str, footnote_numbers: tuple[int, ...], *, column: str
 ) -> str:
-    if (redacted := REDACTED_REPORT_VALUE(column)) is not None:
-        return redacted
     marker = ""
     if footnote_numbers:
         marker = "^" + ",".join(str(number) for number in footnote_numbers) + "^"
+    if (redacted := REDACTED_REPORT_VALUE(column)) is not None:
+        return f"{redacted}{marker}"
     return f'{AI_GENERATED_TEXT_PREFIX} "{value}"{marker}'
 
 
