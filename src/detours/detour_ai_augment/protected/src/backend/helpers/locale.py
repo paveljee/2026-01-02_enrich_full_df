@@ -236,7 +236,7 @@ class Locale:
         "Returns the configured JSON Lines annotation task, Markdown resubmission "
         "instructions, the accepted result, or the current processing state."
     )
-    PULL_RESPONSE_DESCRIPTION: Final = "JSON Lines annotation task or Markdown retry"
+    PULL_RESPONSE_DESCRIPTION: Final = "JSON Lines annotation task or Markdown retry."
     PUSH_SUMMARY: Final = "Submit completed annotations"
     PUSH_DESCRIPTION: Final = (
         "Accepts the submission before asynchronous validation."
