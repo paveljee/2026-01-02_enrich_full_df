@@ -1146,6 +1146,58 @@ cwd = "."
 # """
 # cwd = "."
 #
+# # # tmp/humandiff_diff_helpers.py
+# # import sys, difflib, re
+# # COMMENT_CODE_REGEX = r'[A-Za-z]{1,3}\d+(?:R\d+)?'
+# # def preprocess(text: str) -> str:
+# #     # Remove Markdown comments and R tags
+# #     text = re.sub(r'<!---.*?--->', ' ', text, flags=re.DOTALL)
+# #     text = re.sub(r'`r [a-z]+`', ' ', text, flags=re.IGNORECASE)
+# #     # Preserve comment refs that appear as markdown links, e.g. [LP23](Aim 3) -> [LP23]
+# #     text = re.sub(rf'\[({COMMENT_CODE_REGEX})\]\([^)]+\)', r'[\1]', text)
+# #     # Now safely remove markdown formatting
+# #     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # Bold **text**
+# #     text = re.sub(r'\*(.*?)\*', r'\1', text)      # Italic *text*
+# #     text = re.sub(r'__(.*?)__', r'\1', text)      # Bold __text__
+# #     # Only remove italic underscores that are surrounded by spaces or punctuation (not within words)
+# #     text = re.sub(r'(?<!\w)_([^_]+?)_(?!\w)', r'\1', text)        # Italic _text_
+# #     text = re.sub(r'`(.*?)`', r'\1', text)        # Inline code
+# #     text = re.sub(r'```.*?```', '', text, flags=re.S)  # Code blocks
+# #     text = re.sub(r'#{1,6}\s+', '', text)         # Headers
+# #     text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)  # Links [text](url)
+# #     text = re.sub(r'!\[([^\]]*)\]\([^\)]+\)', r'\1', text)  # Images ![alt](url)
+# #     text = re.sub(r'^>\s+', '', text, flags=re.M)  # Blockquotes
+# #     text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.M)  # Unordered lists
+# #     text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.M)  # Ordered lists
+# #     text = re.sub(r'^\s*\|.*\|.*$', '', text, flags=re.M)  # Table rows
+# #     text = re.sub(r'^\s*[-:|\s]+$', '', text, flags=re.M)  # Table separators
+# #     return text
+# # def format_change(tag: str, old_words: list, new_words: list, i1: int, i2: int, j1: int, j2: int, ctx: int) -> str:
+# #     """Format a single change with context"""
+# #     def escape_special_chars(text):
+# #         # For R markdown, we need to escape characters that could break the inline R code
+# #         # Use double escaping for backslashes since they get processed twice
+# #         return (text.replace('\\', '\\\\\\\\')  # Four backslashes become one
+# #                     .replace('`', "'")          # Replace backticks with single quotes
+# #                     .replace('"', '\\"')        # Escape double quotes
+# #                     .replace('\n', '\\n')       # Escape newlines
+# #                     .replace('\r', '\\r')       # Escape carriage returns
+# #                     .replace('\t', '\\t'))      # Escape tabs
+# #     before = escape_special_chars(' '.join(old_words[max(i1-ctx, 0):i1]))
+# #     after_old = escape_special_chars(' '.join(old_words[i2:min(i2+ctx, len(old_words))]))
+# #     after_new = escape_special_chars(' '.join(new_words[j2:min(j2+ctx, len(new_words))]))
+# #     if tag == 'delete':
+# #         deleted = escape_special_chars(' '.join(old_words[i1:i2]))
+# #         return f"{before} `r red`~~**{deleted}**~~`r span` {after_old}"
+# #     elif tag == 'insert':
+# #         inserted = escape_special_chars(' '.join(new_words[j1:j2]))
+# #         return f"{before} `r highlight`**{inserted}**`r span` {after_new}"
+# #     elif tag == 'replace':
+# #         deleted = escape_special_chars(' '.join(old_words[i1:i2]))
+# #         inserted = escape_special_chars(' '.join(new_words[j1:j2]))
+# #         return f"{before} `r red`~~**{deleted}**~~`r span` → `r highlight`**{inserted}**`r span` {after_new}"
+# #     return ""
+#
 # =================================================
 # End discontinued experimental humandiff renders
 # =================================================
