@@ -700,7 +700,9 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -720,10 +722,6 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.ui import (
     FOOTNOTE_MARKER,
-    GRID_AI_VALUE_FIELD,
-    GRID_FOOTNOTES_FIELD,
-    GRID_STANDARDIZED_VALUE_FIELD,
-    GRID_TABLE_1_VALUE_FIELD,
     martin_serialize_standardized_cell,
 )
 from src.helpers.cards import build_cards
@@ -731,27 +729,55 @@ from src.helpers.data_models import NameKey, OuterDict
 from src.helpers.vars import CARD_INTRODUCTION, KTP_FILENAME_COL
 
 
-def grid_table(rows):
-    lines = [[str(cell).split("\\n") for cell in row] for row in rows]
-    widths = [max(len(line) for row in lines for line in row[column])
-              for column in range(4)]
+class TableColumn(StrEnum):
+    RESEARCHER_VARIABLE = "researcher_variable"
+    MANUAL_TABLE_1_VALUE = "manual_table_1_value"
+    AI_AUGMENT_VALUE = "ai_augment_value"
+    AI_AUGMENT_FOOTNOTES = "ai_augment_footnotes"
 
-    def border(character):
-        return "+" + "+".join(character * (width + 2) for width in widths) + "+"
 
-    def render(row):
-        return "\\n".join(
-            "|" + "|".join(
-                " " + (cell[index] if index < len(cell) else "").ljust(width) + " "
-                for cell, width in zip(row, widths)
-            ) + "|"
-            for index in range(max(len(cell) for cell in row))
-        )
+MISSING_MANUAL_EXTRACTION = "[MISSING MANUAL EXTRACTION]"
+MISSING_AI_FOOTNOTES = "[MISSING AI FOOTNOTES]"
+AI_WEB_SEARCH_EXCERPTS_PREFIX = "AI web search excerpts:\\n\\n"
+EXTRACTED_LABEL_TEMPLATE = "**{names} extracted**:"
 
-    result = [border("-"), render(lines[0]), border("=")]
-    for row in lines[1:]:
-        result.extend((render(row), border("-")))
-    return "\\n".join(result)
+
+NARRATIVE_VALUE_DEF: Callable[[str], str] = lambda value: (
+    value.removeprefix(codex_parse.AI_GENERATED_TEXT_PREFIX).removeprefix(" ")
+)
+
+
+def pipe_table(rows):
+    def code_span(line):
+        if not line:
+            return ""
+        longest = max((len(match.group()) for match in re.finditer(r"`+", line)), default=0)
+        ticks = "`" * (longest + 1)
+        return ticks + line + ticks
+
+    def cell_markdown(cell):
+        parts = re.split(r"```\\n(.*?)\\n```", str(cell), flags=re.DOTALL)
+        rendered = []
+        for index, part in enumerate(parts):
+            if index % 2:
+                rendered.append("<br>".join(
+                    code_span(line)
+                    for line in part.split("\\n")
+                ))
+            else:
+                rendered.append(
+                    part.replace(r"\\|", "|").replace("|", r"\\|")
+                    .replace(r"\\_", "_").replace("_", r"\\_")
+                    .replace("\\n", "<br>")
+                )
+        return "".join(rendered)
+
+    return "\\n".join(
+        ["| " + " | ".join(cell_markdown(cell) for cell in rows[0]) + " |",
+         "| " + " | ".join("---" for _ in rows[0]) + " |",
+         *("| " + " | ".join(cell_markdown(cell) for cell in row) + " |"
+           for row in rows[1:])]
+    )
 
 
 namekey = NameKey.from_json_key(sys.argv[1])
@@ -764,8 +790,8 @@ if not researcher.codex_innerdicts:
 
 docx_columns = {ai_column: docx_column
                 for docx_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS}
-standardized_columns = {standardized_column
-                        for _, standardized_column in AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS}
+table_columns = {column for pair in AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS
+                 for column in pair}
 first_narrative = AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS[0][0]
 tables = {}
 codex_innerdicts = []
@@ -773,50 +799,57 @@ for index, item in enumerate(researcher.codex_innerdicts):
     values = item.innerdict.data
     if first_narrative not in values:
         raise ValueError(f"AI section lacks {first_narrative}")
-    rows = [[GRID_AI_VALUE_FIELD, GRID_STANDARDIZED_VALUE_FIELD,
-             GRID_TABLE_1_VALUE_FIELD, GRID_FOOTNOTES_FIELD]]
-    for ai_column, standardized_column in AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS:
-        standardized = martin_serialize_standardized_cell(
-            str(values[standardized_column])
-        )
-        multiline = standardized.startswith(
-            codex_parse.AI_GENERATED_TEXT_PREFIX + chr(10) * 2
-        )
-        docx_column = docx_columns[ai_column]
+    rows = [list(TableColumn)]
+    for ai_column, standardized_column in (
+        *AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
+        (KTP_AI_AUGMENT_COMMENTS_COL, None),
+    ):
         ground_truth = []
-        for docx in researcher.docx_innerdicts:
-            filename = str(docx.data[KTP_FILENAME_COL])
-            extractors = tuple(dict.fromkeys(re.findall(
-                r"(?<![A-Za-z])(?:DR|HI)(?![A-Za-z])", filename
-            )))
-            if not extractors:
-                raise ValueError(f"DOCX filename has no DR/HI extractor: {filename}")
-            names_by_initial = {}
-            for name in re.findall(
-                r"\\*\\*([^*]+)\\*\\*\\s+commented on\\b",
-                str(docx.data.get(docx_columns[KTP_AI_AUGMENT_COMMENTS_COL]) or ""),
-            ):
-                parts = name.split()
-                if len(parts) >= 2:
-                    initials = (parts[0][0] + parts[-1][0]).upper()
-                    names_by_initial.setdefault(initials, set()).add(name)
-            labels = [
-                next(iter(names_by_initial[extractor]))
-                if len(names_by_initial.get(extractor, ())) == 1 else extractor
-                for extractor in extractors
-            ]
-            prefix = "**" + ", ".join(labels) + " extracted**:"
-            value = docx.data.get(docx_column)
-            if value is None or not str(value).strip():
-                ground_truth.append("[MISSING MANUAL EXTRACTION]")
-            elif multiline:
-                ground_truth.append(
-                    f"{prefix}{chr(10) * 2}```{chr(10)}{value}{chr(10)}```"
-                )
-            else:
-                ground_truth.append(
-                    f"{prefix} `{json.dumps(str(value), ensure_ascii=False)}`"
-                )
+        if standardized_column is None:
+            ai_value = str(values[ai_column])
+        else:
+            standardized = martin_serialize_standardized_cell(
+                str(values[standardized_column])
+            )
+            narrative = NARRATIVE_VALUE_DEF(str(values[ai_column]))
+            ai_value = standardized + "\\n\\n" + narrative
+            multiline = standardized.startswith(
+                codex_parse.AI_GENERATED_TEXT_PREFIX + chr(10) * 2
+            )
+            docx_column = docx_columns[ai_column]
+            for docx in researcher.docx_innerdicts:
+                filename = str(docx.data[KTP_FILENAME_COL])
+                extractors = tuple(dict.fromkeys(re.findall(
+                    r"(?<![A-Za-z])(?:DR|HI)(?![A-Za-z])", filename
+                )))
+                if not extractors:
+                    raise ValueError(f"DOCX filename has no DR/HI extractor: {filename}")
+                names_by_initial = {}
+                for name in re.findall(
+                    r"\\*\\*([^*]+)\\*\\*\\s+commented on\\b",
+                    str(docx.data.get(docx_columns[KTP_AI_AUGMENT_COMMENTS_COL]) or ""),
+                ):
+                    parts = name.split()
+                    if len(parts) >= 2:
+                        initials = (parts[0][0] + parts[-1][0]).upper()
+                        names_by_initial.setdefault(initials, set()).add(name)
+                labels = [
+                    next(iter(names_by_initial[extractor]))
+                    if len(names_by_initial.get(extractor, ())) == 1 else extractor
+                    for extractor in extractors
+                ]
+                prefix = EXTRACTED_LABEL_TEMPLATE.format(names=", ".join(labels))
+                value = docx.data.get(docx_column)
+                if value is None or not str(value).strip():
+                    ground_truth.append(MISSING_MANUAL_EXTRACTION)
+                elif multiline:
+                    ground_truth.append(
+                        f"{prefix}{chr(10) * 2}```{chr(10)}{value}{chr(10)}```"
+                    )
+                else:
+                    ground_truth.append(
+                        f"{prefix} `{json.dumps(str(value), ensure_ascii=False)}`"
+                    )
         match = FOOTNOTE_MARKER.search(str(values[ai_column]))
         prefixes = (
             tuple(f"{number}. " for number in match.group("numbers").split(","))
@@ -827,24 +860,25 @@ for index, item in enumerate(researcher.codex_innerdicts):
             if line.startswith(prefixes) and prefixes
         )
         footnotes = (
-            "AI web search excerpts: " + footnotes
-            if footnotes else "[MISSING AI FOOTNOTES]"
+            AI_WEB_SEARCH_EXCERPTS_PREFIX + footnotes
+            if footnotes else MISSING_AI_FOOTNOTES
         )
-        rows.append([
-            ai_column,
-            standardized,
-            "\\n\\n".join(ground_truth) if ground_truth
-            else "[MISSING MANUAL EXTRACTION]",
-            footnotes,
-        ])
+        row = {
+            TableColumn.RESEARCHER_VARIABLE: ai_column,
+            TableColumn.MANUAL_TABLE_1_VALUE: "\\n\\n".join(ground_truth)
+            if ground_truth else MISSING_MANUAL_EXTRACTION,
+            TableColumn.AI_AUGMENT_VALUE: ai_value,
+            TableColumn.AI_AUGMENT_FOOTNOTES: footnotes,
+        }
+        rows.append([row[column] for column in TableColumn])
     marker = f"table_marker_{index}"
     data = {}
     for column, value in values.items():
         if column == first_narrative:
             data[marker] = marker
-        if column not in standardized_columns:
+        if column not in table_columns and column != KTP_AI_AUGMENT_COMMENTS_COL:
             data[column] = value
-    tables[marker] = grid_table(rows)
+    tables[marker] = pipe_table(rows)
     codex_innerdicts.append(item.innerdict.model_copy(update={"data": data}))
 
 outer = OuterDict(data={namekey.to_json_key(): [
@@ -884,6 +918,7 @@ import json
 import os
 import subprocess
 import sys
+from enum import StrEnum
 from io import BytesIO
 from pathlib import Path
 
@@ -892,10 +927,13 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm
 
-from src.detours.detour_ai_augment.src.control_centre.dashboard.ui import (
-    GRID_AI_VALUE_FIELD,
-)
-from src.helpers.cards import render_docx_bytes
+
+class TableColumn(StrEnum):
+    RESEARCHER_VARIABLE = "researcher_variable"
+    MANUAL_TABLE_1_VALUE = "manual_table_1_value"
+    AI_AUGMENT_VALUE = "ai_augment_value"
+    AI_AUGMENT_FOOTNOTES = "ai_augment_footnotes"
+
 
 completed = subprocess.run(
     ["pixi", "run", "-e", "detour-ai-augment", "table-markdown", sys.argv[1]],
@@ -906,13 +944,18 @@ completed = subprocess.run(
 markdown_path = Path(completed.stdout.strip())
 config_path = Path(os.environ.get("AI_AUGMENT_EVAL_CONFIG", "config_ai_augment.json"))
 config = json.loads(config_path.read_text(encoding="utf-8"))
-document = Document(BytesIO(render_docx_bytes(
-    markdown_path.read_text(encoding="utf-8"),
-    Path(config["pandoc_reference_docx"]),
+html = subprocess.check_output(
+    ["pandoc", "-f", "markdown", "-t", "html"],
+    input=markdown_path.read_bytes(),
+)
+document = Document(BytesIO(subprocess.check_output(
+    ["pandoc", "-f", "html", "-t", "docx",
+     "--reference-doc", str(Path(config["pandoc_reference_docx"]))],
+    input=html,
 )))
 widths = tuple(Cm(width) for width in (3.3, 4.4, 4.4, 4.4))
 for table in document.tables:
-    if len(table.columns) != 4 or table.cell(0, 0).text != GRID_AI_VALUE_FIELD:
+    if len(table.columns) != 4 or table.cell(0, 0).text != TableColumn.RESEARCHER_VARIABLE:
         continue
     table.autofit = False
     for column, width in zip(table.columns, widths):
