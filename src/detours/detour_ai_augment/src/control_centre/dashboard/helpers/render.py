@@ -46,30 +46,47 @@ NARRATIVE_VALUE_DEF: Callable[[str], str] = lambda value: (
 
 
 def martin_serialize_standardized_cell(cell: str) -> str:
+    indent_spaces = 2
     opening = f"{codex_parse.AI_GENERATED_TEXT_PREFIX} {MARKDOWN_CODE_DELIMITER}"
     if not (cell.startswith(opening) and cell.endswith(MARKDOWN_CODE_DELIMITER)):
         return cell
 
     value = json.loads(cell[len(opening):-len(MARKDOWN_CODE_DELIMITER)])
 
+    def flat(item: object) -> bool:
+        if not isinstance(item, (dict, list)):
+            return False
+        parts = item.values() if isinstance(item, dict) else item
+        return all(not isinstance(part, (dict, list)) for part in parts)
+
     def inline(item: object) -> str:
         if isinstance(item, str):
             return item
-        if isinstance(item, (dict, list)):
+        if flat(item):
+            assert isinstance(item, (dict, list))
             parts = item.values() if isinstance(item, dict) else item
-            if all(not isinstance(part, (dict, list)) for part in parts):
-                return ", ".join(inline(part) for part in parts)
+            return ", ".join(inline(part) for part in parts)
         return json.dumps(item, ensure_ascii=False, separators=COMPACT_JSON_SEPARATORS)
 
-    def block(item: object) -> str:
-        return (
-            "\n".join(inline(part) for part in item.values())
-            if isinstance(item, dict) else inline(item)
-        )
+    def block(item: object, indent: int = 0) -> str:
+        if isinstance(item, dict):
+            return "\n".join(
+                block(part, indent + indent_spaces)
+                if isinstance(part, (dict, list)) and not flat(part)
+                else " " * indent + inline(part)
+                for part in item.values()
+            )
+        if isinstance(item, list):
+            return "\n".join(block(part, indent) for part in item)
+        return " " * indent + inline(item)
 
     if isinstance(value, list):
         separator = "\n\n" if all(isinstance(item, dict) for item in value) else "\n"
         body = separator.join(block(item) for item in value)
+    elif isinstance(value, dict) and len(value) == 1 and not flat(
+        sole := next(iter(value.values()))
+    ) and isinstance(sole, dict):
+        body = block(sole)
     else:
         body = block(value)
     if not isinstance(value, (dict, list)) or "\n" not in body:

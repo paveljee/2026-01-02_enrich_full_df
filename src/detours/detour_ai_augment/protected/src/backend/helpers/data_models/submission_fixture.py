@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Final, Generic, Literal, TypeVar
+from typing import Final, Generic, TypeVar
 
 from pydantic import BaseModel, HttpUrl
 from pydantic_extra_types.country import CountryAlpha3
@@ -14,14 +14,13 @@ from ..vars import NOT_AVAILABLE_OR_APPLICABLE_VALUE, NOT_REPORTED_VALUE
 from .pydantic_to_paste import (
     AcademicInstitution,
     AcademicPositionsSubmission,
-    AgeComputation,
     AgeFirstPublicationSubmission,
     AgeFromBirth,
-    AgeFromBirthNumeral,
+    BirthComputation,
     CommentsSubmission,
     ComputedNumeral,
     CurrentAcademicPosition,
-    CurrentAge,
+    DateOfBirth,
     EducationRecord,
     EducationSubmission,
     FieldSubmission,
@@ -280,15 +279,18 @@ L_FEI_FEI_RETRY_FIXTURE.submission.race_ethnicity_language_culture.standardized_
     )
 )
 L_FEI_FEI_RETRY_FIXTURE.submission.gender.standardized_value = "Woman"
+L_FEI_FEI_DOB = DateOfBirth(year=1976, month=NOT_REPORTED_VALUE, day=NOT_REPORTED_VALUE)
 L_FEI_FEI_RETRY_FIXTURE.submission.age_first_publication.standardized_value = AgeFromBirth(
-    age=ComputedNumeral[CurrentAge, AgeComputation[Literal["birth"]]](
-        computed=AgeComputation[Literal["birth"]](
+    age=ComputedNumeral(
+        computed=BirthComputation(
             basis="birth",
+            birth=ReportedNumeral[DateOfBirth](
+                reported="1976", inferred=L_FEI_FEI_DOB
+            ),
             as_of=AGE_EXAMPLE_AS_OF,
         ),
-        age_numeral=AGE_EXAMPLE_AS_OF.year - 1976,
+        inferred=L_FEI_FEI_DOB.infer_age(AGE_EXAMPLE_AS_OF),
     ),
-    birth=ReportedNumeral[AgeFromBirthNumeral](reported="1976", age_numeral=1976),
 )
 L_FEI_FEI_RETRY_FIXTURE.submission.education.standardized_value = [
     EducationRecord.model_construct(

@@ -81,13 +81,20 @@ FIELD_MODEL_CASES = (
         {
             "age": {
                 "provenance": "computed",
-                "computed": {"basis": "birth", "as_of": "2026-10-19"},
-                "age_numeral": 50,
-            },
-            "birth": {
-                "provenance": "reported",
-                "reported": "1976",
-                "age_numeral": 1976,
+                "computed": {
+                    "basis": "birth",
+                    "birth": {
+                        "provenance": "reported",
+                        "reported": "1976",
+                        "inferred": {
+                            "year": 1976,
+                            "month": NOT_REPORTED_VALUE,
+                            "day": NOT_REPORTED_VALUE,
+                        },
+                    },
+                    "as_of": "2026-10-19",
+                },
+                "inferred": {"lower": 49, "upper": 50},
             },
         },
     ),
@@ -234,124 +241,6 @@ def test_place_of_residence_rejects_missing_or_unknown_type(
             FIELD_STANDARDIZED_VALUE_FIELD: standardized_value,
             FIELD_EVIDENCE_FIELD: TEST_EVIDENCE,
         })
-
-
-@pytest.mark.parametrize(
-    (
-        "basis", "counterpart", "reported", "reported_numeral",
-        "as_of", "expected_age", "variant",
-    ),
-    (
-        ("birth", "birth", "1976", 1976, "2026-10-19", 50, schema.AgeFromBirth),
-        (
-            "birth", "birth", "1 Dec 1976", "1976-12-01",
-            "2026-10-19", 49, schema.AgeFromBirth,
-        ),
-        (
-            "first_publication", "first_publication", "2005", 2005,
-            "2026-10-19", 21, schema.AgeFromFirstPublication,
-        ),
-        (
-            "first_publication", "first_publication", "1 Nov 2005", "2005-11-01",
-            "2026-10-19", 20, schema.AgeFromFirstPublication,
-        ),
-    ),
-)
-def test_age_standardized_accepts_reported_basis_and_computed_age(
-    basis: str,
-    counterpart: str,
-    reported: str,
-    reported_numeral: int | str,
-    as_of: str,
-    expected_age: int,
-    variant: type[BaseModel],
-) -> None:
-    payload = {
-        FIELD_VALUE_FIELD: "Plain-text research value.",
-        FIELD_STANDARDIZED_VALUE_FIELD: {
-            "age": {
-                "provenance": "computed",
-                "computed": {"basis": basis, "as_of": as_of},
-                "age_numeral": expected_age,
-            },
-            counterpart: {
-                "provenance": "reported",
-                "reported": reported,
-                "age_numeral": reported_numeral,
-            },
-        },
-        FIELD_EVIDENCE_FIELD: TEST_EVIDENCE,
-    }
-
-    parsed = schema.AgeFirstPublicationSubmission.model_validate_json(json.dumps(payload))
-
-    assert type(parsed.standardized_value) is variant
-    assert schema.AgeFirstPublicationSubmission.model_validate_json(
-        parsed.model_dump_json()
-    ) == parsed
-
-
-@pytest.mark.parametrize(
-    ("age_numeral", "birth_provenance", "age_provenance"),
-    (
-        (49, "reported", "computed"),
-        (50, "computed", "computed"),
-        (50, "reported", "reported"),
-    ),
-)
-def test_age_standardized_rejects_wrong_computation_or_provenance(
-    age_numeral: int,
-    birth_provenance: str,
-    age_provenance: str,
-) -> None:
-    payload = {
-        FIELD_VALUE_FIELD: "Plain-text research value.",
-        FIELD_STANDARDIZED_VALUE_FIELD: {
-            "age": {
-                "provenance": age_provenance,
-                "computed": {"basis": "birth", "as_of": "2026-10-19"},
-                "age_numeral": age_numeral,
-            },
-            "birth": {
-                "provenance": birth_provenance,
-                "reported": "1976",
-                "age_numeral": 1976,
-            },
-        },
-        FIELD_EVIDENCE_FIELD: TEST_EVIDENCE,
-    }
-
-    with pytest.raises(ValidationError):
-        schema.AgeFirstPublicationSubmission.model_validate_json(json.dumps(payload))
-
-
-@pytest.mark.parametrize(
-    ("basis", "counterpart"),
-    (("birth", "first_publication"), ("first_publication", "birth")),
-)
-def test_age_standardized_rejects_mismatched_computation_basis(
-    basis: str,
-    counterpart: str,
-) -> None:
-    payload = {
-        FIELD_VALUE_FIELD: "Plain-text research value.",
-        FIELD_STANDARDIZED_VALUE_FIELD: {
-            "age": {
-                "provenance": "computed",
-                "computed": {"basis": basis, "as_of": "2026-10-19"},
-                "age_numeral": 50,
-            },
-            counterpart: {
-                "provenance": "reported",
-                "reported": "1976",
-                "age_numeral": 1976,
-            },
-        },
-        FIELD_EVIDENCE_FIELD: TEST_EVIDENCE,
-    }
-
-    with pytest.raises(ValidationError):
-        schema.AgeFirstPublicationSubmission.model_validate_json(json.dumps(payload))
 
 
 @pytest.mark.parametrize(

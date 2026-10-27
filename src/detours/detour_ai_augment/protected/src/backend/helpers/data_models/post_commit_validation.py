@@ -1279,9 +1279,9 @@ def _age_evidence_check_failed(
         )
         failed = True
     reported = (
-        age_value.birth
+        age_value.age.computed.birth
         if isinstance(age_value, AgeFromBirth)
-        else age_value.first_publication
+        else age_value.age.computed.first_publication
     )
     reported_text = reported.reported
     if not any(

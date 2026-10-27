@@ -571,7 +571,7 @@ export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
   src/detours/detour_ai_augment/protected/tests/backend \
   src/detours/detour_ai_augment/protected/tests/operator/test_operator_e2e_preflight.py && \
 "$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m real_api \
-  src/detours/detour_ai_augment/protected/tests/backend/test_pydantic_to_paste.py::test_academic_institution_round_trips_against_real_apis
+  src/detours/detour_ai_augment/protected/tests/backend/pydantic_to_paste/test_pydantic_to_paste.py::test_academic_institution_round_trips_against_real_apis
 status=$?
 echo "NOTE: root tests need to be run separately with test-detour-ai-augment-root"
 echo "NOTE: operator tests need to be run separately with test-detour-ai-augment-operator"

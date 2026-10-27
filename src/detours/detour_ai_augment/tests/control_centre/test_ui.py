@@ -3982,15 +3982,18 @@ def test_martin_standardized_serializer_formats_fixture_and_preserves_single_val
     assert martin_serialize_standardized_cell(cell("gender")) == cell("gender")
     age = submission.age_first_publication.standardized_value
     assert isinstance(age, AgeFromBirth)
-    age_json = json.dumps(
-        age.age.model_dump(mode="json"),
-        ensure_ascii=False,
-        separators=COMPACT_JSON_SEPARATORS,
+    inferred = age.age.inferred.model_dump()
+    age_line = (
+        ", ".join(str(part) for part in inferred.values())
+        if isinstance(inferred, dict) else str(inferred)
     )
+    source = age.age.computed.birth
+    birth = source.inferred
     assert martin_serialize_standardized_cell(cell("age_first_publication")) == (
         f"{AI_GENERATED_TEXT_PREFIX}\n\n```\n"
-        f"{age_json}\n"
-        f"reported, {age.birth.reported}, {age.birth.age_numeral}\n"
+        f"{age_line}\ncomputed\n  {age.age.computed.as_of.isoformat()}\n  birth\n"
+        f"    {birth.year}, {birth.month}, {birth.day}\n"
+        f"    reported\n    {source.reported}\n"
         "```"
     )
     multiline_scalar = render_standardized_submission_value(json.dumps("line one\nline two"))
@@ -4028,7 +4031,7 @@ def test_martin_standardized_serializer_formats_fixture_and_preserves_single_val
         "first": {"nested": {"value": "NA"}}, "second": "NR",
     }))
     assert martin_serialize_standardized_cell(deeper) == (
-        f'{AI_GENERATED_TEXT_PREFIX}\n\n```\n{{"nested":{{"value":"NA"}}}}\nNR\n```'
+        f'{AI_GENERATED_TEXT_PREFIX}\n\n```\n  NA\nNR\n```'
     )
     assert martin_serialize_standardized_cell("unrecognized cell") == (
         "unrecognized cell"

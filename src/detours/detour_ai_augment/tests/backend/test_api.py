@@ -15,7 +15,7 @@ from collections.abc import Callable, Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
 from importlib.metadata import version
 from io import StringIO
@@ -640,8 +640,12 @@ def test_age_evidence_validation_uses_push_utc_date_and_logs_privately(
 
     verbatim_age = age_field.model_copy(update={
         "standardized_value": age_value.model_copy(update={
-            "birth": age_value.birth.model_copy(update={
-                "reported": "nineteen seventy-six",
+            "age": age_value.age.model_copy(update={
+                "computed": age_value.age.computed.model_copy(update={
+                    "birth": age_value.age.computed.birth.model_copy(update={
+                        "reported": "nineteen seventy-six",
+                    }),
+                }),
             }),
         }),
         "web_search_excerpts": [WebSearchExcerpt(
@@ -1332,6 +1336,27 @@ def standardized_submission_body(
     return standardized_body
 
 
+def year_only_1968_age(as_of: date) -> dict[str, object]:
+    birth = pydantic_to_paste.DateOfBirth(
+        year=1968, month=NOT_REPORTED_VALUE, day=NOT_REPORTED_VALUE,
+    )
+    return {
+        "age": {
+            "inferred": birth.infer_age(as_of).model_dump(mode="json"),
+            "provenance": "computed",
+            "computed": {
+                "as_of": as_of.isoformat(),
+                "basis": "birth",
+                "birth": {
+                    "inferred": birth.model_dump(mode="json"),
+                    "provenance": "reported",
+                    "reported": "1968",
+                },
+            },
+        },
+    }
+
+
 def capture_http_record(
     captured: list[HttpRequestLogRecord], record: HttpRequestLogRecord,
 ) -> HttpRequestLogRecord:
@@ -1961,18 +1986,7 @@ def assert_captured_operator_push_contour(
     age_standardized = age_field[FIELD_STANDARDIZED_VALUE_FIELD]
     assert isinstance(age_standardized, dict)
     push_date = datetime.now(timezone.utc).date()
-    age_field[FIELD_STANDARDIZED_VALUE_FIELD] = {
-        "age": {
-            "provenance": "computed",
-            "computed": {"basis": "birth", "as_of": push_date.isoformat()},
-            "age_numeral": push_date.year - 1968,
-        },
-        "birth": {
-            "provenance": "reported",
-            "reported": "1968",
-            "age_numeral": 1968,
-        },
-    }
+    age_field[FIELD_STANDARDIZED_VALUE_FIELD] = year_only_1968_age(push_date)
     accepted_push_body = json.dumps(accepted_push, ensure_ascii=False).encode()
     evidence_accepted = deepcopy(accepted_push)
     for column in AI_AUGMENT_EVIDENCE_COLUMNS:
@@ -3492,11 +3506,12 @@ def test_openapi_example_is_a_complete_pydantic_valid_submission(
         )
         in post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE
     )
-    assert "CurrentAge: TypeAlias" in source
-    assert "YearOfBirth: TypeAlias" in source
-    assert "DateOfBirth: TypeAlias" in source
-    assert "YearOfFirstPublication: TypeAlias" in source
-    assert "DateOfFirstPublication: TypeAlias" in source
+    assert "class CurrentBiologicalAge(" in source
+    assert "class CurrentAgeFromFirstPublication(" in source
+    assert "class DateOfBirth(" in source
+    assert "class DateOfFirstPublication(" in source
+    assert "class BirthComputation(" in source
+    assert "class FirstPublicationComputation(" in source
     assert 'NotReported: TypeAlias = Literal["NR"]' in source
     assert 'NotAvailableOrApplicable: TypeAlias = Literal["NA"]' in source
 
@@ -7088,18 +7103,7 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
     ):
         age_field = candidate[KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL]
         assert isinstance(age_field, dict)
-        age_field[FIELD_STANDARDIZED_VALUE_FIELD] = {
-            "age": {
-                "provenance": "computed",
-                "computed": {"basis": "birth", "as_of": as_of.isoformat()},
-                "age_numeral": as_of.year - 1968,
-            },
-            "birth": {
-                "provenance": "reported",
-                "reported": "1968",
-                "age_numeral": 1968,
-            },
-        }
+        age_field[FIELD_STANDARDIZED_VALUE_FIELD] = year_only_1968_age(as_of)
     rejected_age = standardized_rejected[KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL]
     invalid_age = standardized_age_invalid[KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL]
     assert isinstance(rejected_age, dict) and isinstance(invalid_age, dict)

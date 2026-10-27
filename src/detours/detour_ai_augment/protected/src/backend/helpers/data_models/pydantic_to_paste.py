@@ -11,6 +11,7 @@
 # ]
 
 import os
+from calendar import monthrange
 from datetime import date
 from enum import StrEnum
 from http import HTTPStatus
@@ -32,6 +33,7 @@ from pydantic import (
     ConfigDict,
     Field,
     HttpUrl,
+    RootModel,
     StrictStr,
     StringConstraints,
     model_validator,
@@ -75,10 +77,13 @@ MAX_EXCERPT_CHARACTERS = MAX_PUSH_BODY_BYTES
 MAX_URL_CHARACTERS = MAX_PUSH_BODY_BYTES
 MAX_EXCERPTS_PER_FIELD = MAX_PUSH_BODY_BYTES
 
-HUMAN_LIFESPAN = (1, 200)
 EARLIEST_YEAR = 1900
 LATEST_BIRTH_YEAR = 2010  # 2026 minus 16
 HCR_CUTOFF_YEAR = 2024    # latest HCR award available
+HUMAN_LIFESPAN = (1, 200)
+# Even when HUMAN_LIFESPAN is used to compute
+# age based on the date of first publication,
+# a minimum of 1 year is reasonable to assume.
 
 DEFAULT_TARGET_WEB_SEARCH_QUERY_LANGUAGE = "eng"
 
@@ -204,45 +209,153 @@ GenderStandardized: TypeAlias = SubmissionValueRequired[
 
 
 # KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL
-Year: TypeAlias = Annotated[int, Field(ge=EARLIEST_YEAR)]
-CurrentAge: TypeAlias = Annotated[
+Year: TypeAlias = Annotated[
+    int, Field(strict=True, ge=EARLIEST_YEAR)
+]
+Month: TypeAlias = Annotated[
+    int, Field(strict=True, ge=1, le=12)
+]
+Day: TypeAlias = Annotated[
+    int, Field(strict=True, ge=1, le=31)
+]
+
+AgePoint: TypeAlias = Annotated[
     int,
-    Field(ge=HUMAN_LIFESPAN[0]),
-    Field(le=HUMAN_LIFESPAN[1]),
-]
-YearOfFirstPublication: TypeAlias = Annotated[
-    Year,
-    Field(le=HCR_CUTOFF_YEAR),
-]
-DateOfFirstPublication: TypeAlias = Annotated[
-    date,
     Field(
-        ge=date(EARLIEST_YEAR, 1, 1),
-        le=date(HCR_CUTOFF_YEAR, 12, 31),
-    ),
-]
-YearOfBirth: TypeAlias = Annotated[
-    Year,
-    Field(le=LATEST_BIRTH_YEAR),
-]
-DateOfBirth: TypeAlias = Annotated[
-    date,
-    Field(
-        ge=date(EARLIEST_YEAR, 1, 1),
-        le=date(LATEST_BIRTH_YEAR, 12, 31),
+        strict=True,  # prevents from coercing other types into int
+        ge=HUMAN_LIFESPAN[0],
+        le=HUMAN_LIFESPAN[1],
     ),
 ]
 
-AgeFromFirstPublicationNumeral: TypeAlias = (
-    YearOfFirstPublication
-    | DateOfFirstPublication
-)
-AgeFromBirthNumeral: TypeAlias = (
-    YearOfBirth
-    | DateOfBirth
-)
+class AgeSensitivityInterval(StrictModel):
+    """Use it when reported evidence only
+    allows to compute age as an interval."""
 
-class ReportedNumeral[T](StrictModel):
+    lower: AgePoint
+    upper: AgePoint
+
+    @model_validator(mode="after")
+    def _(self) -> Self:
+        if self.lower >= self.upper:
+            raise ValueError("Expected lower < upper")
+        return self
+
+class _AgeNumeral(StrictModel):
+    year: Year
+    month: SubmissionValueRequired[Month]
+    day: SubmissionValueRequired[Day]
+
+    @model_validator(mode="after")
+    def _(self) -> Self:
+        if isinstance(self.day, int):
+            if not isinstance(self.month, int):
+                raise ValueError("Day requires reported month")
+            if self.day > monthrange(
+                self.year, self.month
+            )[1]:
+                raise ValueError("Invalid calendar day")
+
+        return self
+
+    def bounds(self) -> tuple[date, date]:
+        if not isinstance(self.month, int):
+            return (
+                date(self.year, 1, 1),
+                date(self.year, 12, 31),
+            )
+
+        if not isinstance(self.day, int):
+            return (
+                date(self.year, self.month, 1),
+                date(
+                    self.year,
+                    self.month,
+                    monthrange(self.year, self.month)[1],
+                ),
+            )
+
+        exact = date(self.year, self.month, self.day)
+        return exact, exact
+
+    def as_date(self) -> date:
+        lower, upper = self.bounds()
+        if lower != upper:
+            raise ValueError("Date is incomplete")
+        return lower
+
+    def _age_value(
+        self,
+        *,
+        as_of: date,
+    ) -> AgePoint | AgeSensitivityInterval:
+        start, end = self.bounds()
+
+        if start > as_of:
+            raise ValueError("Event occurs after as_of")
+
+        end = min(end, as_of)
+
+        def elapsed(event: date) -> int:
+            return as_of.year - event.year - (
+                (as_of.month, as_of.day)
+                < (event.month, event.day)
+            )
+
+        lower = elapsed(end)
+        upper = elapsed(start)
+
+        if lower == upper:
+            return lower
+
+        return AgeSensitivityInterval(lower=lower, upper=upper)
+
+
+_AgeBasis: TypeAlias = Literal["birth", "first_publication"]
+
+class _AgeComputation[Basis: _AgeBasis](StrictModel):
+    as_of: date
+    basis: Basis
+
+
+class CurrentBiologicalAge(
+    RootModel[AgePoint | AgeSensitivityInterval]
+):
+    pass
+
+
+class CurrentAgeFromFirstPublication(
+    RootModel[AgePoint | AgeSensitivityInterval]
+):
+    pass
+
+
+class DateOfBirth(_AgeNumeral):
+    year: Annotated[Year, Field(le=LATEST_BIRTH_YEAR)]
+
+    def infer_age(
+        self,
+        as_of: date,
+    ) -> CurrentBiologicalAge:
+        return CurrentBiologicalAge(
+            root=self._age_value(as_of=as_of),
+        )
+
+
+class DateOfFirstPublication(_AgeNumeral):
+    year: Annotated[Year, Field(le=HCR_CUTOFF_YEAR)]
+
+    def infer_age(
+        self,
+        as_of: date,
+    ) -> CurrentAgeFromFirstPublication:
+        return CurrentAgeFromFirstPublication(
+            root=self._age_value(as_of=as_of),
+        )
+
+
+class ReportedNumeral[InferredT](StrictModel):
+    inferred: InferredT
     provenance: Literal["reported"] = "reported"
     reported: SubmissionText = Field(
         ...,
@@ -251,82 +364,59 @@ class ReportedNumeral[T](StrictModel):
             "copied verbatim from the web search excerpt."
         ),
     )
-    age_numeral: T
-class ComputedNumeral[T, ComputationT](StrictModel):
+
+
+class ComputedNumeral[InferredT, ComputationT](StrictModel):
+    inferred: InferredT
     provenance: Literal["computed"] = "computed"
     computed: ComputationT
-    age_numeral: T
 
-AgeNumeral: TypeAlias = (
-    CurrentAge
-    | AgeFromFirstPublicationNumeral
-    | AgeFromBirthNumeral
-)
-AgeBasis: TypeAlias = Literal["birth", "first_publication"]
 
-class AgeComputation[Basis: AgeBasis](StrictModel):
-    basis: Basis
-    as_of: date
+class BirthComputation(_AgeComputation[Literal["birth"]]):
+    birth: ReportedNumeral[DateOfBirth]
 
-class _AgeWithProvenance[N: AgeNumeral, Basis: AgeBasis](StrictModel):
-    age: ComputedNumeral[CurrentAge, AgeComputation[Basis]]
 
-    def _counterpart(
-        self,
-    ) -> ReportedNumeral[N]:
-        raise NotImplementedError
+class FirstPublicationComputation(_AgeComputation[Literal["first_publication"]]):
+    first_publication: ReportedNumeral[DateOfFirstPublication]
+
+
+class AgeFromBirth(StrictModel):
+    age: ComputedNumeral[
+        CurrentBiologicalAge, BirthComputation
+    ]
 
     @model_validator(mode="after")
-    def validate_pair(self) -> Self:
-        other = self._counterpart()
-
-        numeral = other.age_numeral
-        as_of = self.age.computed.as_of
-
-        if isinstance(numeral, date):
-            expected_age = as_of.year - numeral.year - (
-                (as_of.month, as_of.day)
-                < (numeral.month, numeral.day)
-            )
-        else:
-            expected_age = as_of.year - numeral
-
-        if self.age.age_numeral != expected_age:
+    def _(self) -> Self:
+        computation = self.age.computed
+        expected = computation.birth.inferred.infer_age(computation.as_of)
+        if self.age.inferred != expected:
             raise ValueError(
                 Locale.AGE_EXPECTED_TEMPLATE.format(
-                    expected_age=expected_age,
-                    actual_age=self.age.age_numeral,
+                    expected_age=expected,
+                    actual_age=self.age.inferred,
                 )
             )
-
         return self
 
 
-class AgeFromBirth(
-    _AgeWithProvenance[AgeFromBirthNumeral, Literal["birth"]]
-):
-    birth: ReportedNumeral[AgeFromBirthNumeral]
-
-    def _counterpart(
-        self,
-    ) -> ReportedNumeral[AgeFromBirthNumeral]:
-        return self.birth
-
-
-class AgeFromFirstPublication(
-    _AgeWithProvenance[
-        AgeFromFirstPublicationNumeral,
-        Literal["first_publication"],
-    ]
-):
-    first_publication: ReportedNumeral[
-        AgeFromFirstPublicationNumeral
+class AgeFromFirstPublication(StrictModel):
+    age: ComputedNumeral[
+        CurrentAgeFromFirstPublication,
+        FirstPublicationComputation,
     ]
 
-    def _counterpart(
-        self,
-    ) -> ReportedNumeral[AgeFromFirstPublicationNumeral]:
-        return self.first_publication
+    @model_validator(mode="after")
+    def _(self) -> Self:
+        computation = self.age.computed
+        expected = computation.first_publication.inferred.infer_age(computation.as_of)
+        if self.age.inferred != expected:
+            raise ValueError(
+                Locale.AGE_EXPECTED_TEMPLATE.format(
+                    expected_age=expected,
+                    actual_age=self.age.inferred,
+                )
+            )
+        return self
 
 
 AgeStandardized: TypeAlias = SubmissionValueRequired[
@@ -341,7 +431,7 @@ class AcademicInstitution(StrictModel):
     ror: SubmissionValueOptional[HttpUrl]
 
     @model_validator(mode="after")
-    def validate_institution(self) -> Self:
+    def _(self) -> Self:
         nr_or_na = frozenset(
             get_args(NotReported) + get_args(NotAvailableOrApplicable)
         )
@@ -514,7 +604,7 @@ class WebSearchExcerpt(StrictModel):
     )
 
     @model_validator(mode="after")
-    def validate_evidence(self) -> Self:
+    def _(self) -> Self:
         if not self.excerpt.strip() or not self.url.strip():
             raise ValueError(Locale.EXCERPT_URL_NONBLANK)
         return self
@@ -551,7 +641,7 @@ class FieldSubmission(StrictModel):
     )
 
     @model_validator(mode="after")
-    def validate_evidence_pairs(self) -> Self:
+    def _(self) -> Self:
         evidence_pairs = [
             (evidence.excerpt, evidence.url)
             for evidence in self.web_search_excerpts
@@ -630,8 +720,8 @@ class StandardizedSubmission(
     age_first_publication: AgeFirstPublicationSubmission = Field(
         alias=KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
         description=(
-            "current age/date of birth from public academic sources, or year of the first "
-            "publication according to OpenAlex profile."
+            "current age/date of birth from public academic sources, or "
+            "year of the first publication according to OpenAlex profile."
         ),
     )
     education: EducationSubmission = Field(
