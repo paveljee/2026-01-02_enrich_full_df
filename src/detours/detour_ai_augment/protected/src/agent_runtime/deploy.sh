@@ -9,6 +9,8 @@ SHARED_MODEL_LIB_NAME="architecture.py"
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_DIR="/Volumes/home/aicode/aivm/home/ai"
 LIMA_INSTANCE="aivm"
+# Operator preflight test caps the whole deploy at 30m; reserve 5m outside Lima startup.
+LIMA_START_TIMEOUT="25m"
 MOUNT_DIR="$PROJECT_DIR"
 # Though using the real --mount dir downstream to preserve macOS paths
 DEFAULT_MOUNTPOINT="$PROJECT_DIR"
@@ -322,6 +324,11 @@ cpus: 4
 memory: "4GiB"
 disk: "10GiB"
 
+# Not needed but increases boot time unless disabled.
+containerd:
+  system: false
+  user: false
+
 provision:
   - mode: system
     script: |
@@ -373,6 +380,7 @@ EOF
 # No need to prompt because already prompted to delete above
 limactl start \
     --yes \
+    --timeout="$LIMA_START_TIMEOUT" \
     --name="$LIMA_INSTANCE" \
     /tmp/aivm.yaml
 
