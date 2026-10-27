@@ -825,7 +825,7 @@ def completed_query_fixture_process() -> None:
             for namekey, lines in rows:
                 row = json.loads(lines.splitlines()[0])
                 row.update(dict.fromkeys(DOCX_COLUMNS, "NR"))
-                row.update({KTP_FILENAME_COL: "fixture.docx", KTP_FRAGMENT_COL: 1,
+                row.update({KTP_FILENAME_COL: "fixture_DR.docx", KTP_FRAGMENT_COL: 1,
                             KTP_FRAGMENT_TYPE_COL: "docx_table"})
                 documents.append((namekey, json.dumps(row)))
             connection.executemany(
@@ -1081,6 +1081,10 @@ def completed_query_fixture_process() -> None:
             ai_augment_singular_outerdicts=store.ai_augment_singular_outerdicts(),
         )
         assert sum(len(item.codex_innerdicts) for item in fresh.ai_augment_singular_outerdicts) == 1
+        (completed_researcher,) = (
+            item for item in fresh.ai_augment_singular_outerdicts
+            if item.codex_innerdicts
+        )
 
     # A fresh Dashboard/IPC startup verifies the new fixture log through normal config mechanics.
     config["files_config"][REPLAY_LOG_KEY]["sha256"] = hashlib.sha256(
@@ -1113,6 +1117,9 @@ def completed_query_fixture_process() -> None:
     setattr(ai_augment_context, "LIMA_CONFIG_PATH", config_path.parent / "lima.json")
     os.environ["OPENALEX_API_KEY"] = "isolated-unused-query-key"
     services = ui.create_services(config_path=config_path)
+    card = services.backend_database.card(completed_researcher)
+    assert str(validated.record_id) in card
+    assert "DR extracted" in card
     services.controller._load_dashboard_storage()
     # Exercise real filtering before asking a browser to render it; no services are started.
     selection = ui._UiSelection(researcher_varname=ui.RESEARCHER_VARS[0].varname)

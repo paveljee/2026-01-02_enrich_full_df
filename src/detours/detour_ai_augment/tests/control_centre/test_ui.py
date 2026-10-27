@@ -148,6 +148,7 @@ from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
     SocketlessDashboardLifecycle,
     backend_startup_process,
     backend_stop_child_process,
+    completed_query_fixture_process,
     nicegui_test_environment,
     operator_fixture_bootstrap_process,
     sleeping_process,
@@ -4481,6 +4482,24 @@ class TestBackendStartupConditions:
     @pytest.fixture(autouse=True)
     def inline_controller_io(self) -> None:
         """Keep production dispatch untouched; these checks exercise no controller."""
+
+    @pytest.mark.python_subprocess
+    @staticmethod
+    def test_completed_query_fixture_renders_card_before_browser(
+        startup_files: StartupFiles,
+        python_process: PythonProcess,
+        nicegui_storage_path: Path,
+    ) -> None:
+        result = python_process.run(
+            completed_query_fixture_process,
+            str(startup_files.config),
+            env=nicegui_test_environment(
+                nicegui_storage_path, base=startup_files.environment(),
+            ),
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "COMPLETED_QUERY_FIXTURE_READY" in result.stdout
 
     @pytest.mark.python_subprocess
     @staticmethod
