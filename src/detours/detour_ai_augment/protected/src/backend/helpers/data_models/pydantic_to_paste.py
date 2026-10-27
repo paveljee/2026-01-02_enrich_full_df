@@ -286,24 +286,31 @@ class _AgeNumeral(StrictModel):
 
     def _age_value(
         self,
-        *,
-        as_of: date,
+        endpoint: date | _AgeNumeral,
     ) -> AgePoint | AgeSensitivityInterval:
         start, end = self.bounds()
 
-        if start > as_of:
-            raise ValueError("Event occurs after as_of")
+        if isinstance(endpoint, date):
+            endpoint_lower = endpoint_upper = endpoint
+        else:
+            endpoint_lower, endpoint_upper = endpoint.bounds()
 
-        end = min(end, as_of)
+        if start > endpoint_upper:
+            if isinstance(endpoint, date):
+                raise ValueError("Event occurs after as_of")
+            raise ValueError("Event occurs after death")
 
-        def elapsed(event: date) -> int:
-            return as_of.year - event.year - (
-                (as_of.month, as_of.day)
-                < (event.month, event.day)
+        def elapsed(start: date, end: date) -> int:
+            return end.year - start.year - (
+                (end.month, end.day)
+                < (start.month, start.day)
             )
 
-        lower = elapsed(end)
-        upper = elapsed(start)
+        earliest_endpoint = max(start, endpoint_lower)
+        latest_start = min(end, earliest_endpoint)
+
+        lower = elapsed(latest_start, earliest_endpoint)
+        upper = elapsed(start, endpoint_upper)
 
         if lower == upper:
             return lower
@@ -313,8 +320,8 @@ class _AgeNumeral(StrictModel):
 
 _AgeBasis: TypeAlias = Literal["birth", "first_publication"]
 
-class _AgeComputation[Basis: _AgeBasis](StrictModel):
-    as_of: date
+class _AgeComputation[Basis: _AgeBasis, AsOfT](StrictModel):
+    as_of: AsOfT
     basis: Basis
 
 
@@ -324,22 +331,32 @@ class CurrentBiologicalAge(
     pass
 
 
+class BiologicalAgeAtDeath(RootModel[AgePoint | AgeSensitivityInterval]):
+    pass
+
+
 class CurrentAgeFromFirstPublication(
     RootModel[AgePoint | AgeSensitivityInterval]
 ):
     pass
 
+class PublicationSpanAtDeath(RootModel[AgePoint | AgeSensitivityInterval]):
+    pass
+
+class DateOfDeath(_AgeNumeral):
+    pass
 
 class DateOfBirth(_AgeNumeral):
     year: Annotated[Year, Field(le=LATEST_BIRTH_YEAR)]
 
     def infer_age(
         self,
-        as_of: date,
-    ) -> CurrentBiologicalAge:
-        return CurrentBiologicalAge(
-            root=self._age_value(as_of=as_of),
-        )
+        endpoint: date | DateOfDeath,
+    ) -> CurrentBiologicalAge | BiologicalAgeAtDeath:
+        value = self._age_value(endpoint)
+        if isinstance(endpoint, date):
+            return CurrentBiologicalAge(root=value)
+        return BiologicalAgeAtDeath(root=value)
 
 
 class DateOfFirstPublication(_AgeNumeral):
@@ -347,11 +364,12 @@ class DateOfFirstPublication(_AgeNumeral):
 
     def infer_age(
         self,
-        as_of: date,
-    ) -> CurrentAgeFromFirstPublication:
-        return CurrentAgeFromFirstPublication(
-            root=self._age_value(as_of=as_of),
-        )
+        endpoint: date | DateOfDeath,
+    ) -> CurrentAgeFromFirstPublication | PublicationSpanAtDeath:
+        value = self._age_value(endpoint)
+        if isinstance(endpoint, date):
+            return CurrentAgeFromFirstPublication(root=value)
+        return PublicationSpanAtDeath(root=value)
 
 
 class ReportedNumeral[InferredT](StrictModel):
@@ -372,11 +390,31 @@ class ComputedNumeral[InferredT, ComputationT](StrictModel):
     computed: ComputationT
 
 
-class BirthComputation(_AgeComputation[Literal["birth"]]):
+class BirthComputation(_AgeComputation[Literal["birth"], date]):
+    as_of: date = Field(..., description="Date this submission is made.")
     birth: ReportedNumeral[DateOfBirth]
 
 
-class FirstPublicationComputation(_AgeComputation[Literal["first_publication"]]):
+class BirthToDeathComputation(
+    _AgeComputation[Literal["birth"], ReportedNumeral[DateOfDeath]]
+):
+    as_of: ReportedNumeral[DateOfDeath]
+    birth: ReportedNumeral[DateOfBirth]
+
+
+class FirstPublicationComputation(
+    _AgeComputation[Literal["first_publication"], date]
+):
+    as_of: date = Field(..., description="Date this submission is made.")
+    first_publication: ReportedNumeral[DateOfFirstPublication]
+
+
+class FirstPublicationToDeathComputation(
+    _AgeComputation[
+        Literal["first_publication"], ReportedNumeral[DateOfDeath]
+    ]
+):
+    as_of: ReportedNumeral[DateOfDeath]
     first_publication: ReportedNumeral[DateOfFirstPublication]
 
 
@@ -388,12 +426,32 @@ class AgeFromBirth(StrictModel):
     @model_validator(mode="after")
     def _(self) -> Self:
         computation = self.age.computed
-        expected = computation.birth.inferred.infer_age(computation.as_of)
+        expected = computation.birth.inferred.infer_age(
+            computation.as_of,
+        )
         if self.age.inferred != expected:
             raise ValueError(
                 Locale.AGE_EXPECTED_TEMPLATE.format(
                     expected_age=expected,
                     actual_age=self.age.inferred,
+                )
+            )
+        return self
+
+
+class AgeAtDeathFromBirth(StrictModel):
+    age: ComputedNumeral[BiologicalAgeAtDeath, BirthToDeathComputation]
+
+    @model_validator(mode="after")
+    def _(self) -> Self:
+        computation = self.age.computed
+        expected = computation.birth.inferred.infer_age(
+            computation.as_of.inferred,
+        )
+        if self.age.inferred != expected:
+            raise ValueError(
+                Locale.AGE_EXPECTED_TEMPLATE.format(
+                    expected_age=expected, actual_age=self.age.inferred,
                 )
             )
         return self
@@ -408,7 +466,9 @@ class AgeFromFirstPublication(StrictModel):
     @model_validator(mode="after")
     def _(self) -> Self:
         computation = self.age.computed
-        expected = computation.first_publication.inferred.infer_age(computation.as_of)
+        expected = computation.first_publication.inferred.infer_age(
+            computation.as_of,
+        )
         if self.age.inferred != expected:
             raise ValueError(
                 Locale.AGE_EXPECTED_TEMPLATE.format(
@@ -419,9 +479,32 @@ class AgeFromFirstPublication(StrictModel):
         return self
 
 
-AgeStandardized: TypeAlias = SubmissionValueRequired[
-    AgeFromBirth | AgeFromFirstPublication,
-]
+class AgeAtDeathFromFirstPublication(StrictModel):
+    age: ComputedNumeral[
+        PublicationSpanAtDeath, FirstPublicationToDeathComputation
+    ]
+
+    @model_validator(mode="after")
+    def _(self) -> Self:
+        computation = self.age.computed
+        expected = computation.first_publication.inferred.infer_age(
+            computation.as_of.inferred,
+        )
+        if self.age.inferred != expected:
+            raise ValueError(
+                Locale.AGE_EXPECTED_TEMPLATE.format(
+                    expected_age=expected, actual_age=self.age.inferred,
+                )
+            )
+        return self
+
+Age: TypeAlias = (
+    AgeFromBirth
+    | AgeAtDeathFromBirth
+    | AgeFromFirstPublication
+    | AgeAtDeathFromFirstPublication
+)
+AgeStandardized: TypeAlias = SubmissionValueRequired[Age]
 
 
 # KTP_AI_AUGMENT_EDUCATION_COL

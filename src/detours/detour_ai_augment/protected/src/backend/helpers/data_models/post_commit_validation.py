@@ -36,6 +36,9 @@ from pydantic_core import to_jsonable_python
 from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
 from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
+    Age,
+    AgeAtDeathFromBirth,
+    AgeAtDeathFromFirstPublication,
     AgeFirstPublicationSubmission,
     AgeFromBirth,
     AgeFromFirstPublication,
@@ -1262,43 +1265,47 @@ def _age_evidence_check_failed(
     push_response_record: PushResponseRecord,
 ) -> bool:
     age_value = age_standardized_submission.standardized_value
-    if not isinstance(age_value, (AgeFromBirth, AgeFromFirstPublication)):
+    if not isinstance(age_value, Age):
         return False
     failed = False
-    push_received_at_unix_usec = (
-        push_response_record.ready_to_respond_at_unix_usec
-        - push_response_record.duration_usec
-    )
-    push_date = utc_datetime_from_unix_usec(push_received_at_unix_usec).date()
-    if age_value.age.computed.as_of != push_date:
-        logger.warning(
-            Locale.AGE_EVIDENCE_AS_OF_MISMATCH_LOG,
-            age_value.age.computed.as_of,
-            push_date,
-            push_received_at_unix_usec,
+    if isinstance(age_value, (AgeFromBirth, AgeFromFirstPublication)):
+        push_received_at_unix_usec = (
+            push_response_record.ready_to_respond_at_unix_usec
+            - push_response_record.duration_usec
         )
-        failed = True
+        push_date = utc_datetime_from_unix_usec(push_received_at_unix_usec).date()
+        if age_value.age.computed.as_of != push_date:
+            logger.warning(
+                Locale.AGE_EVIDENCE_AS_OF_MISMATCH_LOG,
+                age_value.age.computed.as_of,
+                push_date,
+                push_received_at_unix_usec,
+            )
+            failed = True
     reported = (
         age_value.age.computed.birth
-        if isinstance(age_value, AgeFromBirth)
+        if isinstance(age_value, (AgeFromBirth, AgeAtDeathFromBirth))
         else age_value.age.computed.first_publication
     )
-    reported_text = reported.reported
-    if not any(
-        reported_text in item.excerpt
-        for item in age_standardized_submission.web_search_excerpts
-        if isinstance(item, WebSearchExcerpt)
-    ):
-        logger.warning(
-            Locale.AGE_EVIDENCE_REPORTED_NOT_FOUND_LOG,
-            reported_text,
-            tuple(
-                item.excerpt
-                for item in age_standardized_submission.web_search_excerpts
-                if isinstance(item, WebSearchExcerpt)
-            ),
-        )
-        failed = True
+    reported_texts = [reported.reported]
+    if isinstance(age_value, (AgeAtDeathFromBirth, AgeAtDeathFromFirstPublication)):
+        reported_texts.append(age_value.age.computed.as_of.reported)
+    for reported_text in reported_texts:
+        if not any(
+            reported_text in item.excerpt
+            for item in age_standardized_submission.web_search_excerpts
+            if isinstance(item, WebSearchExcerpt)
+        ):
+            logger.warning(
+                Locale.AGE_EVIDENCE_REPORTED_NOT_FOUND_LOG,
+                reported_text,
+                tuple(
+                    item.excerpt
+                    for item in age_standardized_submission.web_search_excerpts
+                    if isinstance(item, WebSearchExcerpt)
+                ),
+            )
+            failed = True
     return failed
 
 

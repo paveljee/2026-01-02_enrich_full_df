@@ -11,22 +11,33 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.codex_parse imp
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (
     pydantic_to_paste as schema,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
+    _age_evidence_check_failed,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EARLIEST_YEAR,
     HCR_CUTOFF_YEAR,
     HUMAN_LIFESPAN,
     LATEST_BIRTH_YEAR,
+    Age,
+    AgeAtDeathFromBirth,
+    AgeAtDeathFromFirstPublication,
     AgeFromBirth,
     AgeFromFirstPublication,
     AgeSensitivityInterval,
     AgeStandardized,
+    BiologicalAgeAtDeath,
     BirthComputation,
+    BirthToDeathComputation,
     ComputedNumeral,
     CurrentAgeFromFirstPublication,
     CurrentBiologicalAge,
     DateOfBirth,
+    DateOfDeath,
     DateOfFirstPublication,
     FirstPublicationComputation,
+    FirstPublicationToDeathComputation,
+    PublicationSpanAtDeath,
     ReportedNumeral,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
@@ -50,6 +61,8 @@ AS_OF = date(2026, 10, 27)
 
 
 def birth_age(birth: DateOfBirth, reported: str, as_of: date = AS_OF) -> AgeFromBirth:
+    inferred = birth.infer_age(as_of)
+    assert isinstance(inferred, CurrentBiologicalAge)
     return AgeFromBirth(
         age=ComputedNumeral(
             computed=BirthComputation(
@@ -57,7 +70,7 @@ def birth_age(birth: DateOfBirth, reported: str, as_of: date = AS_OF) -> AgeFrom
                 birth=ReportedNumeral[DateOfBirth](reported=reported, inferred=birth),
                 as_of=as_of,
             ),
-            inferred=birth.infer_age(as_of),
+            inferred=inferred,
         ),
     )
 
@@ -65,6 +78,8 @@ def birth_age(birth: DateOfBirth, reported: str, as_of: date = AS_OF) -> AgeFrom
 def publication_age(
     publication: DateOfFirstPublication, reported: str, as_of: date = AS_OF
 ) -> AgeFromFirstPublication:
+    inferred = publication.infer_age(as_of)
+    assert isinstance(inferred, CurrentAgeFromFirstPublication)
     return AgeFromFirstPublication(
         age=ComputedNumeral(
             computed=FirstPublicationComputation(
@@ -74,7 +89,7 @@ def publication_age(
                 ),
                 as_of=as_of,
             ),
-            inferred=publication.infer_age(as_of),
+            inferred=inferred,
         ),
     )
 
@@ -553,3 +568,197 @@ def test_birth_pair_rejects_wrong_basis_even_if_inference_called_directly() -> N
                 "inferred": inferred_age.model_dump(),
             }
         })
+
+
+def test_deceased_birth_age_round_trips_and_keeps_age_at_death_type() -> None:
+    birth = DateOfBirth(year=1963, month=9, day=20)
+    death = DateOfDeath(year=2020, month=10, day=27)
+    inferred = birth.infer_age(death)
+    assert type(inferred) is BiologicalAgeAtDeath
+    assert inferred.root == 57
+    value = AgeAtDeathFromBirth(
+        age=ComputedNumeral(
+            computed=BirthToDeathComputation(
+                basis="birth",
+                birth=ReportedNumeral[DateOfBirth](
+                    reported="September 20, 1963", inferred=birth,
+                ),
+                as_of=ReportedNumeral[DateOfDeath](
+                    reported="October 27, 2020", inferred=death,
+                ),
+            ),
+            inferred=inferred,
+        ),
+    )
+    adapter: TypeAdapter[AgeStandardized] = TypeAdapter(AgeStandardized)
+    restored = adapter.validate_json(value.model_dump_json())
+    assert type(restored) is AgeAtDeathFromBirth
+    assert restored == value
+    assert restored.age.inferred.model_dump(mode="json") == 57
+
+
+def test_deceased_publication_span_round_trips() -> None:
+    publication = DateOfFirstPublication(year=2005, month=1, day=1)
+    death = DateOfDeath(year=2020, month=10, day=27)
+    inferred = publication.infer_age(death)
+    assert type(inferred) is PublicationSpanAtDeath
+    assert inferred.root == 15
+    value = AgeAtDeathFromFirstPublication(
+        age=ComputedNumeral(
+            computed=FirstPublicationToDeathComputation(
+                basis="first_publication",
+                first_publication=ReportedNumeral[DateOfFirstPublication](
+                    reported="2005-01-01", inferred=publication,
+                ),
+                as_of=ReportedNumeral[DateOfDeath](
+                    reported="2020-10-27", inferred=death,
+                ),
+            ),
+            inferred=inferred,
+        ),
+    )
+    adapter: TypeAdapter[AgeStandardized] = TypeAdapter(AgeStandardized)
+    assert adapter.validate_json(value.model_dump_json()) == value
+
+
+def test_unknown_birth_and_death_dates_produce_age_at_death_range() -> None:
+    birth = DateOfBirth(year=1963, month=NR, day=NR)
+    death = DateOfDeath(year=2020, month=NR, day=NR)
+    inferred = birth.infer_age(death)
+    assert type(inferred) is BiologicalAgeAtDeath
+    assert inferred.root == AgeSensitivityInterval(lower=56, upper=57)
+
+
+def test_death_is_required_only_for_deceased_variant() -> None:
+    birth = DateOfBirth(year=1963, month=9, day=20)
+    assert type(birth_age(birth, "September 20, 1963")) is AgeFromBirth
+    living = BirthComputation(
+        basis="birth",
+        birth=ReportedNumeral[DateOfBirth](
+            reported="September 20, 1963", inferred=birth,
+        ),
+        as_of=AS_OF,
+    )
+    with pytest.raises(ValidationError):
+        BirthToDeathComputation.model_validate(living.model_dump())
+
+
+def test_death_cannot_precede_birth() -> None:
+    birth = DateOfBirth(year=1963, month=9, day=20)
+    with pytest.raises(ValueError, match="Event occurs after death"):
+        birth.infer_age(DateOfDeath(year=1962, month=NR, day=NR))
+
+
+DECEASED_BIRTH_JSON = """{
+  "age": {
+    "provenance": "computed",
+    "computed": {
+      "basis": "birth",
+      "birth": {
+        "provenance": "reported",
+        "reported": "September 20, 1963",
+        "inferred": {"year": 1963, "month": 9, "day": 20}
+      },
+      "as_of": {
+        "provenance": "reported",
+        "reported": "October 27, 2020",
+        "inferred": {"year": 2020, "month": 10, "day": 27}
+      }
+    },
+    "inferred": 57
+  }
+}"""
+
+DECEASED_PUBLICATION_JSON = """{
+  "age": {
+    "provenance": "computed",
+    "computed": {
+      "basis": "first_publication",
+      "first_publication": {
+        "provenance": "reported",
+        "reported": "2005",
+        "inferred": {"year": 2005, "month": "NR", "day": "NR"}
+      },
+      "as_of": {
+        "provenance": "reported",
+        "reported": "2020",
+        "inferred": {"year": 2020, "month": "NR", "day": "NR"}
+      }
+    },
+    "inferred": {"lower": 14, "upper": 15}
+  }
+}"""
+
+
+@pytest.mark.parametrize(
+    ("serialized", "variant", "expected_age"),
+    (
+        (DECEASED_BIRTH_JSON, AgeAtDeathFromBirth, 57),
+        (
+            DECEASED_PUBLICATION_JSON,
+            AgeAtDeathFromFirstPublication,
+            AgeSensitivityInterval(lower=14, upper=15),
+        ),
+    ),
+)
+def test_deceased_standardized_json_examples(
+    serialized: str,
+    variant: type[BaseModel],
+    expected_age: int | AgeSensitivityInterval,
+) -> None:
+    adapter: TypeAdapter[AgeStandardized] = TypeAdapter(AgeStandardized)
+    value = adapter.validate_json(serialized)
+    assert isinstance(value, Age)
+    assert type(value) is variant
+    assert value.age.inferred.root == expected_age
+    assert isinstance(value, (AgeAtDeathFromBirth, AgeAtDeathFromFirstPublication))
+    assert value.age.computed.as_of.provenance == "reported"
+    assert value.model_dump(mode="json") == json.loads(serialized)
+
+
+def test_deceased_birth_martin_serializes_exactly() -> None:
+    adapter: TypeAdapter[AgeStandardized] = TypeAdapter(AgeStandardized)
+    value = adapter.validate_json(DECEASED_BIRTH_JSON)
+    assert isinstance(value, AgeAtDeathFromBirth)
+    canonical = json.dumps(
+        value.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=COMPACT_JSON_SEPARATORS,
+    )
+    rendered = render_standardized_submission_value(canonical)
+    assert martin_serialize_standardized_cell(rendered) == (
+        "**AI-generated text**:\n\n```\n"
+        "57\ncomputed\n"
+        "    2020, 10, 27\n    reported\n    October 27, 2020\n"
+        "  birth\n"
+        "    1963, 9, 20\n    reported\n    September 20, 1963\n```"
+    )
+
+
+def test_deceased_age_requires_death_evidence() -> None:
+    adapter: TypeAdapter[AgeStandardized] = TypeAdapter(AgeStandardized)
+    value = adapter.validate_json(DECEASED_BIRTH_JSON)
+    birth_excerpt = schema.WebSearchExcerpt(
+        excerpt="Born September 20, 1963",
+        url="https://example.test/birth",
+    )
+    birth_only = schema.AgeFirstPublicationSubmission(
+        value="Born in 1963; died in 2020.",
+        standardized_value=value,
+        web_search_excerpts=[birth_excerpt],
+    )
+    assert _age_evidence_check_failed(
+        birth_only, push_response_record=object(),  # type: ignore[arg-type]
+    )
+    both = birth_only.model_copy(update={
+        "web_search_excerpts": [
+            birth_excerpt,
+            schema.WebSearchExcerpt(
+                excerpt="Died October 27, 2020",
+                url="https://example.test/death",
+            ),
+        ],
+    })
+    assert not _age_evidence_check_failed(
+        both, push_response_record=object(),  # type: ignore[arg-type]
+    )
