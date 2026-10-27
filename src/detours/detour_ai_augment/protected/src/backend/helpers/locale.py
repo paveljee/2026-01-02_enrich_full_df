@@ -596,6 +596,9 @@ class Locale:
     EVIDENCE_SUBMISSION_REJECTED: Final = (
         "submission contains evidence that is not yet exactly verified"
     )
+    STANDARDIZED_VALUE_RETRY_VIOLATION: Final = (
+        "standardized_value was not accepted; you may revise this field's standardized_value."
+    )
     AGE_EVIDENCE_AS_OF_MISMATCH_LOG: Final = (
         "age evidence as_of mismatch: submitted=%s push_utc_date=%s "
         "push_received_at_unix_usec=%s"

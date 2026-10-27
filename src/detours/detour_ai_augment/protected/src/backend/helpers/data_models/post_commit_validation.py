@@ -1532,7 +1532,7 @@ def _transition_field(
         ):
             violations.append(_RetryViolation(
                 submission_column=field,
-                message=f"{field.value}: {Locale.EVIDENCE_SUBMISSION_REJECTED}",
+                message=f"{field.value}: {Locale.STANDARDIZED_VALUE_RETRY_VIOLATION}",
             ))
         elif submission.value == narrative_value:
             standardized_value = candidate

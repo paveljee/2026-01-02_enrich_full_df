@@ -3905,7 +3905,7 @@ def test_retry_guidance_separates_exact_progress_from_blocking_contract_violatio
         ),
         message=(
             f"{KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL}: "
-            f"{Locale.EVIDENCE_SUBMISSION_REJECTED}"
+            f"{Locale.STANDARDIZED_VALUE_RETRY_VIOLATION}"
         ),
     )
     detail = post_commit_validation._assessment_public_detail(
@@ -7209,7 +7209,7 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
                     elif submission is standardized_age_invalid:
                         assert (
                             f"{KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL}: "
-                            f"{Locale.EVIDENCE_SUBMISSION_REJECTED}"
+                            f"{Locale.STANDARDIZED_VALUE_RETRY_VIOLATION}"
                             in pull.text
                         )
                     elif submission is standardized_changed:
@@ -7219,7 +7219,7 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
                         )
                         assert (
                             f"{KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL}: "
-                            f"{Locale.EVIDENCE_SUBMISSION_REJECTED}"
+                            f"{Locale.STANDARDIZED_VALUE_RETRY_VIOLATION}"
                             not in pull.text
                         )
             audit_rows = api_store._execute(
