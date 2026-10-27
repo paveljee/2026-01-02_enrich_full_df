@@ -40,6 +40,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.sto
     initialize_backend_store,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
     EXPECTED_GROUND_TRUTH_RESEARCHERS,
     EXPECTED_INELIGIBLE_RESEARCHERS,
     EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
@@ -95,6 +96,7 @@ E2E_WIDE_VIEWPORT: ViewportSize = {"width": 1_600, "height": 1_000}
 E2E_GRID_MARKER = "preserved"
 E2E_RUN_BASE_TIME = datetime(2026, 8, 10, tzinfo=timezone.utc)
 E2E_LONG_CARD_TOKEN = "responsive-card-content-" * 40
+E2E_CARD_MARKDOWN_ENV_NAME = "AI_AUGMENT_E2E_CARD_MARKDOWN"
 PYTEST_CURRENT_TEST_ENV_NAME = "PYTEST_CURRENT_TEST"
 BROWSER_LEADING_RESEARCHER_COUNT = 2
 BROWSER_PILOT_INELIGIBLE_DRAW = "pilot.1"
@@ -632,7 +634,7 @@ class BrowserController:
         render_count = self._card_render_count[namekey_json]
         return control_ui._ResearcherCardView(
             researcher=researcher,
-            card_markdown=(
+            card_markdown=os.getenv(E2E_CARD_MARKDOWN_ENV_NAME) or (
                 f"#### {KTP_FILENAME_COL}: `{E2E_CARD_FILENAME}`\n\n"
                 f"render-count-{render_count}\n\n"
                 f"**`{E2E_CARD_FIELD_LABEL}`**: {E2E_CARD_FIELD_VALUE}\n\n"
@@ -781,12 +783,15 @@ def launch_e2e_browser(playwright: Playwright, pytestconfig: pytest.Config) -> B
 @contextmanager
 def control_centre_browser(
     pytestconfig: pytest.Config, nicegui_storage_path: Path,
+    *, card_markdown: str | None = None,
 ) -> Generator[tuple[Page, list[str]], None, None]:
     repository_root = pytestconfig.rootpath
     port = available_e2e_port()
     url = f"http://{E2E_HOST}:{port}"
     server_environment = pytest_plugin.nicegui_test_environment(nicegui_storage_path)
     server_environment.pop(PYTEST_CURRENT_TEST_ENV_NAME, None)
+    if card_markdown is not None:
+        server_environment[E2E_CARD_MARKDOWN_ENV_NAME] = card_markdown
     process = subprocess.Popen(
         [
             sys.executable,
@@ -837,6 +842,62 @@ def test_underscore_field_labels_render_literally_in_researcher_card(
         )
         expect(field_label).to_have_text(E2E_CARD_FIELD_LABEL)
         expect(filename).to_have_text(E2E_CARD_FILENAME)
+        assert errors == [], Counter(errors)
+
+
+def test_repeated_docx_extractors_render_as_distinct_card_table_values(
+    pytestconfig: pytest.Config, nicegui_storage_path: Path, tmp_path: Path,
+) -> None:
+    from src.detours.detour_ai_augment.tests.control_centre.test_ui import (
+        configured_pipeline_config,
+        four_docx_completed_researcher,
+    )
+
+    completed = four_docx_completed_researcher(
+        NameKey(first_name="First 1", last_name="Last 1")
+    )
+    client = control_ui._BackendDatabaseClient(
+        socket_path=tmp_path / "absent.sock",
+        pipeline_config=configured_pipeline_config(),
+    )
+    card_markdown = client.card(completed)
+
+    with control_centre_browser(
+        pytestconfig, nicegui_storage_path, card_markdown=card_markdown,
+    ) as (page, errors):
+        grid_row_for_draw(page, BROWSER_COMPLETED_DRAW).click()
+        page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID).click()
+        card = page.get_by_test_id(control_ui.CARD_MARKDOWN_TEST_ID)
+        table = card.locator("table")
+        expect(table).to_be_visible()
+        expect(table.locator("thead th")).to_have_text([
+            "researcher_variable",
+            "manual_table_1_value",
+            "ai_augment_value",
+            "ai_augment_footnotes",
+        ])
+        author_column = AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS[0][0]
+        author_row = table.locator("tbody tr").filter(has_text=author_column)
+        expect(author_row).to_have_count(1)
+        cells = author_row.locator("td")
+        expect(cells).to_have_count(4)
+        expect(cells.first).to_have_text(author_column)
+        manual = cells.nth(1)
+        assert manual.locator("strong").all_text_contents() == [
+            "Dwayne Robinson extracted",
+            "Hermione Isildur extracted",
+            "Dwayne Robinson extracted",
+            "Hermione Isildur extracted",
+        ]
+        assert manual.locator("code").all_text_contents() == [
+            '"First DR author"',
+            '"First HI author"',
+            '"Second DR author"',
+            '"Second HI author"',
+        ]
+        expect(manual.locator("br")).to_have_count(6)
+        expect(cells.nth(2)).to_contain_text('AI-generated text: "NR"')
+        expect(cells.nth(3)).to_have_text("[MISSING AI FOOTNOTES]")
         assert errors == [], Counter(errors)
 
 

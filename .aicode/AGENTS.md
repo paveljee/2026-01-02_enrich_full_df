@@ -79,6 +79,8 @@ a substitute for current user instructions.
   run relevant tests, Ruff, and mypy when they respect the hard access
   boundaries; report any check that cannot be run. `pixi run` never grants
   permission to launch `src.repl`, detours, or access prohibited artifacts.
+- For UI formatting changes or claims, assert the rendered card in a browser;
+  source-Markdown order alone does not verify displayed cells or line breaks.
 
 ## Detour architecture (review only, not execution permission)
 

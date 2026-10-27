@@ -30,7 +30,9 @@ from zoneinfo import ZoneInfo
 import duckdb
 import pytest
 from fastapi import status
+from lxml import html
 from nicegui import app, ui
+from nicegui.elements.markdown import prepare_content
 from pydantic import ValidationError
 
 from src.detours.detour_ai_augment.protected.src.backend import server as backend_server
@@ -3530,6 +3532,85 @@ def test_completed_card_renders_ordered_ai_table_with_redacted_footnotes(
     assert markdown.index(f"**`{KTP_AI_AUGMENT_SESSION_METADATA_COL}`**") < markdown.index(rows[0])
     assert markdown.index(rows[-1]) < markdown.index(f"**`{KTP_AI_AUGMENT_FOOTNOTES_COL}`**")
     assert completed.model_dump_json() == before
+
+
+def four_docx_completed_researcher(
+    namekey: NameKey = NAMEKEY,
+) -> AiAugmentSingularOuterDict:
+    completed, _ = completed_query_researcher(researcher(namekey=namekey))
+    author_docx_column = DOCX_TO_AI_AUGMENT_COLUMNS[0][0]
+    comments_docx_column = DOCX_TO_AI_AUGMENT_COLUMNS[-1][0]
+    docx_sources = (
+        ("manual_1_DR.docx", "Dwayne Robinson", "First DR author"),
+        ("manual_2_HI.docx", "Hermione Isildur", "First HI author"),
+        ("manual_3_DR.docx", "Dwayne Robinson", "Second DR author"),
+        ("manual_4_HI.docx", "Hermione Isildur", "Second HI author"),
+    )
+    completed = completed.model_copy(update={
+        "docx_innerdicts": tuple(
+            InnerDict.from_mapping({
+                KTP_NAMEKEY_COL: namekey.to_json_key(),
+                KTP_FILENAME_COL: filename,
+                author_docx_column: author,
+                comments_docx_column: f"**{extractor}** commented on the record.",
+            }, DocxMatchProcedure())
+            for filename, extractor, author in docx_sources
+        ),
+    })
+    return completed
+
+
+def test_completed_card_renders_repeated_docx_extractors_in_table(
+    tmp_path: Path,
+) -> None:
+    completed = four_docx_completed_researcher()
+    client = control_ui._BackendDatabaseClient(
+        socket_path=tmp_path / "absent.sock",
+        pipeline_config=configured_pipeline_config(),
+    )
+
+    markdown = client.card(completed)
+
+    rows = [line for line in markdown.splitlines() if line.startswith("| ")]
+    author_column = AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS[0][0]
+    author_row = next(row for row in rows if author_column.replace("_", "\\_") in row)
+    assert len(rows) == len(AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS) + 3
+    assert author_row.split(" | ")[1] == "<br><br>".join((
+        '**Dwayne Robinson extracted**: `"First DR author"`',
+        '**Hermione Isildur extracted**: `"First HI author"`',
+        '**Dwayne Robinson extracted**: `"Second DR author"`',
+        '**Hermione Isildur extracted**: `"Second HI author"`',
+    ))
+    rendered = html.fromstring(
+        prepare_content(markdown, extras="fenced-code-blocks tables")
+    )
+    (table,) = rendered.xpath(".//table")
+    assert [cell.text_content() for cell in table.xpath("./thead/tr/th")] == [
+        "researcher_variable",
+        "manual_table_1_value",
+        "ai_augment_value",
+        "ai_augment_footnotes",
+    ]
+    (author_html_row,) = (
+        row for row in table.xpath("./tbody/tr")
+        if row.xpath("./td")[0].text_content() == author_column
+    )
+    manual_cell = author_html_row.xpath("./td")[1]
+    assert [node.text_content() for node in manual_cell.xpath(".//strong")] == [
+        "Dwayne Robinson extracted",
+        "Hermione Isildur extracted",
+        "Dwayne Robinson extracted",
+        "Hermione Isildur extracted",
+    ]
+    assert [node.text_content() for node in manual_cell.xpath(".//code")] == [
+        '"First DR author"',
+        '"First HI author"',
+        '"Second DR author"',
+        '"Second HI author"',
+    ]
+    assert len(manual_cell.xpath(".//br")) == 6
+    assert 'AI-generated text: "NR"' in author_html_row.xpath("./td")[2].text_content()
+    assert author_html_row.xpath("./td")[3].text_content() == "[MISSING AI FOOTNOTES]"
 
 
 @pytest.mark.anyio
