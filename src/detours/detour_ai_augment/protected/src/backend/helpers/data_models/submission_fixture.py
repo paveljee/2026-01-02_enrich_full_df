@@ -20,6 +20,7 @@ from .pydantic_to_paste import (
     CommentsSubmission,
     ComputedNumeral,
     CurrentAcademicPosition,
+    CurrentBiologicalAge,
     DateOfBirth,
     EducationRecord,
     EducationSubmission,
@@ -280,6 +281,8 @@ L_FEI_FEI_RETRY_FIXTURE.submission.race_ethnicity_language_culture.standardized_
 )
 L_FEI_FEI_RETRY_FIXTURE.submission.gender.standardized_value = "Woman"
 L_FEI_FEI_DOB = DateOfBirth(year=1976, month=NOT_REPORTED_VALUE, day=NOT_REPORTED_VALUE)
+L_FEI_FEI_AGE = L_FEI_FEI_DOB.infer_age(AGE_EXAMPLE_AS_OF)
+assert isinstance(L_FEI_FEI_AGE, CurrentBiologicalAge)
 L_FEI_FEI_RETRY_FIXTURE.submission.age_first_publication.standardized_value = AgeFromBirth(
     age=ComputedNumeral(
         computed=BirthComputation(
@@ -289,7 +292,7 @@ L_FEI_FEI_RETRY_FIXTURE.submission.age_first_publication.standardized_value = Ag
             ),
             as_of=AGE_EXAMPLE_AS_OF,
         ),
-        inferred=L_FEI_FEI_DOB.infer_age(AGE_EXAMPLE_AS_OF),
+        inferred=L_FEI_FEI_AGE,
     ),
 )
 L_FEI_FEI_RETRY_FIXTURE.submission.education.standardized_value = [
