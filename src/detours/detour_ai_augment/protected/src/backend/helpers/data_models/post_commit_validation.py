@@ -319,9 +319,23 @@ class _FieldPin(IntFlag):
     STANDARDIZED = 4
 
 
+class _EvidenceMatch(FrozenStrictModel):
+    field: str
+    evidence_number: int
+    excerpt: str
+    url: str
+    ref_id: str
+    call_id: str
+    cite_text: str
+    excerpt_position: int
+    fco_timestamp: str
+    arguments_json: str
+
+
 class _EvidenceObligation(FrozenStrictModel):
     outcome: EvidenceOutcome
     submission: EvidenceSubmission
+    selected_match: _EvidenceMatch | None = None
 
 
 class _StandardizedPin(FrozenStrictModel):
@@ -407,19 +421,6 @@ class _RolloutRecordLine(FrozenStrictModel):
     line_number: int = Field(ge=1)
     line_sha256: StrictStr
     line_value: dict[str, JsonValue]
-
-
-class _EvidenceMatch(FrozenStrictModel):
-    field: str
-    evidence_number: int
-    excerpt: str
-    url: str
-    ref_id: str
-    call_id: str
-    cite_text: str
-    excerpt_position: int
-    fco_timestamp: str
-    arguments_json: str
 
 
 class _EvidenceItemAssessment(FrozenStrictModel):
@@ -1024,6 +1025,7 @@ def _assess_field_evidence(
     *,
     config_facts: _CommitConfigFacts,
     evidence_number_offset: _EvidenceNumberOffset,
+    previous: _FieldPinState | None = None,
 ) -> _EvidenceAssessment:
     assessments: list[_EvidenceItemAssessment] = []
     for index, evidence in enumerate(field_submission.web_search_excerpts):
@@ -1049,11 +1051,54 @@ def _assess_field_evidence(
             candidate for candidate in exact_candidates
             if evidence_urls_match(evidence.url, candidate.url)
         )
+        prior = (
+            previous.evidence_obligations[index]
+            if previous is not None
+            and index < len(previous.evidence_obligations)
+            else None
+        )
+        pinned_match = (
+            prior.selected_match
+            if prior is not None
+            and prior.outcome == EVIDENCE_OUTCOME_V1_EXACT
+            and prior.submission == evidence
+            else None
+        )
+        if (
+            prior is not None
+            and prior.outcome == EVIDENCE_OUTCOME_V1_EXACT
+            and prior.submission == evidence
+            and pinned_match is None
+        ):
+            raise _PushValidationError(
+                Locale.PINNED_EVIDENCE_REF_MISSING_TEMPLATE.format(
+                    location=EVIDENCE_LOCATION_DEF(field.value, index),
+                )
+            )
+        pinned_candidate = (
+            next(
+                (
+                    candidate for candidate in exact_url_candidates
+                    if candidate.ref_id == pinned_match.ref_id
+                    and candidate.call_id == pinned_match.call_id
+                ),
+                None,
+            )
+            if pinned_match is not None else None
+        )
+        if pinned_match is not None and pinned_candidate is None:
+            raise _PushValidationError(
+                Locale.PINNED_EVIDENCE_REF_MISSING_TEMPLATE.format(
+                    location=EVIDENCE_LOCATION_DEF(field.value, index),
+                )
+            )
         if exact_url_candidates:
             if len(exact_url_candidates) > 1 and not ALLOW_MULTIPLE_EVIDENCE_MATCHES:
                 raise _MultipleEvidenceMatches(evidence.excerpt)
             candidate = (
-                EVIDENCE_RANDOM.choice(exact_url_candidates)
+                pinned_candidate
+                if pinned_candidate is not None
+                else EVIDENCE_RANDOM.choice(exact_url_candidates)
                 if len(exact_url_candidates) > 1
                 else exact_url_candidates[0]
             )
@@ -1319,6 +1364,14 @@ def _obligation_item_is_unchanged(
     return previous.submission == current
 
 
+def _obligation_from_assessment(item: _EvidenceItemAssessment) -> _EvidenceObligation:
+    return _EvidenceObligation(
+        outcome=item.outcome,
+        submission=item.submission,
+        selected_match=item.match,
+    )
+
+
 def _apply_retry_obligations(
     field: _EvidenceSubmissionColumn,
     submission: FieldSubmission,
@@ -1366,9 +1419,7 @@ def _apply_retry_obligations(
                     submission=current,
                 ))
             else:
-                next_evidence.append(_EvidenceObligation(
-                    outcome=item.outcome, submission=current,
-                ))
+                next_evidence.append(_obligation_from_assessment(item))
             continue
 
         prior = prior_evidence[index]
@@ -1409,9 +1460,7 @@ def _apply_retry_obligations(
                 ))
                 next_evidence.append(prior)
             else:
-                next_evidence.append(_EvidenceObligation(
-                    outcome=item.outcome, submission=current,
-                ))
+                next_evidence.append(_obligation_from_assessment(item))
             continue
         if prior.outcome == EVIDENCE_OUTCOME_UNMATCHED:
             if isinstance(current, EvidenceWithdrawal):
@@ -1423,9 +1472,7 @@ def _apply_retry_obligations(
                     next_evidence.append(prior)
                     continue
                 withdrawn_indices.append(index)
-            next_evidence.append(_EvidenceObligation(
-                outcome=item.outcome, submission=current,
-            ))
+            next_evidence.append(_obligation_from_assessment(item))
             continue
         if not isinstance(current, EvidenceWithdrawal):
             violations.append(_RetryViolation(
@@ -1471,6 +1518,7 @@ def _review_field(
         submission,
         config_facts=config_facts,
         evidence_number_offset=evidence_number_offset,
+        previous=previous,
     )
     return _transition_field(
         field,

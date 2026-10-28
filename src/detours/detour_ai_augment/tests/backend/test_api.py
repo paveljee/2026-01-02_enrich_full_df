@@ -593,7 +593,19 @@ def evaluate_retry_submission_for_test(
 def test_age_evidence_validation_uses_push_utc_date_and_logs_privately(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    def retained_obligations(
+        field: pydantic_to_paste.AgeFirstPublicationSubmission,
+    ) -> tuple[post_commit_validation._EvidenceObligation, ...]:
+        return tuple(
+            post_commit_validation._EvidenceObligation(
+                outcome=EVIDENCE_OUTCOME_V1_EXACT,
+                submission=excerpt,
+            )
+            for excerpt in field.web_search_excerpts
+        )
+
     age_field = L_FEI_FEI_RETRY_FIXTURE.submission.age_first_publication
+    age_obligations = retained_obligations(age_field)
     age_value = age_field.standardized_value
     assert isinstance(age_value, pydantic_to_paste.AgeFromBirth)
     as_of = age_value.age.computed.as_of
@@ -613,11 +625,14 @@ def test_age_evidence_validation_uses_push_utc_date_and_logs_privately(
     })
 
     assert not post_commit_validation._age_evidence_check_failed(
-        age_field, push_response_record=push,
+        age_field,
+        evidence_obligations=age_obligations,
+        push_response_record=push,
     )
     with caplog.at_level(logging.WARNING):
         assert post_commit_validation._age_evidence_check_failed(
             age_field,
+            evidence_obligations=age_obligations,
             push_response_record=push.model_copy(update={
                 "ready_to_respond_at_unix_usec": (
                     push.ready_to_respond_at_unix_usec + 2 * MICROSECONDS_PER_SECOND
@@ -633,7 +648,9 @@ def test_age_evidence_validation_uses_push_utc_date_and_logs_privately(
     caplog.clear()
     with caplog.at_level(logging.WARNING):
         assert post_commit_validation._age_evidence_check_failed(
-            without_reported_year, push_response_record=push,
+            age_field,
+            evidence_obligations=retained_obligations(without_reported_year),
+            push_response_record=push,
         )
     assert "reported='1976'" in caplog.text
     assert "No date stated" in caplog.text
@@ -653,7 +670,14 @@ def test_age_evidence_validation_uses_push_utc_date_and_logs_privately(
         )],
     })
     assert not post_commit_validation._age_evidence_check_failed(
-        verbatim_age, push_response_record=push,
+        verbatim_age,
+        evidence_obligations=retained_obligations(verbatim_age),
+        push_response_record=push,
+    )
+    assert post_commit_validation._age_evidence_check_failed(
+        verbatim_age,
+        evidence_obligations=age_obligations,
+        push_response_record=push,
     )
 
 
@@ -5132,6 +5156,82 @@ def test_multiple_exact_excerpt_and_url_matches_use_random_candidate(
         assert validated == repeated
     finally:
         connection.close()
+
+
+def test_exact_evidence_retry_keeps_selected_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    index = build_duplicate_evidence_index()
+    field = post_commit_validation._EvidenceSubmissionColumn(
+        AI_AUGMENT_EVIDENCE_COLUMNS[0]
+    )
+    submission = FieldSubmission.model_validate({
+        "value": field.value,
+        "web_search_excerpts": [{"excerpt": TEST_EXCERPT, "url": TEST_URL}],
+    })
+    first = post_commit_validation._assess_field_evidence(
+        index,
+        field,
+        submission,
+        config_facts=MATCH_V1_CONFIG_FACTS,
+        evidence_number_offset=post_commit_validation._EvidenceNumberOffset(0),
+    )
+    first_match = first.items[0].match
+    assert first_match is not None
+    obligations, violations, changed = post_commit_validation._apply_retry_obligations(
+        field, submission, first, post_commit_validation._FieldPinState(),
+    )
+    assert not violations
+    assert changed
+    assert obligations[0].selected_match == first_match
+    previous = post_commit_validation._FieldPinState(
+        pins=post_commit_validation._FieldPin.EVIDENCE,
+        evidence_obligations=obligations,
+    )
+
+    monkeypatch.setattr(
+        post_commit_validation.EVIDENCE_RANDOM,
+        "choice",
+        lambda _candidates: pytest.fail("unchanged pinned evidence was resampled"),
+    )
+    retry = post_commit_validation._assess_field_evidence(
+        index,
+        field,
+        submission,
+        config_facts=MATCH_V1_CONFIG_FACTS,
+        evidence_number_offset=post_commit_validation._EvidenceNumberOffset(7),
+        previous=previous,
+    )
+    retry_match = retry.items[0].match
+    assert retry_match is not None
+    assert (retry_match.ref_id, retry_match.call_id) == (
+        first_match.ref_id, first_match.call_id,
+    )
+    assert first_match.evidence_number == 1
+    assert retry_match.evidence_number == 8
+
+    missing_reference_index = post_commit_validation._RolloutIndex(
+        session=index.session,
+        fc_rows=index.fc_rows,
+        fco_rows=index.fco_rows,
+        turn_ref_rows=tuple(
+            row for row in index.turn_ref_rows
+            if (row.ref_id, row.call_id)
+            != (first_match.ref_id, first_match.call_id)
+        ),
+    )
+    with pytest.raises(
+        post_commit_validation._PushValidationError,
+        match="previously selected evidence reference is unavailable",
+    ):
+        post_commit_validation._assess_field_evidence(
+            missing_reference_index,
+            field,
+            submission,
+            config_facts=MATCH_V1_CONFIG_FACTS,
+            evidence_number_offset=post_commit_validation._EvidenceNumberOffset(7),
+            previous=previous,
+        )
 
 
 def test_seeded_evidence_selection_round_trips_deterministically(

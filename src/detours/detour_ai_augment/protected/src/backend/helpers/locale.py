@@ -511,6 +511,9 @@ class Locale:
     EVIDENCE_NO_MATCH_TEMPLATE: Final = (
         "{field}: excerpt has no indexed match; excerpt={excerpt!r} url={url!r}"
     )
+    PINNED_EVIDENCE_REF_MISSING_TEMPLATE: Final = (
+        "{location}: previously selected evidence reference is unavailable"
+    )
     EVIDENCE_URL_MISMATCH_TEMPLATE: Final = (
         "{field}: submitted URL does not match; excerpt={excerpt!r} url={url!r}"
     )
