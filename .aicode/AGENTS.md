@@ -60,7 +60,9 @@ a substitute for current user instructions.
 - Code, configuration JSON, and tests may be read for review. This does not
   prohibit edits to them when the user authorizes an implementation task.
   Do not inspect `.aicode/` except this `AGENTS.md`, or inspect prohibited
-  data and artifacts while reviewing code.
+  data and artifacts while reviewing code. Scope text searches to explicit
+  code files or source extensions so bundled sample rollouts do not enter
+  search output.
 
 ## Working agreements learned here
 
@@ -70,8 +72,26 @@ a substitute for current user instructions.
 - Make surgical edits within the requested scope. Reuse existing production
   helpers and local step logic rather than inventing abstractions or making
   unrelated refactors. Preserve established data flow and serialization.
+  Use `$paveljee-kernighan-pike` for every patch, including test and instruction
+  patches: trace the path, make the smallest coherent change, and verify behavior.
   OpenAlex HTTP-log serialization currently uses
   `record.model_dump_json(ensure_ascii=True)`; do not propose a second format.
+- Live model-HTTP validation may reuse successful provider responses across
+  commits, but transient failures must be retried on a later commit. Reuse a
+  same-commit captured failure to finish that validation; replay binds each
+  validation to its explicitly recorded HTTP inputs. A 2xx status alone does
+  not establish a usable provider response; trace JSON decoding and structural
+  validation before calling a cache hit successful. When auditing persisted
+  HTTP, inspect response headers and bodies for reflected credentials as well
+  as the recorded request URL.
+- Codex citation markers in web-tool output are metadata, not evidence. Exact
+  and near matching must use text outside the current ref marker; a field-level
+  match alone does not prove a submitted excerpt can survive final footnote
+  rendering and a corrected retry.
+- When evaluating replay fidelity, trace configuration inputs and selected
+  candidate provenance through both the validation record and the materialized
+  output. Equality of a validation record does not prove equality of accepted
+  output or stable Dashboard labels.
 - For OpenAlex HTTP tests, use real `requests.Response` objects and intercept
   requests at the HTTP boundary. Do not replace production step logic with fake
   DuckDB connections, resource objects, or patched step functions.

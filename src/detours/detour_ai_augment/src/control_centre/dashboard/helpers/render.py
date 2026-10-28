@@ -36,7 +36,7 @@ EXTRACTED_LABEL_TEMPLATE = "**{names} extracted**:"
 AI_SECTION_MISSING_FIELD_TEMPLATE = "AI section lacks {column}"
 DOCX_EXTRACTOR_MISSING_TEMPLATE = "DOCX filename has no DR/HI extractor: {filename}"
 
-FOOTNOTE_MARKER = re.compile(r"\^(?P<numbers>[0-9]+(?:,[0-9]+)*)\^")
+FOOTNOTE_MARKER = re.compile(r"\^(?P<numbers>[0-9]+(?:,[0-9]+)*)\^\Z")
 EXTRACTOR_INITIALS_PATTERN = re.compile(r"(?<![A-Za-z])(?:DR|HI)(?![A-Za-z])")
 COMMENTER_NAME_PATTERN = re.compile(r"\*\*([^*]+)\*\*\s+commented on\b")
 
@@ -45,13 +45,27 @@ NARRATIVE_VALUE_DEF: Callable[[str], str] = lambda value: (
 )
 
 
+def markdown_code_fence(value: str) -> str:
+    longest = max(
+        (len(match.group()) for match in re.finditer(r"`+", value)), default=0,
+    )
+    return MARKDOWN_CODE_DELIMITER * max(3, longest + 1)
+
+
 def martin_serialize_standardized_cell(cell: str) -> str:
     indent_spaces = 2
-    opening = f"{codex_parse.AI_GENERATED_TEXT_PREFIX} {MARKDOWN_CODE_DELIMITER}"
-    if not (cell.startswith(opening) and cell.endswith(MARKDOWN_CODE_DELIMITER)):
+    prefix = f"{codex_parse.AI_GENERATED_TEXT_PREFIX} "
+    if not cell.startswith(prefix):
+        return cell
+    wrapped = cell[len(prefix):]
+    delimiter_length = len(wrapped) - len(wrapped.lstrip(MARKDOWN_CODE_DELIMITER))
+    if not delimiter_length:
+        return cell
+    delimiter = MARKDOWN_CODE_DELIMITER * delimiter_length
+    if not wrapped.endswith(delimiter):
         return cell
 
-    value = json.loads(cell[len(opening):-len(MARKDOWN_CODE_DELIMITER)])
+    value = json.loads(wrapped[delimiter_length:-delimiter_length])
 
     def flat(item: object) -> bool:
         if not isinstance(item, (dict, list)):
@@ -91,7 +105,7 @@ def martin_serialize_standardized_cell(cell: str) -> str:
         body = block(value)
     if not isinstance(value, (dict, list)) or "\n" not in body:
         return cell
-    fence = MARKDOWN_CODE_DELIMITER * 3
+    fence = markdown_code_fence(body)
     return f"{codex_parse.AI_GENERATED_TEXT_PREFIX}\n\n{fence}\n{body}\n{fence}"
 
 
@@ -101,22 +115,26 @@ def pipe_table(rows: list[list[str]]) -> str:
             return ""
         longest = max((len(match.group()) for match in re.finditer(r"`+", line)), default=0)
         ticks = "`" * (longest + 1)
+        if line.startswith("`") or line.endswith("`"):
+            return f"{ticks} {line} {ticks}"
         return ticks + line + ticks
 
     def cell_markdown(cell: str) -> str:
-        parts = re.split(r"```\n(.*?)\n```", str(cell), flags=re.DOTALL)
+        parts = re.split(r"(`{3,})\n(.*?)\n\1", str(cell), flags=re.DOTALL)
         rendered = []
         for index, part in enumerate(parts):
-            if index % 2:
+            if index % 3 == 2:
                 rendered.append("<br>".join(
                     code_span(line)
-                    for line in part.split("\n")
+                    for line in codex_parse.LINE_BREAK.split(part)
                 ))
-            else:
+            elif index % 3 == 0:
                 rendered.append(
-                    part.replace(r"\|", "|").replace("|", r"\|")
-                    .replace(r"\_", "_").replace("_", r"\_")
-                    .replace("\n", "<br>")
+                    codex_parse.LINE_BREAK.sub(
+                        "<br>",
+                        part.replace(r"\|", "|").replace("|", r"\|")
+                        .replace(r"\_", "_").replace("_", r"\_"),
+                    )
                 )
         return "".join(rendered)
 
@@ -197,14 +215,16 @@ def ai_augment_field_renderer(
                     if value is None or not str(value).strip():
                         ground_truth.append(MISSING_MANUAL_EXTRACTION)
                     elif multiline:
+                        manual_text = str(value)
+                        fence = markdown_code_fence(manual_text)
                         ground_truth.append(
-                            f"{prefix}{chr(10) * 2}```{chr(10)}"
-                            f"{value}{chr(10)}```"
+                            f"{prefix}{chr(10) * 2}{fence}{chr(10)}"
+                            f"{manual_text}{chr(10)}{fence}"
                         )
                     else:
+                        manual_json = json.dumps(str(value), ensure_ascii=False)
                         ground_truth.append(
-                            f"{prefix} "
-                            f"`{json.dumps(str(value), ensure_ascii=False)}`"
+                            f"{prefix} {codex_parse.markdown_code_span(manual_json)}"
                         )
 
             match = FOOTNOTE_MARKER.search(str(values[ai_column]))

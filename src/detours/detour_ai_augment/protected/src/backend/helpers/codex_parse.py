@@ -80,6 +80,18 @@ def escape_markdown_text(value: str) -> str:
     return LINE_BREAK.sub(" ", value).translate(MARKDOWN_ESCAPE_TRANSLATION)
 
 
+def escape_embedded_html_and_images(value: str) -> str:
+    return value.replace("<", "&lt;").replace(">", "&gt;").replace("![", "!\\[")
+
+
+def markdown_code_span(value: str) -> str:
+    longest = max(
+        (len(match.group()) for match in re.finditer(r"`+", value)), default=0,
+    )
+    delimiter = MARKDOWN_CODE_DELIMITER * (longest + 1)
+    return f"{delimiter}{value}{delimiter}"
+
+
 def strip_citation_markup(
     value: str,
     *,
@@ -116,18 +128,18 @@ def render_footnoted_submission_value(
         marker = "^" + ",".join(str(number) for number in footnote_numbers) + "^"
     if (redacted := REDACTED_REPORT_VALUE(column)) is not None:
         return f"{redacted}{marker}"
-    return f'{AI_GENERATED_TEXT_PREFIX} "{value}"{marker}'
+    return f'{AI_GENERATED_TEXT_PREFIX} "{escape_embedded_html_and_images(value)}"{marker}'
 
 
 def render_standardized_submission_value(canonical_json: str) -> str:
     return (
         f"{AI_GENERATED_TEXT_PREFIX} "
-        f"{MARKDOWN_CODE_DELIMITER}{canonical_json}{MARKDOWN_CODE_DELIMITER}"
+        f"{markdown_code_span(canonical_json)}"
     )
 
 
 def render_comment(value: str, timestamp: str) -> str:
-    return f'- {AI_GENERATED_TEXT_PREFIX} "{value}" ({timestamp})'
+    return f'- {AI_GENERATED_TEXT_PREFIX} "{escape_embedded_html_and_images(value)}" ({timestamp})'
 
 
 def render_footnote(
@@ -179,10 +191,15 @@ def render_footnote(
             marker_suffix=marker_suffix,
         )
     )
+    # A cited URL is report text, not a source of new lines, HTML, images, or links.
+    # Double literal backslashes so they cannot cancel the bracket escape.
+    rendered_url = escape_embedded_html_and_images(
+        LINE_BREAK.sub(" ", url).replace("\\", "\\\\").replace("[", "\\[")
+    )
     return (
         f'{number}. "{prefix}{before}**{escaped_excerpt}**{after}{suffix}", '
         f"retrieved from web run tool using arguments^{number}^ on "
-        f'"{fco_timestamp}", {url}'
+        f'"{fco_timestamp}", {rendered_url}'
     )
 
 
@@ -238,5 +255,5 @@ def render_footnote_argument(
         break
     return (
         f"{number}. {AI_GENERATED_TEXT_PREFIX} "
-        f"{MARKDOWN_CODE_DELIMITER}{arguments_json}{MARKDOWN_CODE_DELIMITER}"
+        f"{markdown_code_span(arguments_json)}"
     )

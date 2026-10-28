@@ -487,6 +487,215 @@ def standardized_payload() -> dict[str, Any]:
     return payload
 
 
+def test_provider_transport_failure_keeps_replay_log_rebuildable(
+    backend_store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed provider request must not poison the durable validation log."""
+    store = backend_store
+    monkeypatch.setenv("OPENALEX_API_KEY", "isolated-test-key")
+    requests_seen: list[str] = []
+
+    def fail_send(
+        _session: requests.Session,
+        request: requests.PreparedRequest,
+        **_kwargs: Any,
+    ) -> requests.Response:
+        requests_seen.append(request.url or "")
+        raise requests.ConnectionError("fixture transport failure")
+
+    monkeypatch.setattr(requests.Session, "send", fail_send)
+    plain = valid_submission_body()
+    standardized = standardized_payload()
+    with store._writable(runtime):
+        initial = store._validate_commit(commit(store, plain, plain))
+        assert (
+            initial.validation_request_body.post_commit_validation.stage
+            is BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED
+        )
+        retry_pull = store._append_authoritative_record(
+            PullResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(),
+                    method=HTTP_GET_METHOD,
+                    path=PULL_PATH,
+                    response_code=HTTPStatus.OK,
+                    response_headers={HTTP_CONTENT_TYPE_HEADER: ContentType.MARKDOWN_UTF8},
+                    response_body=(
+                        initial.validation_request_body.post_commit_validation.detail or ""
+                    ),
+                ),
+                validation_request_record=initial,
+            )
+        )
+        assert isinstance(retry_pull, PullResponseRecord)
+        commit_id = commit(store, standardized, standardized, retry_pull)
+        failed = store._validate_commit(commit_id)
+        assert (
+            failed.validation_request_body.post_commit_validation.result
+            is BackendLifecycle.REJECTED
+        )
+        assert any(
+            record.received_at_unix_usec is None
+            for record in failed.validation_request_body.openalex_ror_records
+        )
+        assert all(
+            "isolated-test-key" not in record.model_dump_json()
+            for record in failed.validation_request_body.openalex_ror_records
+        )
+
+    assert any("isolated-test-key" in url for url in requests_seen)
+    replay_store = AiAugmentBackendStore._from_resources(
+        replay_log=runtime.pipeline_config.replay_log,
+        detour_db=store._detour_db.model_copy(update={
+            "path": store._detour_db_path.with_name("transport-replay.duckdb")
+        }),
+        rollout_cas=store.rollout_cas,
+    )
+    monkeypatch.setattr(requests.Session, "send", no_network)
+    rebuild_for_test(replay_store, runtime)
+
+
+@pytest.mark.parametrize("failure_status", [
+    None, 200, 204, 408, 429, 503,
+])
+def test_provider_failure_allows_later_retry(
+    backend_store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_status: int | None,
+) -> None:
+    monkeypatch.setenv("OPENALEX_API_KEY", "isolated-test-key")
+    requests_seen: list[str] = []
+
+    def send_failure(
+        _session: requests.Session,
+        request: requests.PreparedRequest,
+        **_kwargs: Any,
+    ) -> requests.Response:
+        requests_seen.append(request.url or "")
+        if failure_status is None:
+            raise requests.ConnectionError("fixture transport failure")
+        response = requests.Response()
+        response.status_code = failure_status
+        response.request = request
+        response.url = request.url or ""
+        response._content = (
+            b"not JSON" if failure_status == 200
+            else b"" if failure_status == 204
+            else b'{"error":"fixture provider failure"}'
+        )
+        return response
+
+    monkeypatch.setattr(requests.Session, "send", send_failure)
+    plain = valid_submission_body()
+    standardized = standardized_payload()
+    with backend_store._writable(runtime):
+        validation = backend_store._validate_commit(commit(backend_store, plain, plain))
+        for _ in range(2):
+            requests_before_retry = len(requests_seen)
+            retry_pull = backend_store._append_authoritative_record(
+                PullResponseRecord.from_http_request_log_record(
+                    http_request_log_record=persisted_http_record(
+                        record_id=uuid7(),
+                        method=HTTP_GET_METHOD,
+                        path=PULL_PATH,
+                        response_code=HTTPStatus.OK,
+                        response_headers={HTTP_CONTENT_TYPE_HEADER: ContentType.MARKDOWN_UTF8},
+                        response_body=(
+                            validation.validation_request_body.post_commit_validation.detail
+                            or ""
+                        ),
+                    ),
+                    validation_request_record=validation,
+                )
+            )
+            assert isinstance(retry_pull, PullResponseRecord)
+            validation = backend_store._validate_commit(
+                commit(backend_store, standardized, standardized, retry_pull)
+            )
+            assert (
+                validation.validation_request_body.post_commit_validation.result
+                is BackendLifecycle.REJECTED
+            )
+            assert len(requests_seen) > requests_before_retry
+
+    replay_store = AiAugmentBackendStore._from_resources(
+        replay_log=runtime.pipeline_config.replay_log,
+        detour_db=backend_store._detour_db.model_copy(update={
+            "path": backend_store._detour_db_path.with_name("retry-transport-replay.duckdb")
+        }),
+        rollout_cas=backend_store.rollout_cas,
+    )
+    monkeypatch.setattr(requests.Session, "send", no_network)
+    rebuild_for_test(replay_store, runtime)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="provider redirects can schedule a loopback HTTP capture",
+)
+def test_provider_redirect_does_not_capture_loopback(
+    backend_store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENALEX_API_KEY", "isolated-test-key")
+    requests_seen: list[str] = []
+
+    def send(
+        _session: requests.Session,
+        request: requests.PreparedRequest,
+        **_kwargs: Any,
+    ) -> requests.Response:
+        url = request.url or ""
+        requests_seen.append(url)
+        response = requests.Response()
+        response.request = request
+        response.url = url
+        if urlsplit(url).hostname == "api.openalex.org":
+            response.status_code = HTTPStatus.FOUND
+            response.headers["Location"] = "http://127.0.0.1/private"
+            response._content = b""
+        else:
+            response.status_code = HTTPStatus.OK
+            response._content = json.dumps({
+                "display_name": "Stanford University",
+                "ror": "https://ror.org/00f54p054",
+                "names": [{"value": "Stanford University", "types": ["ror_display"]}],
+            }).encode()
+        return response
+
+    monkeypatch.setattr(requests.Session, "send", send)
+    plain = valid_submission_body()
+    standardized = standardized_payload()
+    with backend_store._writable(runtime):
+        initial = backend_store._validate_commit(commit(backend_store, plain, plain))
+        retry_pull = backend_store._append_authoritative_record(
+            PullResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(),
+                    method=HTTP_GET_METHOD,
+                    path=PULL_PATH,
+                    response_code=HTTPStatus.OK,
+                    response_headers={HTTP_CONTENT_TYPE_HEADER: ContentType.MARKDOWN_UTF8},
+                    response_body=(
+                        initial.validation_request_body.post_commit_validation.detail or ""
+                    ),
+                ),
+                validation_request_record=initial,
+            )
+        )
+        assert isinstance(retry_pull, PullResponseRecord)
+        backend_store._validate_commit(
+            commit(backend_store, standardized, standardized, retry_pull)
+        )
+
+    assert any(urlsplit(url).hostname == "api.openalex.org" for url in requests_seen)
+    assert not any(urlsplit(url).hostname == "127.0.0.1" for url in requests_seen)
+
+
 def test_live_validation_replays_with_only_referenced_http(
     backend_store: AiAugmentBackendStore,
     runtime: AiAugmentBackendContext,

@@ -2429,7 +2429,15 @@ class _ControlCentreController:
                 self._active_run = None
                 self._queue.task_done()
                 if not self._shutting_down:
-                    await self.refresh_idle_state()
+                    try:
+                        await self.refresh_idle_state()
+                    except Exception as exc:
+                        self.set_queue_processing(False)
+                        message = Locale.QUEUE_IDLE_REFRESH_FAILED_TEMPLATE.format(
+                            error=exc
+                        )
+                        self._notifications.append(message)
+                        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, message)
 
     async def _wind_down_owned_run_processes(self) -> None:
         codex_error: Exception | None = None
@@ -3800,6 +3808,10 @@ async def publish_completed(
         if not card.download_available:
             raise RuntimeError(Locale.BACKEND_CARD_MISSING)
         cards.append(card)
+    # Catch case-only collisions on case-insensitive publication filesystems.
+    filenames = [card.filename_stem.casefold() for card in cards]
+    if len(filenames) != len(set(filenames)):
+        raise ValueError(Locale.PUBLISH_FILENAME_COLLISION)
     emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
              f"Publish completed: {dashboard.counts.total} researchers; {len(candidates)} eligible "
              f"and completed; {len(cards)} {output_format.upper()} downloads available")
