@@ -1281,16 +1281,22 @@ def _assessment_public_detail(
     non_exact_items = tuple(
         item for item in assessment.items if item.outcome != EVIDENCE_OUTCOME_V1_EXACT
     )
-    if non_exact_items:
-        lines.append(Locale.EVIDENCE_REVIEW_HEADER)
+    items_to_compare = tuple(
+        item for item in non_exact_items if item.outcome != EVIDENCE_OUTCOME_WITHDRAWN
+    )
+    # Report withdrawals for visibility, but they are not excerpts to compare.
     for item in non_exact_items:
+        if item.outcome == EVIDENCE_OUTCOME_WITHDRAWN:
+            location = EVIDENCE_LOCATION_DEF(item.field, item.index)
+            lines.append(Locale.EVIDENCE_WITHDRAWN_ITEM_TEMPLATE.format(location=location))
+    if items_to_compare:
+        lines.append(Locale.EVIDENCE_REVIEW_HEADER)
+    for item in items_to_compare:
         location = EVIDENCE_LOCATION_DEF(item.field, item.index)
         if item.outcome == EVIDENCE_OUTCOME_V2_NEAR:
             lines.append(Locale.EVIDENCE_NEAR_ITEM_TEMPLATE.format(location=location))
         elif item.outcome == EVIDENCE_OUTCOME_UNMATCHED:
             lines.append(Locale.EVIDENCE_UNMATCHED_ITEM_TEMPLATE.format(location=location))
-        elif item.outcome == EVIDENCE_OUTCOME_WITHDRAWN:
-            lines.append(Locale.EVIDENCE_WITHDRAWN_ITEM_TEMPLATE.format(location=location))
     if violations:
         lines.append(
             Locale.EVIDENCE_RETRY_VIOLATION_HEADER
@@ -1298,11 +1304,11 @@ def _assessment_public_detail(
             else Locale.EVIDENCE_RETRY_VIOLATIONS_HEADER_TEMPLATE.format(count=len(violations))
         )
         lines.extend(f"- {violation.message}" for violation in violations)
-    if non_exact_items:
+    if items_to_compare:
         lines.append(Locale.EVIDENCE_RETRY_COMPARE_INSTRUCTION)
     if violations:
         lines.append(Locale.EVIDENCE_RETRY_RESOLVE_INSTRUCTION)
-    if non_exact_items or violations:
+    if items_to_compare or violations:
         lines.append(Locale.EVIDENCE_RETRY_RESUBMIT_INSTRUCTION)
     if include_retry_contract:
         lines.append(RETRY_SUBMISSION_PUBLIC_GUIDANCE)

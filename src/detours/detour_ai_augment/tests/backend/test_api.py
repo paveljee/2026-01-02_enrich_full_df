@@ -4519,6 +4519,16 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
     assert field_items[1].outcome == expected_outcome
     assert retry_assessment.accepted is True
     assert violations == ()
+    if expected_outcome == EVIDENCE_OUTCOME_WITHDRAWN:
+        detail = post_commit_validation._assessment_public_detail(
+            retry_assessment,
+            progress_template=Locale.EVIDENCE_GOOD_PROGRESS_TEMPLATE,
+        )
+        location = f"{field}.web_search_excerpts[1]"
+        assert Locale.EVIDENCE_WITHDRAWN_ITEM_TEMPLATE.format(location=location) in detail
+        assert Locale.EVIDENCE_REVIEW_HEADER not in detail
+        assert Locale.EVIDENCE_RETRY_COMPARE_INSTRUCTION not in detail
+        assert Locale.EVIDENCE_RETRY_RESUBMIT_INSTRUCTION not in detail
 
 
 def test_v2_near_evidence_cannot_be_withdrawn(
