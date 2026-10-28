@@ -781,6 +781,269 @@ print(docx_path.resolve())
 '''
 cwd = "."
 
+
+# This takes in small diagnostic partition artifacts
+# together with full unzipped "txt" outputs across
+# two main pipeline runs and interprets the diff
+# in partition counts and, ultimately, eligibility
+# cohorts for the AI augmentation detour.
+# It is needed if source files change and the main
+# pipeline rearranges namekeys between partitions.
+[tool.pixi.feature.detour-ai-augment.tasks.cohort-migration-calculator]
+description = '''Usage: pixi run -e detour-ai-augment cohort-migration-calculator tmp/20261020_134940_mode0_run_from_reconciled_ai_augment/step_artifacts/10_build_cards_card_partitions_df.csv tmp/20261028_142639_mode0_run_post_detour_ai_augment_rc1/step_artifacts/10_build_cards_card_partitions_df.csv tmp/hcr_cards_subset0_20261020T1749Z_run_from_reconciled_ai_augment tmp/hcr_cards_subset0_20261028T1826Z_run_post_detour_ai_augment_rc1 --config config_ai_augment.json'''
+args = [{ arg = "before_csv" }, { arg = "after_csv" }, { arg = "before_cards_dir" }, { arg = "after_cards_dir" }, { arg = "config_flag" }, { arg = "config_path" }]
+cmd = """
+python -B -c '
+import csv
+import json
+import os
+import sys
+import tempfile
+from collections import Counter
+from pathlib import Path
+from typing import NamedTuple
+
+# The globals import calls gettempdir(); bypass its write-based directory probe.
+tempfile.tempdir = os.environ.get("TMPDIR") or "/tmp"
+from src.detours.detour_ai_augment.protected.src.backend.helpers import vars as v
+from src.helpers.vars import KTP_PARTITION_DOCX_VALUE, KTP_PARTITION_SSN_VALUE
+
+def release_batches(config_path):
+    with Path(config_path).open("r", encoding="utf-8") as source:
+        config = json.load(source)
+    map_path = Path(config["files_config"][v.MAP_SUBSET_0_TO_BATCH_KEY]["path"])
+    with map_path.open("r", newline="", encoding="utf-8") as source:
+        reader = csv.DictReader(source)
+        if tuple(reader.fieldnames or ()) != v.MAP_COLUMNS:
+            raise ValueError(f"Unexpected release-map columns: {map_path}")
+        draw_column, batch_column = v.MAP_COLUMNS
+        batches = {}
+        for row in reader:
+            draw, batch = row[draw_column], row[batch_column]
+            if not v.VALID_NONBLANK(draw) or not v.VALID_NONBLANK(batch):
+                raise ValueError(f"Blank release-map entry: {map_path}")
+            if draw in batches and batches[draw] != batch:
+                raise ValueError(f"Conflicting release batch for draw {draw}")
+            batches[draw] = batch
+    if not batches:
+        raise ValueError(f"Empty release map: {map_path}")
+    return batches
+
+def load(path):
+    with Path(path).open("r", newline="", encoding="utf-8") as source:
+        records = list(csv.DictReader(source))
+    rows = {record["ktp.namekey"]: record for record in records}
+    if len(rows) != len(records):
+        raise ValueError(f"Duplicate namekey in {path}")
+    return rows
+
+def cards(directory):
+    result = {}
+    draws_by_key = {}
+    draw_prefix = "**`ktp.draw_number`**: "
+    for path in Path(directory).glob("*.txt"):
+        with path.open("r", encoding="utf-8") as source:
+            lines = source.read().splitlines()
+        title = next((line for line in lines[:16] if line.startswith("### Draw #")), None)
+        dates = [i for i, line in enumerate(lines[:16]) if line.startswith("Date of report: ")]
+        if title is None or len(dates) != 1:
+            raise ValueError(f"Unexpected card format: {path}")
+        try:
+            last, first = title.split(": ", 1)[1].rsplit(", ", 1)
+        except ValueError as exc:
+            raise ValueError(f"Unexpected card title: {path}") from exc
+        key = json.dumps({"ktp.first_name": first, "ktp.last_name": last}, sort_keys=True)
+        if key in result:
+            raise ValueError(f"Duplicate card namekey: {key}")
+        draws = {line.removeprefix(draw_prefix).strip() for line in lines if line.startswith(draw_prefix)}
+        if not draws:
+            raise ValueError(f"Card has no draw numbers: {path}")
+        draws_by_key[key] = tuple(sorted(draws))
+        lines[dates[0]] = "Date of report: <ignored>"
+        result[key] = "\\n".join(lines)
+    return result, draws_by_key
+
+def no_ground_truth(rows):
+    return {
+        key
+        for key, row in rows.items()
+        if v.NO_GROUND_TRUTH_DEF(
+            int(row["ktp.partition"]),
+            row["ktp.partition_flag_xlsx_non_exact_any"] == "True",
+            int(row["ktp.partition_flag_ssn_count"]),
+        )
+    }
+
+class Eligibility(NamedTuple):
+    cohort: v.AiAugmentCohort
+    category: v.AiAugmentIneligibilityCategory | None
+    reason: str | None
+
+def assess(key, row, draws, batches, ground_truth, no_ground_truth):
+    if key in ground_truth and key in no_ground_truth:
+        raise ValueError(f"Ground-truth and no-ground-truth cohorts overlap for {key}")
+    if key in ground_truth:
+        return Eligibility(v.AiAugmentCohort.GROUND_TRUTH, None, None)
+    if key in no_ground_truth:
+        return Eligibility(v.AiAugmentCohort.NO_GROUND_TRUTH, None, None)
+    category = v.AiAugmentIneligibilityCategory
+    partition = int(row["ktp.partition"])
+    ssn_count = int(row["ktp.partition_flag_ssn_count"])
+    if key == v.EXCLUDED_NAMEKEY:
+        return Eligibility(v.AiAugmentCohort.INELIGIBLE, category.EXCLUDED_DUPLICATE_NAMEKEY, "excluded duplicate namekey")
+    if any(batches.get(draw) == v.INELIGIBLE_RELEASE_BATCH for draw in draws):
+        return Eligibility(v.AiAugmentCohort.INELIGIBLE, category.RELEASE_BATCH_SUBSET_8, "excluded release batch")
+    if partition == KTP_PARTITION_SSN_VALUE:
+        return Eligibility(v.AiAugmentCohort.INELIGIBLE, category.STAGING_PARTITION_2, "SSN resolution required")
+    if partition == KTP_PARTITION_DOCX_VALUE and row["ktp.partition_flag_xlsx_non_exact_any"] == "True":
+        return Eligibility(v.AiAugmentCohort.INELIGIBLE, category.STAGING_PARTITION_4_XLSX_NON_EXACT, "non-exact XLSX match")
+    if partition == KTP_PARTITION_DOCX_VALUE and ssn_count > v.NO_GROUND_TRUTH_SSN_COUNT:
+        return Eligibility(v.AiAugmentCohort.INELIGIBLE, category.STAGING_PARTITION_4_MULTIPLE_SSN, f"{ssn_count} SSN matches")
+    return Eligibility(v.AiAugmentCohort.INELIGIBLE, None, "no configured ineligibility category; backend would reject")
+
+def ineligibility_detail(assessment):
+    if assessment.cohort != v.AiAugmentCohort.INELIGIBLE:
+        return "not applicable"
+    category = assessment.category.value if assessment.category is not None else "unclassified"
+    return f"{category}: {assessment.reason}"
+
+yes_no = lambda value: "yes" if value else "no"
+
+if len(sys.argv) != 7 or sys.argv[5] != "--config":
+    raise ValueError("Supply before/after partition CSVs, before/after card directories, and --config PATH")
+before, after = map(load, sys.argv[1:3])
+if before.keys() != after.keys() or len(before) != v.EXPECTED_SOURCE_RESEARCHERS:
+    raise ValueError("The CSVs must contain the same expected researcher population")
+if next(iter(before.values())).keys() != next(iter(after.values())).keys():
+    raise ValueError("The CSVs must have the same columns")
+before_cards, before_draws = cards(sys.argv[3])
+after_cards, after_draws = cards(sys.argv[4])
+if before_cards.keys() != before.keys() or after_cards.keys() != after.keys():
+    raise ValueError("Card directories and partition CSVs have different namekeys")
+if any(before[key]["ktp.draw_number"] not in before_draws[key] or after[key]["ktp.draw_number"] not in after_draws[key] for key in before):
+    raise ValueError("Step 10 draw number is absent from a card")
+changed_cards = {key for key in before if before_cards[key] != after_cards[key]}
+
+changes = {
+    key: tuple(column for column in before[key] if before[key][column] != after[key][column])
+    for key in before
+    if before[key] != after[key]
+}
+old_no_gt, new_no_gt = no_ground_truth(before), no_ground_truth(after)
+batches = release_batches(sys.argv[6])
+old_gt = {key for key, draws in before_draws.items() if v.GROUND_TRUTH_DEF(key, batches, draws)}
+new_gt = {key for key, draws in after_draws.items() if v.GROUND_TRUTH_DEF(key, batches, draws)}
+old_status = {key: assess(key, before[key], before_draws[key], batches, old_gt, old_no_gt) for key in before}
+new_status = {key: assess(key, after[key], after_draws[key], batches, new_gt, new_no_gt) for key in after}
+
+print("Current globals:")
+for name in (
+    "NO_GROUND_TRUTH_PARTITION",
+    "NO_GROUND_TRUTH_SSN_COUNT",
+    "EXPECTED_GROUND_TRUTH_RESEARCHERS",
+    "EXPECTED_NO_GROUND_TRUTH_RESEARCHERS",
+    "EXPECTED_ELIGIBLE_RESEARCHERS",
+    "EXPECTED_INELIGIBLE_RESEARCHERS",
+    "EXPECTED_SOURCE_RESEARCHERS",
+):
+    print(f"  {name} = {getattr(v, name)}")
+print("  EXPECTED_INELIGIBILITY_COUNTS:")
+for category, count in v.EXPECTED_INELIGIBILITY_COUNTS.items():
+    print(f"    {category.value}: {count}")
+if len(old_no_gt) != v.EXPECTED_NO_GROUND_TRUTH_RESEARCHERS:
+    print(
+        f"Before snapshot has {len(old_no_gt)} no-ground-truth researchers; "
+        f"the current global expects {v.EXPECTED_NO_GROUND_TRUTH_RESEARCHERS}."
+    )
+if len(old_gt) != v.EXPECTED_GROUND_TRUTH_RESEARCHERS:
+    print(
+        f"Before snapshot has {len(old_gt)} ground-truth researchers; "
+        f"the current global expects {v.EXPECTED_GROUND_TRUTH_RESEARCHERS}."
+    )
+
+old_partitions = Counter(row["ktp.partition"] for row in before.values())
+new_partitions = Counter(row["ktp.partition"] for row in after.values())
+print("Partition sizes:")
+for partition in sorted(old_partitions.keys() | new_partitions.keys(), key=int):
+    old_count, new_count = old_partitions[partition], new_partitions[partition]
+    print(f"  {partition}: {old_count} → {new_count} ({new_count - old_count:+d})")
+
+moves = Counter(
+    (before[key]["ktp.partition"], after[key]["ktp.partition"])
+    for key in changes
+    if before[key]["ktp.partition"] != after[key]["ktp.partition"]
+)
+print("Partition moves:")
+if not moves:
+    print("  None")
+for (old_partition, new_partition), count in sorted(
+    moves.items(), key=lambda item: tuple(map(int, item[0]))
+):
+    print(f"  {old_partition} → {new_partition}: {count} researchers")
+
+affected = changed_cards | changes.keys()
+print(f"Affected researchers: {len(affected)} ({len(changed_cards)} changed cards, {len(changes)} changed Step 10 rows)")
+for key in sorted(affected, key=lambda key: (int(before[key]["ktp.draw_number"]), key)):
+    old, new = before[key], after[key]
+    first_name, last_name = old["ktp.first_name"], old["ktp.last_name"]
+    draw = old["ktp.draw_number"]
+    print(f"  Draw {draw} — {first_name} {last_name}")
+    old_partition, new_partition = old["ktp.partition"], new["ktp.partition"]
+    old_cohort = old_status[key].cohort.value.replace("_", " ")
+    new_cohort = new_status[key].cohort.value.replace("_", " ")
+    print(f"    Partition: {old_partition} → {new_partition}")
+    print(f"    Ground-truth membership: {yes_no(key in old_gt)} → {yes_no(key in new_gt)}")
+    print(f"    No-ground-truth membership: {yes_no(key in old_no_gt)} → {yes_no(key in new_no_gt)}")
+    print(f"    Eligibility category: {old_cohort} → {new_cohort}")
+    if old_status[key].cohort == v.AiAugmentCohort.INELIGIBLE or new_status[key].cohort == v.AiAugmentCohort.INELIGIBLE:
+        print(f"    Ineligibility reason: {ineligibility_detail(old_status[key])} → {ineligibility_detail(new_status[key])}")
+    print(f"    Card text changed: {yes_no(key in changed_cards)}")
+    for column in changes.get(key, ()):
+        if column != "ktp.partition":
+            print(f"    {column}: {old[column]} → {new[column]}")
+
+cohort_moves = Counter((old_status[key].cohort.value, new_status[key].cohort.value) for key in affected)
+print("Eligibility-category transitions among affected researchers:")
+for (old_cohort, new_cohort), count in sorted(cohort_moves.items()):
+    old_label, new_label = old_cohort.replace("_", " "), new_cohort.replace("_", " ")
+    print(f"  {old_label} → {new_label}: {count}")
+print(f"Card-only changes: {len(changed_cards - changes.keys())}")
+print(f"Step 10-only changes: {len(changes.keys() - changed_cards)}")
+print(
+    f"Ground-truth membership: {len(old_gt)} → {len(new_gt)} "
+    f"({len(new_gt - old_gt)} entered, {len(old_gt - new_gt)} left)"
+)
+print(
+    f"No-ground-truth membership: {len(old_no_gt)} → {len(new_no_gt)} "
+    f"({len(new_no_gt - old_no_gt)} entered, {len(old_no_gt - new_no_gt)} left)"
+)
+
+new_eligible = len(new_gt | new_no_gt)
+new_ineligible = len(after) - new_eligible
+print("Projected globals using the configured release-batch map:")
+print(f"  EXPECTED_GROUND_TRUTH_RESEARCHERS = {len(new_gt)}")
+print(f"  EXPECTED_NO_GROUND_TRUTH_RESEARCHERS = {len(new_no_gt)}")
+print(f"  EXPECTED_ELIGIBLE_RESEARCHERS = {new_eligible}")
+print(f"  EXPECTED_INELIGIBLE_RESEARCHERS = {new_ineligible}")
+print(f"  EXPECTED_SOURCE_RESEARCHERS = {len(after)}")
+
+def ineligibility_counts(assessments):
+    return Counter(
+        assessment.category.value if assessment.category is not None else "unclassified"
+        for assessment in assessments.values()
+        if assessment.cohort == v.AiAugmentCohort.INELIGIBLE
+    )
+
+old_categories = ineligibility_counts(old_status)
+new_categories = ineligibility_counts(new_status)
+print("Ineligibility categories, before → after:")
+for category in sorted(old_categories.keys() | new_categories.keys()):
+    print(f"  {category}: {old_categories[category]} → {new_categories[category]}")
+' "{{ before_csv }}" "{{ after_csv }}" "{{ before_cards_dir }}" "{{ after_cards_dir }}" "{{ config_flag }}" "{{ config_path }}"
+"""
+cwd = "."
+
+
 # Set OPENALEX_API_KEY if you need it:
 # ~~~
 # OPENALEX_API_KEY="$(pixi run python -c '

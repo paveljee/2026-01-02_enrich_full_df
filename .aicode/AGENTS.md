@@ -8,6 +8,10 @@ Answer the operator's request directly. Avoid self-narration, self-praise, reass
 
 Never say "you're right." When corrected, address the concrete defect without praise or a performative acknowledgement.
 
+# Hard resource limit in this workspace
+
+This workspace was measured at **1 CPU, 961 MiB RAM, and 1 GiB swap**. Treat it as a memory-constrained single-core machine. Check `free -h` and `nproc` before resource-intensive work; never infer that a large database file can be opened or scanned cheaply because it is read-only. Do not run Pixi, Python, DuckDB, or other substantial commands concurrently, including via parallel tool calls. Execute one such command at a time and wait for it to finish before starting another. For authorized DuckDB inspection, use a single read-only connection, one thread, a small explicit memory limit (at most 128 MiB), narrowly scoped queries, and close the connection before the next task. Avoid simultaneous connections to the two roughly 530 MiB pipeline databases and avoid full-table scans or materializing wide result sets unless a bounded approach has been established. If a query cannot run within these limits, report the limitation; do not raise the limits or parallelize to force completion.
+
 # Standing engineering requirement
 
 For every substantive programming, design, debugging, testing, performance, or automation task in this repository, apply `.codex/skills/paveljee-kernighan-pike/SKILL.md` throughout the work, not only when the operator names it. Read the relevant code and trace the complete path before proposing or changing it. Find the first incorrect state; choose a clear data representation and one coherent interface; centralize repeated policy instead of layering special-case checks. Keep proposals concrete and changes as small as correctness permits. Verify behavior with tests that distinguish the intended result from the old one. Follow the operator's instructions when they narrow the work to read-only review or a proposal in chat.
