@@ -13,6 +13,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models imp
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
     _age_evidence_check_failed,
+    _EvidenceObligation,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EARLIEST_YEAR,
@@ -42,6 +43,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pyd
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     COMPACT_JSON_SEPARATORS,
+    EVIDENCE_OUTCOME_V1_EXACT,
     NOT_REPORTED_VALUE,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.render import (
@@ -747,8 +749,16 @@ def test_deceased_age_requires_death_evidence() -> None:
         standardized_value=value,
         web_search_excerpts=[birth_excerpt],
     )
+    birth_obligations = (
+        _EvidenceObligation(
+            outcome=EVIDENCE_OUTCOME_V1_EXACT,
+            submission=birth_excerpt,
+        ),
+    )
     assert _age_evidence_check_failed(
-        birth_only, push_response_record=object(),  # type: ignore[arg-type]
+        birth_only,
+        evidence_obligations=birth_obligations,
+        push_response_record=object(),  # type: ignore[arg-type]
     )
     both = birth_only.model_copy(update={
         "web_search_excerpts": [
@@ -759,6 +769,19 @@ def test_deceased_age_requires_death_evidence() -> None:
             ),
         ],
     })
+    assert _age_evidence_check_failed(
+        both,
+        evidence_obligations=birth_obligations,
+        push_response_record=object(),  # type: ignore[arg-type]
+    )
     assert not _age_evidence_check_failed(
-        both, push_response_record=object(),  # type: ignore[arg-type]
+        both,
+        evidence_obligations=(
+            *birth_obligations,
+            _EvidenceObligation(
+                outcome=EVIDENCE_OUTCOME_V1_EXACT,
+                submission=both.web_search_excerpts[1],
+            ),
+        ),
+        push_response_record=object(),  # type: ignore[arg-type]
     )

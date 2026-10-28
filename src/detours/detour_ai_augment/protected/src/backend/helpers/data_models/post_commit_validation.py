@@ -300,6 +300,11 @@ class _EvidenceSubmissionColumn(StrEnum):
     LINKS = KTP_AI_AUGMENT_LINKS_COL
 
 
+_STANDARDIZED_REQUIRES_PINNED_EVIDENCE = frozenset({
+    _EvidenceSubmissionColumn.AGE_FIRST_PUBLICATION,
+})
+
+
 _EvidenceNumberOffset = NewType("_EvidenceNumberOffset", int)
 
 
@@ -1262,6 +1267,7 @@ def _assessment_public_detail(
 def _age_evidence_check_failed(
     age_standardized_submission: AgeFirstPublicationSubmission,
     *,
+    evidence_obligations: tuple[_EvidenceObligation, ...],
     push_response_record: PushResponseRecord,
 ) -> bool:
     age_value = age_standardized_submission.standardized_value
@@ -1290,20 +1296,17 @@ def _age_evidence_check_failed(
     reported_texts = [reported.reported]
     if isinstance(age_value, (AgeAtDeathFromBirth, AgeAtDeathFromFirstPublication)):
         reported_texts.append(age_value.age.computed.as_of.reported)
+    excerpts = tuple(
+        item.submission.excerpt
+        for item in evidence_obligations
+        if isinstance(item.submission, WebSearchExcerpt)
+    )
     for reported_text in reported_texts:
-        if not any(
-            reported_text in item.excerpt
-            for item in age_standardized_submission.web_search_excerpts
-            if isinstance(item, WebSearchExcerpt)
-        ):
+        if not any(reported_text in excerpt for excerpt in excerpts):
             logger.warning(
                 Locale.AGE_EVIDENCE_REPORTED_NOT_FOUND_LOG,
                 reported_text,
-                tuple(
-                    item.excerpt
-                    for item in age_standardized_submission.web_search_excerpts
-                    if isinstance(item, WebSearchExcerpt)
-                ),
+                excerpts,
             )
             failed = True
     return failed
@@ -1534,6 +1537,7 @@ def _transition_field(
             isinstance(standardized_submission, AgeFirstPublicationSubmission)
             and _age_evidence_check_failed(
                 standardized_submission,
+                evidence_obligations=obligations,
                 push_response_record=push_response_record,
             )
         ):
@@ -1766,6 +1770,9 @@ def _validate_submission_fields(
     push_request_body: str | bytes,
     *,
     standardized_required: bool,
+    standardized_evidence_eligible: Callable[
+        [_EvidenceSubmissionColumn, FieldSubmission], bool
+    ],
 ) -> tuple[
     dict[_EvidenceSubmissionColumn, FieldSubmission],
     dict[_EvidenceSubmissionColumn, StandardizedFieldSubmission],
@@ -1782,6 +1789,7 @@ def _validate_submission_fields(
     standardized_submissions: dict[
         _EvidenceSubmissionColumn, StandardizedFieldSubmission
     ] = {}
+    skipped_standardized = False
     issues: list[tuple[tuple[object, ...], str]] = []
     allowed = {column.value for column in _EvidenceSubmissionColumn}
     allowed.add(KTP_AI_AUGMENT_COMMENTS_COL)
@@ -1809,6 +1817,9 @@ def _validate_submission_fields(
             )
             continue
         if standardized_required:
+            if not standardized_evidence_eligible(column, field_submissions[column]):
+                skipped_standardized = True
+                continue
             model_type = STANDARDIZED_FIELD_MODELS[column.value]
             assert isinstance(model_type, type) and issubclass(
                 model_type, StandardizedFieldSubmission
@@ -1836,7 +1847,7 @@ def _validate_submission_fields(
                                         include_input=False)
             )
     payload: Submission | StandardizedSubmission | None = None
-    if not issues:
+    if not issues and not skipped_standardized:
         complete_fields = (
             standardized_submissions if standardized_required else field_submissions
         )
@@ -1856,6 +1867,18 @@ def _validate_submission_fields(
                                         include_input=False)
             )
     return field_submissions, standardized_submissions, payload, tuple(issues)
+
+
+def _standardized_evidence_eligible(
+    column: _EvidenceSubmissionColumn,
+    submission: FieldSubmission,
+    previous: _FieldPinState,
+) -> bool:
+    if column not in _STANDARDIZED_REQUIRES_PINNED_EVIDENCE:
+        return True
+    return bool(previous.pins & _FieldPin.EVIDENCE) and tuple(
+        submission.web_search_excerpts
+    ) == tuple(item.submission for item in previous.evidence_obligations)
 
 
 def _evaluate_submission_for_commit(
@@ -1990,6 +2013,13 @@ def _evaluate_submission_for_commit(
                     # Signed off: human
                     # standardized_required=retry_submission_expected,
                     standardized_required=standardized_required,
+                    standardized_evidence_eligible=lambda column, submission: (
+                        _standardized_evidence_eligible(
+                            column,
+                            submission,
+                            previous_states.get(column, _FieldPinState()),
+                        )
+                    ),
                 )
             _seed_evidence_random(inputs.config_facts.sample_seed)
             field_audits: list[_FieldAudit] = []

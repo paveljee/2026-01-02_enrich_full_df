@@ -657,6 +657,98 @@ def test_age_evidence_validation_uses_push_utc_date_and_logs_privately(
     )
 
 
+def test_rejected_age_evidence_edit_cannot_launder_standardized_pin() -> None:
+    """A rejected excerpt edit must not make an unsupported age immutable."""
+    age = L_FEI_FEI_RETRY_FIXTURE.submission.age_first_publication
+    assert isinstance(age.standardized_value, pydantic_to_paste.AgeFromBirth)
+    as_of = age.standardized_value.age.computed.as_of
+    push_time = datetime.combine(as_of, datetime.min.time(), timezone.utc)
+    push_usec = int(push_time.timestamp()) * MICROSECONDS_PER_SECOND
+    _, commit = retry_commit_records(
+        original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+        init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+        session_id=TEST_SESSION_ID,
+        synthetic_record_id_seed="age-pin-laundering",
+    )
+    push = commit.commit_request_body.push_response_record.model_copy(update={
+        "ready_to_respond_at_unix_usec": push_usec + MICROSECONDS_PER_SECOND,
+        "duration_usec": MICROSECONDS_PER_SECOND,
+    })
+    field = post_commit_validation._EvidenceSubmissionColumn.AGE_FIRST_PUBLICATION
+    undated = WebSearchExcerpt(excerpt="The source gives no birth year", url=TEST_URL)
+    prior = post_commit_validation._FieldPinState(
+        pins=(
+            post_commit_validation._FieldPin.NARRATIVE
+            | post_commit_validation._FieldPin.EVIDENCE
+        ),
+        narrative_value=age.value,
+        evidence_obligations=(
+            post_commit_validation._EvidenceObligation(
+                outcome=EVIDENCE_OUTCOME_V1_EXACT, submission=undated,
+            ),
+            post_commit_validation._EvidenceObligation(
+                outcome=EVIDENCE_OUTCOME_V1_EXACT,
+                submission=age.web_search_excerpts[1],
+            ),
+        ),
+    )
+    raw = L_FEI_FEI_RETRY_FIXTURE.submission.model_dump(mode="json", by_alias=True)
+    raw[field.value]["standardized_value"] = {"invalid": True}
+    _, standardized_submissions, payload, schema_issues = (
+        post_commit_validation._validate_submission_fields(
+            json.dumps(raw),
+            standardized_required=True,
+            standardized_evidence_eligible=lambda column, submission: (
+                post_commit_validation._standardized_evidence_eligible(
+                    column, submission, prior,
+                )
+            ),
+        )
+    )
+    assert field not in standardized_submissions
+    assert payload is None
+    assert not any(
+        location[:1] == (field.value,) for location, _ in schema_issues
+    )
+
+    def assess(
+        current: pydantic_to_paste.AgeFirstPublicationSubmission,
+        *,
+        first_outcome: post_commit_validation.EvidenceOutcome,
+    ) -> post_commit_validation._EvidenceAssessment:
+        return post_commit_validation._EvidenceAssessment(items=tuple(
+            post_commit_validation._EvidenceItemAssessment(
+                field=field.value,
+                index=index,
+                evidence_number=index + 1,
+                submission=item,
+                outcome=first_outcome if index == 0 else EVIDENCE_OUTCOME_V1_EXACT,
+                match=None,
+            )
+            for index, item in enumerate(current.web_search_excerpts)
+        ))
+
+    rejected = post_commit_validation._transition_field(
+        field, age, age, prior,
+        assessment=assess(age, first_outcome=EVIDENCE_OUTCOME_UNMATCHED),
+        push_response_record=push,
+    )
+    assert rejected.violations
+    assert rejected.state == prior
+    restored = age.model_copy(update={
+        "web_search_excerpts": [undated, *age.web_search_excerpts[1:]],
+    })
+    restored_audit = post_commit_validation._transition_field(
+        field, restored, restored, rejected.state,
+        assessment=assess(restored, first_outcome=EVIDENCE_OUTCOME_V1_EXACT),
+        push_response_record=push,
+    )
+    assert [v.message for v in restored_audit.violations] == [
+        f"{field.value}: {Locale.STANDARDIZED_VALUE_RETRY_VIOLATION}"
+    ]
+    assert restored_audit.state == prior
+
+
 HAANEN_REJECTED_CAPTURE_ID = "20260813T141344_678596Z_8ef1f6372b4a48d9a3b1279736356363"
 HAANEN_ACCEPTED_CAPTURE_ID = "20260813T141450_027429Z_044215aac8c44200882531b10a2acfa6"
 HAANEN_ROLLOUT_FILENAME = "rollout-2026-08-13T10-08-12-019ffb73-b72c-7812-9fc4-d56fdf3ea1a2.jsonl"
