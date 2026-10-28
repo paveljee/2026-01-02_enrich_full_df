@@ -145,6 +145,7 @@ class AiAugmentSingularOuterDict(FrozenStrictModel):
             for innerdict in self.docx_innerdicts
             if all(
                 column in innerdict.data
+                and innerdict.data[column] is not None
                 and bool(str(innerdict.data[column]).strip())
                 for column in required_columns
             )

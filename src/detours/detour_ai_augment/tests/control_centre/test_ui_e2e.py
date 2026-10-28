@@ -41,6 +41,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.sto
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
+    DOCX_TO_AI_AUGMENT_COLUMNS,
     EXPECTED_GROUND_TRUTH_RESEARCHERS,
     EXPECTED_INELIGIBLE_RESEARCHERS,
     EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
@@ -74,7 +75,7 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
     RunLifecycle,
 )
 from src.helpers.data_models import InnerDict, NameKey
-from src.helpers.procedures import XlsxMatchProcedure
+from src.helpers.procedures import DocxMatchProcedure, XlsxMatchProcedure
 from src.helpers.vars import (
     DRAW_LABEL,
     KTP_FILENAME_COL,
@@ -848,7 +849,11 @@ def test_underscore_field_labels_render_literally_in_researcher_card(
 def test_repeated_docx_extractors_render_as_distinct_card_table_values(
     pytestconfig: pytest.Config, nicegui_storage_path: Path, tmp_path: Path,
 ) -> None:
+    from src.detours.detour_ai_augment.protected.src.backend.helpers.codex_parse import (
+        render_footnoted_submission_value,
+    )
     from src.detours.detour_ai_augment.tests.control_centre.test_ui import (
+        completed_query_researcher,
         configured_pipeline_config,
         four_docx_completed_researcher,
     )
@@ -856,6 +861,24 @@ def test_repeated_docx_extractors_render_as_distinct_card_table_values(
     completed = four_docx_completed_researcher(
         NameKey(first_name="First 1", last_name="Last 1")
     )
+    manual_value = "`<br>![x](https://attacker.invalid/pixel.png)"
+    author_docx_column = DOCX_TO_AI_AUGMENT_COLUMNS[0][0]
+    first_docx = completed.docx_innerdicts[0]
+    completed = completed.model_copy(update={
+        "docx_innerdicts": (
+            InnerDict.from_mapping(
+                {**first_docx.data, author_docx_column: manual_value},
+                DocxMatchProcedure(),
+            ),
+            *completed.docx_innerdicts[1:],
+        ),
+    })
+    author_column = AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS[0][0]
+    completed, _ = completed_query_researcher(completed, ai_field_values={
+        author_column: render_footnoted_submission_value(
+            "Author text\r# Forged heading\rnext line", (1,), column=author_column,
+        ),
+    })
     client = control_ui._BackendDatabaseClient(
         socket_path=tmp_path / "absent.sock",
         pipeline_config=configured_pipeline_config(),
@@ -876,7 +899,6 @@ def test_repeated_docx_extractors_render_as_distinct_card_table_values(
             "ai_augment_value",
             "ai_augment_footnotes",
         ])
-        author_column = AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS[0][0]
         author_row = table.locator("tbody tr").filter(has_text=author_column)
         expect(author_row).to_have_count(1)
         cells = author_row.locator("td")
@@ -890,13 +912,18 @@ def test_repeated_docx_extractors_render_as_distinct_card_table_values(
             "Hermione Isildur extracted",
         ]
         assert manual.locator("code").all_text_contents() == [
-            '"First DR author"',
+            f'"{manual_value}"',
             '"First HI author"',
             '"Second DR author"',
             '"Second HI author"',
         ]
+        expect(manual.locator("img")).to_have_count(0)
         expect(manual.locator("br")).to_have_count(6)
-        expect(cells.nth(2)).to_contain_text('AI-generated text: "NR"')
+        ai_value = cells.nth(2)
+        expect(ai_value).to_contain_text('AI-generated text: "NR"')
+        expect(ai_value).to_contain_text("# Forged heading")
+        expect(ai_value.locator("br")).to_have_count(4)
+        expect(card.locator("h1")).to_have_count(0)
         expect(cells.nth(3)).to_have_text("[MISSING AI FOOTNOTES]")
         assert errors == [], Counter(errors)
 

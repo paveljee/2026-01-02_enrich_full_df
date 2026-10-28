@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timedelta
+from functools import partial
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Literal, Self, overload
@@ -1082,18 +1083,45 @@ class AiAugmentBackendStore(FrozenStrictModel):
     def _recorded_model_http(
         self,
         request: requests.PreparedRequest,
+        *,
+        commit: BackendCommitRequestRecord,
         **kwargs: Any,
     ) -> HttpRequestLogRecord:
 
         key = request_key(request)
+        commit_ordinal, _ = self._http_record_with_ordinal(commit.record_id)
         rows = self._execute(
-            f"SELECT {AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} "
+            f"SELECT {AUTHORITATIVE_RECORD_ORDINAL_COLUMN}, "
+            f"{AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} "
             f"FROM {AUTHORITATIVE_RECORDS_TABLE} "
             f"ORDER BY {AUTHORITATIVE_RECORD_ORDINAL_COLUMN} DESC"
         ).fetchall()
-        for (payload,) in rows:
+        for ordinal, payload in rows:
             record = HttpRequestLogRecord.model_validate_json(payload)
             if record_key(record) == key:
+                # Reuse this commit's failure to finish live validation;
+                # retry transient provider failures on a later client commit.
+                if (
+                    ordinal < commit_ordinal
+                    and record.response_code is not None
+                    and HTTPStatus.OK <= record.response_code < HTTPStatus.MULTIPLE_CHOICES
+                ):
+                    try:
+                        json.loads(record.response_body or "")
+                    except json.JSONDecodeError:
+                        raise ModelHttpRequired(request, **kwargs) from None
+                if ordinal < commit_ordinal and (
+                    record.received_at_unix_usec is None
+                    or record.response_code in {
+                        HTTPStatus.REQUEST_TIMEOUT,
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                    }
+                    or (
+                        record.response_code is not None
+                        and HTTPStatus.INTERNAL_SERVER_ERROR <= record.response_code < 600
+                    )
+                ):
+                    raise ModelHttpRequired(request, **kwargs)
                 return record
         raise ModelHttpRequired(request, **kwargs)
 
@@ -1194,7 +1222,9 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 if not isinstance(current, BackendCommitRequestRecord):
                     raise RuntimeError(Locale.VALIDATION_CURRENT_RECONSTRUCTED_COMMIT_REQUIRED)
                 initial_ref = self._initial_validation_for_commit(commit)
-                http = ModelHttpInterceptor(record_get=self._recorded_model_http)
+                http = ModelHttpInterceptor(record_get=partial(
+                    self._recorded_model_http, commit=commit,
+                ))
                 try:
                     with submission_http_context(http):
                         inputs, db_reads, _ = self._validated_commit_inputs(
@@ -2203,10 +2233,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         inputs: list[HttpRequestLogRecord] = []
         for captured in body.openalex_ror_records:
             input_ordinal, http_record = self._http_record_with_ordinal(captured.record_id)
-            if (
-                input_ordinal >= ordinal or http_record.received_at_unix_usec is None
-                or captured != http_record
-            ):
+            if input_ordinal >= ordinal or captured != http_record:
                 raise ReplayInputMissing(Locale.VALIDATION_HTTP_INPUT_INVALID)
             inputs.append(http_record)
         http = ModelHttpInterceptor.from_records(inputs)

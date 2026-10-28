@@ -952,9 +952,25 @@ def _exact_evidence_candidates(
     *,
     excerpt: str,
 ) -> tuple[_EvidenceCandidate, ...]:
+    def position_for(row: _CodexTurnRefRow) -> int | None:
+        marker = f"{CODEX_CITE_MARKER_PREFIX}{row.ref_id}{CODEX_CITE_MARKER_SUFFIX}"
+        marker_start = row.cite_text.find(marker)
+        marker_end = marker_start + len(marker)
+        position = row.cite_text.find(excerpt)
+        while position >= 0:
+            # Citation metadata cannot serve as a renderable evidence excerpt.
+            if (
+                marker_start < 0
+                or position + len(excerpt) <= marker_start
+                or position >= marker_end
+            ):
+                return position + 1
+            position = row.cite_text.find(excerpt, position + 1)
+        return None
+
     return _evidence_candidates(
         rollout_index,
-        lambda row: position + 1 if (position := row.cite_text.find(excerpt)) >= 0 else None,
+        position_for,
     )
 
 
@@ -970,16 +986,21 @@ def _near_evidence_candidates(
     def position_for(row: _CodexTurnRefRow) -> int | None:
         if not evidence_urls_match(url, row.url):
             return None
-        tokens = _normalized_evidence_tokens(row.cite_text)
+        marker = f"{CODEX_CITE_MARKER_PREFIX}{row.ref_id}{CODEX_CITE_MARKER_SUFFIX}"
         width = len(submitted_tokens)
-        return next(
-            (
+        token_offset = 0
+        # Citation metadata cannot satisfy a near match or bridge text around it.
+        for segment in row.cite_text.split(marker):
+            tokens = _normalized_evidence_tokens(segment)
+            position = next((
                 index + 1
                 for index in range(len(tokens) - width + 1)
                 if tokens[index:index + width] == submitted_tokens
-            ),
-            None,
-        )
+            ), None)
+            if position is not None:
+                return token_offset + position
+            token_offset += len(tokens)
+        return None
 
     return _evidence_candidates(rollout_index, position_for)
 
@@ -1738,6 +1759,10 @@ def _schema_public_detail(issues: Sequence[tuple[tuple[object, ...], str]]) -> s
             or Locale.SUBMISSION_SCHEMA_ROOT
         )
         if len(location_items) <= 2 and error_type == "extra_forbidden":
+            location = codex_parse.markdown_code_span(
+                json.dumps(location, ensure_ascii=True)
+            )
+        if len(location_items) <= 2 and error_type == "extra_forbidden":
             instruction = Locale.SUBMISSION_FIELD_REMOVE
         elif len(location_items) <= 2 and error_type == PYDANTIC_MISSING_ERROR_TYPE:
             instruction = Locale.SUBMISSION_FIELD_REQUIRED
@@ -2152,7 +2177,11 @@ def _evaluate_submission_for_commit(
                 rollout_index=rollout_index,
                 output_row=output_row,
                 validation_result=BackendLifecycle.REJECTED,
-                detail=Locale.MULTIPLE_MATCH_DETAIL_TEMPLATE.format(excerpt=exc.excerpt),
+                detail=Locale.MULTIPLE_MATCH_DETAIL_TEMPLATE.format(
+                    excerpt=codex_parse.markdown_code_span(
+                        json.dumps(exc.excerpt, ensure_ascii=True)
+                    )
+                ),
                 error=exc,
             )
         except _PushValidationError as exc:

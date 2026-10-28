@@ -63,9 +63,10 @@ def _markdown_json_value(value: str) -> str:
     except (json.JSONDecodeError, TypeError):
         return value
     
-    delimiter = MARKDOWN_CODE_DELIMITER
-    while delimiter in value:
-        delimiter += MARKDOWN_CODE_DELIMITER
+    longest = max(
+        (len(match.group()) for match in re.finditer(r"`+", value)), default=0,
+    )
+    delimiter = MARKDOWN_CODE_DELIMITER * (longest + 1)
     
     return f"{delimiter}{value}{delimiter}"
 

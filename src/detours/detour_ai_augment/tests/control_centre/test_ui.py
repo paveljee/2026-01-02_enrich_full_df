@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -29,6 +30,7 @@ from zoneinfo import ZoneInfo
 
 import duckdb
 import pytest
+from docx import Document
 from fastapi import status
 from lxml import html
 from nicegui import app, ui
@@ -39,6 +41,9 @@ from src.detours.detour_ai_augment.protected.src.backend import server as backen
 from src.detours.detour_ai_augment.protected.src.backend.helpers import api
 from src.detours.detour_ai_augment.protected.src.backend.helpers.codex_parse import (
     AI_GENERATED_TEXT_PREFIX,
+    render_comment,
+    render_footnote,
+    render_footnote_argument,
     render_footnoted_submission_value,
     render_standardized_submission_value,
 )
@@ -49,11 +54,14 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.cod
     CodexRolloutRecord,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
+    CODEX_REF_ID_PATTERN,
     PostCommitValidation,
+    evidence_urls_match,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EXPORT_OPENALEX_API_KEY,
     AgeFromBirth,
+    WebSearchExcerpt,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_fixture import (  # noqa: E501
     L_FEI_FEI_RETRY_FIXTURE,
@@ -225,9 +233,11 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
     _RunOutcomeResponseBodyJson,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.render import (  # noqa: E501
+    ai_augment_field_renderer,
     martin_serialize_standardized_cell,
+    pipe_table,
 )
-from src.helpers.cards import build_cards
+from src.helpers.cards import build_cards, render_docx_bytes
 from src.helpers.data_models import HttpRequestLogRecord, InnerDict, NameKey
 from src.helpers.procedures import (
     DocxMatchProcedure,
@@ -1985,6 +1995,45 @@ async def test_worker_stops_backend_before_starting_next_queued_run(
 
 
 @pytest.mark.anyio
+async def test_failed_post_run_idle_probe_stops_queue_without_losing_completion(
+    inline_controller_io: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class OneFailedIdleProbe(FakeCodex):
+        def __init__(self) -> None:
+            super().__init__()
+            self.probes = 0
+
+        async def is_busy(self) -> bool:
+            self.probes += 1
+            if self.probes == 2:
+                raise OSError("SSH probe failed")
+            return False
+
+    subject = controller(codex=OneFailedIdleProbe())
+
+    async def complete_run(
+        _subject: control_ui._ControlCentreController,
+        *,
+        run: run_event_models.Run,
+    ) -> tuple[RunLifecycle, UUID | None]:
+        return RunLifecycle.COMPLETED, SESSION_ID
+
+    monkeypatch.setattr(control_ui._ControlCentreController, "_finalize_run", complete_run)
+    first_run_id = await subject.queue(namekey=NAMEKEY)
+    second_run_id = await subject.queue(namekey=NAMEKEY)
+    subject.set_queue_processing(True)
+    await subject._process_queued_run(subject._queue.get_nowait())
+
+    assert subject._runs[first_run_id].lifecycle is RunLifecycle.COMPLETED
+    assert not subject.queue_processing
+    assert subject._queue.get_nowait().run_id == second_run_id
+    assert subject.drain_notifications() == (
+        Locale.QUEUE_IDLE_REFRESH_FAILED_TEMPLATE.format(error=OSError("SSH probe failed")),
+    )
+
+
+@pytest.mark.anyio
 async def test_archive_failure_does_not_change_completed_run_outcome(
     inline_controller_io: None,
     monkeypatch: pytest.MonkeyPatch,
@@ -2028,6 +2077,44 @@ async def test_archive_failure_does_not_change_completed_run_outcome(
             error=OSError("archive unavailable"),
         ),
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.xfail(
+    strict=True,
+    reason="cleanup failure overwrites a durably completed run lifecycle",
+)
+async def test_backend_cleanup_failure_does_not_hide_completed_run(
+    inline_controller_io: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CleanupFailingBackend(FakeBackend):
+        async def stop(self) -> None:
+            await super().stop()
+            raise OSError("cleanup failed")
+
+    order: list[str] = []
+    backend_database = FakeBackendDatabase(order)
+    subject = controller(
+        backend=CleanupFailingBackend(order),
+        backend_database=backend_database,
+        codex=FakeCodex(order),
+    )
+
+    async def complete_run(
+        _subject: control_ui._ControlCentreController,
+        *,
+        run: run_event_models.Run,
+    ) -> tuple[RunLifecycle, UUID | None]:
+        return RunLifecycle.COMPLETED, SESSION_ID
+
+    monkeypatch.setattr(control_ui._ControlCentreController, "_finalize_run", complete_run)
+    run_id = await subject.queue(namekey=NAMEKEY)
+    await subject._process_queued_run(subject._queue.get_nowait())
+
+    assert backend_database.run_outcome_calls == [(RunLifecycle.COMPLETED, NAMEKEY)]
+    assert subject._runs[run_id].completed_attempt_id == SESSION_ID
+    assert subject._runs[run_id].lifecycle is RunLifecycle.COMPLETED
 
 
 @pytest.mark.anyio
@@ -3109,6 +3196,33 @@ async def test_ssh_auth_probes_use_existing_route_and_bound_command_time(
 
 
 @pytest.mark.anyio
+@pytest.mark.xfail(
+    strict=True,
+    reason="the Codex busy SSH probe has no command timeout",
+)
+async def test_codex_busy_probe_bounds_command_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = control_ui._CodexRunner(timezone=ZoneInfo("UTC"))
+    cancelled = asyncio.Event()
+
+    async def blocked(_command: str) -> bytes:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+        return b""
+
+    monkeypatch.setattr(runner, "_remote_command", blocked)
+    monkeypatch.setattr(control_ui, "PROBE_TIMEOUT_SECONDS", 0.001)
+    async with asyncio.timeout(1) as outer_timeout:
+        with pytest.raises(TimeoutError):
+            await runner.is_busy()
+    assert not outer_timeout.expired()
+    assert cancelled.is_set()
+
+
+@pytest.mark.anyio
 async def test_query_replaces_whole_snapshot_and_invalid_response_keeps_previous(
     inline_controller_io: None,
     monkeypatch: pytest.MonkeyPatch,
@@ -3412,6 +3526,23 @@ async def test_researcher_card_uses_linked_run_outcome_response_bodies_for_disti
     assert database.query_calls == 0
 
 
+def test_ground_truth_selection_rejects_null_required_docx_value() -> None:
+    complete = researcher(cohort=AiAugmentCohort.GROUND_TRUTH)
+    complete_row = complete.docx_innerdicts[0]
+    required_column = DOCX_TO_AI_AUGMENT_COLUMNS[0][0]
+    incomplete_row = InnerDict.from_mapping(
+        {**complete_row.data, required_column: None}, DocxMatchProcedure(),
+    )
+    source = complete.model_copy(update={
+        "docx_innerdicts": (incomplete_row, complete_row),
+    })
+    assert source.ground_truth_innerdict() is complete_row
+
+    source = complete.model_copy(update={"docx_innerdicts": (incomplete_row,)})
+    with pytest.raises(ValueError):
+        DashboardQuerySnapshot(ai_augment_singular_outerdicts=(source,))
+
+
 def test_card_without_commits_matches_shared_renderer_unchanged(tmp_path: Path) -> None:
     source = researcher()
     snapshot = DashboardQuerySnapshot(ai_augment_singular_outerdicts=(source,))
@@ -3433,6 +3564,271 @@ def test_card_without_commits_matches_shared_renderer_unchanged(tmp_path: Path) 
     assert "ktp.ai_augment_validation_record_id" not in markdown
     assert "ktp.ai_augment_run_outcome_record_id" not in markdown
     assert snapshot.model_dump_json() == before
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="joined AI draw label is counted as another draw and labels sort lexically",
+)
+def test_completed_multi_draw_card_header_uses_unique_numeric_draws() -> None:
+    source = researcher()
+    xlsx_row = source.xlsx_innerdicts[0]
+    source = source.model_copy(update={
+        "xlsx_innerdicts": tuple(
+            InnerDict.from_mapping(
+                {**xlsx_row.data, DRAW_LABEL: draw}, XlsxMatchProcedure(),
+            )
+            for draw in ("155", "77")
+        ),
+    })
+    completed, _run = completed_query_researcher(source)
+    codex_section = completed.codex_innerdicts[0]
+    completed = completed.model_copy(update={
+        "codex_innerdicts": (codex_section.model_copy(update={
+            "innerdict": InnerDict.from_mapping(
+                {**codex_section.innerdict.data, DRAW_LABEL: source.draw_number},
+                _CodexInnerDictProcedure(),
+            ),
+        }),),
+    })
+    card = next(iter(build_cards(
+        api.selected_card_outer_dict(completed),
+        total_draws=2,
+        intro="",
+        excluded_cols=CARD_EXCLUDED_COLUMNS,
+    ).values()))
+    assert "### Draw #77, 155 of 2: Doe, Jane" in card
+
+
+def test_footnote_url_does_not_render_inline_html() -> None:
+    marker = "†ref†"
+    submitted_url = "https://example.invalid/path<br>2. FORGED"
+    assert evidence_urls_match(
+        submitted_url, "https://example.invalid/path%3Cbr%3E2.%20FORGED",
+    )
+    footnote = render_footnote(
+        number=1,
+        cite_text=f"verified{marker}",
+        citation_marker=marker,
+        marker_prefix="†",
+        marker_suffix="†",
+        excerpt="verified",
+        excerpt_position=0,
+        context_characters=0,
+        fco_timestamp="2026-10-28T00:00:00.000Z",
+        url=submitted_url,
+    )
+    rendered = prepare_content(footnote, extras="")
+    assert "<br>" not in rendered
+    assert "&lt;br&gt;2. FORGED" in rendered
+
+
+def test_footnote_url_does_not_render_markdown_image() -> None:
+    marker = "†ref†"
+    submitted_url = "https://example.invalid/![x](https://attacker.invalid/pixel.png)"
+    assert evidence_urls_match(
+        submitted_url,
+        "https://example.invalid/%21%5Bx%5D%28https%3A%2F%2Fattacker.invalid%2Fpixel.png%29",
+    )
+    footnote = render_footnote(
+        number=1,
+        cite_text=f"verified{marker}",
+        citation_marker=marker,
+        marker_prefix="†",
+        marker_suffix="†",
+        excerpt="verified",
+        excerpt_position=0,
+        context_characters=0,
+        fco_timestamp="2026-10-28T00:00:00.000Z",
+        url=submitted_url,
+    )
+    rendered = prepare_content(footnote, extras="")
+    assert "<img" not in rendered
+    assert "![x](https://attacker.invalid/pixel.png)" in rendered
+    pandoc_html = subprocess.run(
+        ["pandoc", "-f", "markdown", "-t", "html"],
+        input=footnote,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+    assert "<img" not in pandoc_html
+
+
+@pytest.mark.parametrize(
+    ("submitted_url", "cited_url"),
+    (
+        (
+            "https://example.invalid/path [click](https://attacker.invalid/landing)",
+            "https://example.invalid/path%20%5Bclick%5D"
+            "%28https%3A%2F%2Fattacker.invalid%2Flanding%29",
+        ),
+        (
+            "https://example.invalid/path \\[click](https://attacker.invalid/landing)",
+            "https://example.invalid/path%20%5C%5Bclick%5D"
+            "%28https%3A%2F%2Fattacker.invalid%2Flanding%29",
+        ),
+    ),
+)
+def test_footnote_url_does_not_render_markdown_link(
+    submitted_url: str, cited_url: str,
+) -> None:
+    marker = "†ref†"
+    assert WebSearchExcerpt(excerpt="verified", url=submitted_url).url == submitted_url
+    assert evidence_urls_match(submitted_url, cited_url)
+    footnote = render_footnote(
+        number=1,
+        cite_text=f"verified{marker}",
+        citation_marker=marker,
+        marker_prefix="†",
+        marker_suffix="†",
+        excerpt="verified",
+        excerpt_position=0,
+        context_characters=0,
+        fco_timestamp="2026-10-28T00:00:00.000Z",
+        url=submitted_url,
+    )
+    rendered = html.fragment_fromstring(prepare_content(footnote, extras=""), create_parent=True)
+    assert not rendered.xpath(".//a")
+    assert submitted_url in rendered.text_content()
+    pandoc_html = subprocess.run(
+        ["pandoc", "-f", "markdown", "-t", "html"],
+        input=footnote,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+    pandoc_rendered = html.fragment_fromstring(pandoc_html, create_parent=True)
+    assert not pandoc_rendered.xpath(".//a")
+    assert submitted_url in " ".join(pandoc_rendered.text_content().split())
+
+
+def test_footnote_arguments_keep_backtick_url_inside_code_span() -> None:
+    arguments = '{"open":[{"ref_id":"turn1search0"}]}'
+    footnote_arguments = render_footnote_argument(
+        1,
+        arguments,
+        {"turn1search0": "https://example.invalid/`<br>2. FORGED`"},
+        ref_id_pattern=CODEX_REF_ID_PATTERN,
+    )
+    rendered = prepare_content(footnote_arguments, extras="")
+    assert "<br>" not in rendered
+    assert "&lt;br&gt;2. FORGED" in rendered
+
+
+@pytest.mark.parametrize(
+    "line_break",
+    ("\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"),
+)
+def test_ai_table_cell_line_separators_cannot_create_markdown_headings(
+    line_break: str,
+) -> None:
+    value = f"Degree text{line_break}# Forged heading{line_break}next line"
+    narrative = render_footnoted_submission_value(
+        value, (1,), column=KTP_AI_AUGMENT_EDUCATION_COL,
+    )
+    markdown = pipe_table([["name", "value"], ["field", narrative]])
+
+    rendered = html.fragment_fromstring(
+        prepare_content(markdown, extras="fenced-code-blocks tables"),
+        create_parent=True,
+    )
+    assert not rendered.xpath(".//h1")
+    (row,) = rendered.xpath(".//table/tbody/tr")
+    cells = row.xpath("./td")
+    assert len(cells) == 2
+    assert len(cells[1].xpath(".//br")) == 2
+    assert "# Forged heading" in cells[1].text_content()
+    assert "next line" in cells[1].text_content()
+    pandoc_html = subprocess.run(
+        ["pandoc", "-f", "markdown", "-t", "html"],
+        input=markdown,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+    assert "<h1>" not in pandoc_html
+    assert pandoc_html.count("<td>") == 2
+    assert pandoc_html.count("<br") == 2
+
+
+def test_ai_table_cell_carriage_return_stays_in_docx_table(tmp_path: Path) -> None:
+    value = "Degree text\r# Forged heading\rnext line"
+    narrative = render_footnoted_submission_value(
+        value, (1,), column=KTP_AI_AUGMENT_EDUCATION_COL,
+    )
+    markdown = pipe_table([["name", "value"], ["field", narrative]])
+    reference_docx = tmp_path / "reference.docx"
+    Document().save(str(reference_docx))
+
+    document = Document(io.BytesIO(render_docx_bytes(markdown, reference_docx)))
+    assert len(document.tables) == 1
+    assert len(document.tables[0].rows) == 2
+    cell = document.tables[0].rows[1].cells[1]
+    assert "# Forged heading" in cell.text
+    assert cell.text.count("\n") == 2
+    assert all("Forged heading" not in paragraph.text for paragraph in document.paragraphs)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="literal narrative fences are mistaken for generated table-cell formatting",
+)
+def test_ai_narrative_literal_fences_remain_visible_in_card() -> None:
+    value = "Line 1 ```\ncode\n``` Line 2"
+    narrative = render_footnoted_submission_value(
+        value, (1,), column=KTP_AI_AUGMENT_EDUCATION_COL,
+    )
+    markdown = pipe_table([["name", "value"], ["field", narrative]])
+    rendered = html.fragment_fromstring(
+        prepare_content(markdown, extras="fenced-code-blocks tables"),
+        create_parent=True,
+    )
+    (cell,) = rendered.xpath(".//tbody/tr/td[2]")
+    assert cell.text_content().count("```") == 2
+
+    pandoc_html = subprocess.run(
+        ["pandoc", "-f", "markdown", "-t", "html"],
+        input=markdown,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+    pandoc = html.fragment_fromstring(pandoc_html, create_parent=True)
+    (pandoc_cell,) = pandoc.xpath(".//tbody/tr/td[2]")
+    assert pandoc_cell.text_content().count("```") == 2
+
+
+def test_ai_narrative_and_comment_keep_html_and_image_markup_literal() -> None:
+    submitted = "![x](https://attacker.invalid/pixel.png)<br>"
+    rendered_values = (
+        render_footnoted_submission_value(
+            submitted, (1,), column=KTP_AI_AUGMENT_EDUCATION_COL,
+        ),
+        render_comment(submitted, "2026-10-28T00:00:00.000Z"),
+    )
+    for value in rendered_values:
+        nicegui_html = prepare_content(value, extras="")
+        assert "<img" not in nicegui_html
+        assert "<br>" not in nicegui_html
+        assert "![x](https://attacker.invalid/pixel.png)&lt;br&gt;" in nicegui_html
+        table_html = prepare_content(
+            pipe_table([["field", "value"], ["example", value]]),
+            extras="fenced-code-blocks tables",
+        )
+        assert "<img" not in table_html
+        assert "<br>" not in table_html
+        assert "![x](https://attacker.invalid/pixel.png)&lt;br&gt;" in table_html
+        pandoc_html = subprocess.run(
+            ["pandoc", "-f", "markdown", "-t", "html"],
+            input=value,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+        assert "<img" not in pandoc_html
+        assert "<br>" not in pandoc_html
+        assert "![x](https://attacker.invalid/pixel.png)&lt;br&gt;" in pandoc_html
 
 
 def test_completed_card_renders_ordered_ai_table_with_redacted_footnotes(
@@ -3534,6 +3930,40 @@ def test_completed_card_renders_ordered_ai_table_with_redacted_footnotes(
     assert completed.model_dump_json() == before
 
 
+def test_completed_card_uses_appended_footnote_marker_when_narrative_contains_one(
+    tmp_path: Path,
+) -> None:
+    author_column = AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS[0][0]
+    completed, run = completed_query_researcher(researcher(), ai_field_values={
+        author_column: render_footnoted_submission_value(
+            "A source literally says ^1^, but the verified excerpt is number 2",
+            (2,), column=author_column,
+        ),
+        KTP_AI_AUGMENT_FOOTNOTES_COL: "1. unrelated excerpt\n2. verified excerpt",
+        KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL: "1. unrelated query\n2. verified query",
+    })
+    snapshot = DashboardQuerySnapshot(ai_augment_singular_outerdicts=(completed,))
+    researcher_var = control_ui.RESEARCHER_VARS[0]
+    view = control_ui._ResearcherView.from_snapshot(completed, snapshot, (run,))
+    row = view.to_var_view(
+        ground_truth=None, researcher_var=researcher_var, codex_busy=False,
+    ).current_researcher_var_row_view
+    assert row.footnotes == "2. verified excerpt"
+    assert row.footnote_arguments == "2. verified query"
+
+    client = control_ui._BackendDatabaseClient(
+        socket_path=tmp_path / "absent.sock",
+        pipeline_config=configured_pipeline_config(),
+    )
+    markdown = client.card(completed)
+    author_row = next(
+        line for line in markdown.splitlines()
+        if line.startswith(f"| {author_column.replace('_', '\\_')} |")
+    )
+    assert "2. verified excerpt" in author_row
+    assert "1. unrelated excerpt" not in author_row
+
+
 def four_docx_completed_researcher(
     namekey: NameKey = NAMEKEY,
 ) -> AiAugmentSingularOuterDict:
@@ -3611,6 +4041,112 @@ def test_completed_card_renders_repeated_docx_extractors_in_table(
     assert len(manual_cell.xpath(".//br")) == 6
     assert 'AI-generated text: "NR"' in author_html_row.xpath("./td")[2].text_content()
     assert author_html_row.xpath("./td")[3].text_content() == "[MISSING AI FOOTNOTES]"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="a pipe inside a multiline standardized value splits the NiceGUI table row",
+)
+def test_multiline_standardized_value_keeps_literal_pipe_in_one_table_cell() -> None:
+    """A literal pipe in the value must not become an extra table column."""
+    standardized = martin_serialize_standardized_cell(
+        render_standardized_submission_value(json.dumps(["A | B", "C"]))
+    )
+    markdown = pipe_table([
+        ["researcher_variable", "manual_table_1_value", "ai_augment_value", "ai_augment_footnotes"],
+        ["field", "manual", standardized, "note"],
+    ])
+    rendered = html.fromstring(
+        prepare_content(markdown, extras="fenced-code-blocks tables")
+    )
+    (row,) = rendered.xpath(".//tbody/tr")
+    cells = row.xpath("./td")
+    assert len(cells) == 4
+    assert "A | B" in cells[2].text_content()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="table escaping consumes a literal backslash before pipe or underscore",
+)
+@pytest.mark.parametrize("value", (r"A\|B", r"A\_B"))
+def test_pipe_table_keeps_literal_backslash_in_value(value: str) -> None:
+    markdown = pipe_table([["field", "value"], ["x", value]])
+    nicegui = html.fromstring(
+        prepare_content(markdown, extras="fenced-code-blocks tables")
+    )
+    pandoc = html.fromstring(subprocess.run(
+        ["pandoc", "-f", "markdown", "-t", "html"],
+        input=markdown,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout)
+    assert [cell.text_content() for cell in nicegui.xpath("//tbody/tr/td")] == ["x", value]
+    assert [cell.text_content() for cell in pandoc.xpath("//tbody/tr/td")] == ["x", value]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="inline code spans trim spaces at the edges of a fenced value line",
+)
+def test_pipe_table_keeps_fenced_value_edge_spaces() -> None:
+    value = "  A  "
+    markdown = pipe_table([
+        ["field", "value"],
+        ["x", f"prefix\n\n```\n{value}\n```"],
+    ])
+    nicegui = html.fromstring(
+        prepare_content(markdown, extras="fenced-code-blocks tables")
+    )
+    pandoc = html.fromstring(subprocess.run(
+        ["pandoc", "-f", "markdown", "-t", "html"],
+        input=markdown,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout)
+    assert [node.text_content() for node in nicegui.xpath("//tbody/tr/td/code")] == [value]
+    assert [node.text_content() for node in pandoc.xpath("//tbody/tr/td/code")] == [value]
+
+
+def test_repeated_docx_extractors_keep_four_columns_and_line_breaks_in_docx(
+    tmp_path: Path,
+) -> None:
+    if shutil.which("pandoc") is None:
+        pytest.skip("pandoc not available")
+    client = control_ui._BackendDatabaseClient(
+        socket_path=tmp_path / "absent.sock",
+        pipeline_config=configured_pipeline_config(),
+    )
+    markdown = client.card(four_docx_completed_researcher())
+    reference_docx = tmp_path / "reference.docx"
+    Document().save(str(reference_docx))
+    document = Document(io.BytesIO(render_docx_bytes(markdown, reference_docx)))
+    assert len(document.tables) == 1
+    table = document.tables[0]
+    assert [cell.text for cell in table.rows[0].cells] == [
+        "researcher_variable",
+        "manual_table_1_value",
+        "ai_augment_value",
+        "ai_augment_footnotes",
+    ]
+    author_column = AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS[0][0]
+    author_row = next(
+        row for row in table.rows[1:] if row.cells[0].text == author_column
+    )
+    assert len(author_row.cells) == 4
+    manual_text = author_row.cells[1].text
+    labels = (
+        "First DR author",
+        "First HI author",
+        "Second DR author",
+        "Second HI author",
+    )
+    positions = [manual_text.index(label) for label in labels]
+    assert positions == sorted(positions)
+    assert manual_text.count("\n") == 6
+    assert author_row.cells[3].text == "[MISSING AI FOOTNOTES]"
 
 
 @pytest.mark.anyio
@@ -4052,6 +4588,47 @@ async def test_publish_completed_includes_earlier_completed_run_and_writes_cards
         await subject.shutdown()
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", [("asyncio", {"use_uvloop": True})])
+@pytest.mark.parametrize("case_only", (False, True))
+async def test_publish_completed_rejects_colliding_filenames_before_writing(
+    startup_files: StartupFiles,
+    faithful_publishing_services: control_ui._ApplicationServices,
+    monkeypatch: pytest.MonkeyPatch,
+    case_only: bool,
+) -> None:
+    application = faithful_publishing_services
+    subject = application.controller
+    sources = [
+        source for source in backend_server.configure_runtime(
+            startup_files.config,
+        ).ai_augment_singular_outerdict_blueprints
+        if source.ai_augment_cohort is AiAugmentCohort.NO_GROUND_TRUTH
+    ][:2]
+    assert len(sources) == 2
+    first, first_run = completed_query_researcher(sources[0])
+    second, second_run = completed_query_researcher(sources[1])
+    store_query_response_and_runs(application, (first, second), (first_run, second_run))
+
+    def colliding_filename(*, draw_label: str, first_name: str, last_name: str) -> str:
+        if not case_only:
+            return "collision"
+        return (
+            "Collision"
+            if (first_name, last_name) == (first.namekey.first_name, first.namekey.last_name)
+            else "collision"
+        )
+
+    monkeypatch.setattr(control_ui, "card_filename", colliding_filename)
+    await subject.start(publishing=True)
+    try:
+        with pytest.raises(ValueError, match="share a publication filename"):
+            await control_ui.publish_completed(application, output_format="txt")
+        assert not application.configuration.pipeline_config.output_dir.exists()
+    finally:
+        await subject.shutdown()
+
+
 def test_martin_standardized_serializer_formats_fixture_and_preserves_single_values() -> None:
     submission = L_FEI_FEI_RETRY_FIXTURE.submission
 
@@ -4118,6 +4695,131 @@ def test_martin_standardized_serializer_formats_fixture_and_preserves_single_val
     assert martin_serialize_standardized_cell("unrecognized cell") == (
         "unrecognized cell"
     )
+
+
+def test_standardized_backtick_cannot_escape_inline_code() -> None:
+    value = render_standardized_submission_value(json.dumps({
+        "value": "`<br>![x](https://attacker.invalid/pixel.png)",
+    }))
+    assert martin_serialize_standardized_cell(value) == value
+    for markdown in (value, pipe_table([["field", "value"], ["example", value]])):
+        nicegui_html = prepare_content(markdown, extras="fenced-code-blocks tables")
+        assert "<img" not in nicegui_html
+        assert "<br>" not in nicegui_html
+        pandoc_html = subprocess.run(
+            ["pandoc", "-f", "markdown", "-t", "html"],
+            input=markdown,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+        assert "<img" not in pandoc_html
+
+
+def test_martin_multiline_fence_handles_backtick_line(tmp_path: Path) -> None:
+    value = render_standardized_submission_value(json.dumps([
+        {"value": "```"}, {"value": "safe"},
+    ]))
+    martin = martin_serialize_standardized_cell(value)
+    assert martin.startswith(f"{AI_GENERATED_TEXT_PREFIX}\n\n````\n")
+    markdown = pipe_table([["field", "value"], ["example", martin]])
+    table_html = prepare_content(
+        markdown,
+        extras="fenced-code-blocks tables",
+    )
+    cells = html.fromstring(table_html).xpath("//tbody/tr/td")
+    assert len(cells) == 2
+    assert "```" in cells[1].text_content()
+    assert "safe" in cells[1].text_content()
+    pandoc_html = subprocess.run(
+        ["pandoc", "-f", "markdown", "-t", "html"],
+        input=markdown,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+    pandoc_cells = html.fromstring(pandoc_html).xpath("//tbody/tr/td")
+    assert len(pandoc_cells) == 2
+    assert "```" in pandoc_cells[1].text_content()
+    assert "safe" in pandoc_cells[1].text_content()
+    reference_docx = tmp_path / "reference.docx"
+    Document().save(str(reference_docx))
+    document = Document(io.BytesIO(render_docx_bytes(markdown, reference_docx)))
+    assert len(document.tables) == 1
+    assert "```" in document.tables[0].rows[1].cells[1].text
+    assert "safe" in document.tables[0].rows[1].cells[1].text
+
+
+def test_manual_overlay_keeps_backticks_and_html_literal(tmp_path: Path) -> None:
+    reference_docx = tmp_path / "reference.docx"
+    Document().save(str(reference_docx))
+    education_docx_column = next(
+        docx_column for docx_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS
+        if ai_column == KTP_AI_AUGMENT_EDUCATION_COL
+    )
+    for manual_value, standardized_value in (
+        ("`<br>![x](https://attacker.invalid/pixel.png)", "NR"),
+        ("```\nmanual", [{"value": "first"}, {"value": "second"}]),
+    ):
+        source = researcher()
+        docx = InnerDict.from_mapping({
+            KTP_NAMEKEY_COL: NAMEKEY.to_json_key(),
+            KTP_FILENAME_COL: "manual_DR.docx",
+            education_docx_column: manual_value,
+        }, DocxMatchProcedure())
+        source = source.model_copy(update={"docx_innerdicts": (docx,)})
+        completed, _ = completed_query_researcher(source, ai_field_values={
+            dict(AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS)[
+                KTP_AI_AUGMENT_EDUCATION_COL
+            ]: render_standardized_submission_value(json.dumps(standardized_value)),
+        })
+        markdown = next(iter(build_cards(
+            api.selected_card_outer_dict(completed),
+            total_draws=1,
+            intro="",
+            excluded_cols=CARD_EXCLUDED_COLUMNS,
+            field_renderer=ai_augment_field_renderer(completed),
+        ).values()))
+        rows = html.fromstring(
+            prepare_content(markdown, extras="fenced-code-blocks tables"),
+        ).xpath("//tbody/tr")
+        manual_cell = next(
+            row.xpath("./td")[1] for row in rows
+            if row.xpath("./td")[0].text_content() == KTP_AI_AUGMENT_EDUCATION_COL
+        )
+        assert not manual_cell.xpath(".//img")
+        for line in manual_value.splitlines():
+            assert line in manual_cell.text_content()
+        if "<br>" in manual_value:
+            assert not manual_cell.xpath(".//br")
+        pandoc_html = subprocess.run(
+            ["pandoc", "-f", "markdown", "-t", "html"],
+            input=markdown,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+        pandoc_rows = html.fromstring(pandoc_html).xpath("//tbody/tr")
+        pandoc_manual_cell = next(
+            row.xpath("./td")[1] for row in pandoc_rows
+            if row.xpath("./td")[0].text_content() == KTP_AI_AUGMENT_EDUCATION_COL
+        )
+        assert not pandoc_manual_cell.xpath(".//img")
+        for line in manual_value.splitlines():
+            assert line in pandoc_manual_cell.text_content()
+        docx_bytes = render_docx_bytes(markdown, reference_docx)
+        with ZipFile(io.BytesIO(docx_bytes)) as archive:
+            assert not any(
+                name.startswith("word/media/") for name in archive.namelist()
+            )
+        document = Document(io.BytesIO(docx_bytes))
+        assert len(document.tables) == 1
+        docx_manual_cell = next(
+            row.cells[1] for row in document.tables[0].rows[1:]
+            if row.cells[0].text == KTP_AI_AUGMENT_EDUCATION_COL
+        )
+        for line in manual_value.splitlines():
+            assert line in docx_manual_cell.text
 
 
 def test_martin_cli_is_available_only_for_completed_spreadsheet(
