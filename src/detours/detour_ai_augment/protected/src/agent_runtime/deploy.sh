@@ -384,8 +384,9 @@ limactl start \
     --name="$LIMA_INSTANCE" \
     /tmp/aivm.yaml
 
-if ! limactl shell --workdir=/ "$LIMA_INSTANCE" \
-    sudo -n cloud-init status --wait --long; then
+# cloud-init status also exits nonzero for recoverable deprecation warnings.
+if [ "$(limactl shell --workdir=/ "$LIMA_INSTANCE" \
+    sudo -n systemctl show --property=Result --value cloud-final.service)" != success ]; then
     echo "❌ AIVM guest provisioning failed"
     limactl shell --workdir=/ "$LIMA_INSTANCE" \
         sudo -n journalctl -b -u cloud-final.service --no-pager -n 80 || true
