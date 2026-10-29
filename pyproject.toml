@@ -908,12 +908,14 @@ from src.helpers.vars import (
     KTP_NAMEKEY_COL,
     KTP_PARTITION_COL,
     KTP_PARTITION_DOCX_VALUE,
+    KTP_PARTITION_NO_RESOLUTION_VALUE,
     KTP_PARTITION_FLAG_DOCX_ANY_COL,
     KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL,
     KTP_PARTITION_FLAG_SSN_COUNT_COL,
     KTP_PARTITION_FLAG_XLSX_ANY_COL,
     KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
     KTP_PARTITION_SSN_VALUE,
+    KTP_PARTITION_XLSX_VALUE,
 )
 from src.steps.step_10_build_cards import _mode_matches
 
@@ -1069,15 +1071,18 @@ for name in (*POLICY_GLOBAL_NAMES, *EXPECTED_COUNT_GLOBAL_NAMES):
 print(TEXT.CURRENT_CATEGORIES)
 for category, count in v.EXPECTED_INELIGIBILITY_COUNTS.items():
     print(TEXT.CURRENT_CATEGORY.format(category=category.value, count=count))
-if len(old_no_gt) != v.EXPECTED_NO_GROUND_TRUTH_RESEARCHERS:
-    print(TEXT.BASELINE_NO_GT.format(actual=len(old_no_gt), expected=v.EXPECTED_NO_GROUND_TRUTH_RESEARCHERS))
-if len(old_gt) != v.EXPECTED_GROUND_TRUTH_RESEARCHERS:
-    print(TEXT.BASELINE_GT.format(actual=len(old_gt), expected=v.EXPECTED_GROUND_TRUTH_RESEARCHERS))
+print(TEXT.BASELINE_NO_GT.format(actual=len(old_no_gt), expected=v.EXPECTED_NO_GROUND_TRUTH_RESEARCHERS))
+print(TEXT.BASELINE_GT.format(actual=len(old_gt), expected=v.EXPECTED_GROUND_TRUTH_RESEARCHERS))
 
-old_partitions = Counter(row[KTP_PARTITION_COL] for row in before.values())
-new_partitions = Counter(row[KTP_PARTITION_COL] for row in after.values())
+old_partitions = Counter(int(row[KTP_PARTITION_COL]) for row in before.values())
+new_partitions = Counter(int(row[KTP_PARTITION_COL]) for row in after.values())
 print(TEXT.PARTITION_SIZES)
-for partition in sorted(old_partitions.keys() | new_partitions.keys(), key=int):
+for partition in sorted(old_partitions.keys() | new_partitions.keys() | {
+    KTP_PARTITION_NO_RESOLUTION_VALUE,
+    KTP_PARTITION_XLSX_VALUE,
+    KTP_PARTITION_SSN_VALUE,
+    KTP_PARTITION_DOCX_VALUE,
+}):
     old_count, new_count = old_partitions[partition], new_partitions[partition]
     print(TEXT.PARTITION_SIZE.format(partition=partition, movement=transition(old_count, new_count)))
 
@@ -1102,6 +1107,8 @@ for (old_partition, new_partition), count in sorted(
 
 affected = changed_cards | changes.keys()
 print(TEXT.AFFECTED.format(total=len(affected), cards=len(changed_cards), rows=len(changes)))
+if not affected:
+    print(TEXT.EMPTY_MOVES)
 for key in sorted(affected, key=lambda key: (int(before[key][DRAW_LABEL]), key)):
     old, new = before[key], after[key]
     first_name, last_name = old[KTP_FIRST_NAME_COL], old[KTP_LAST_NAME_COL]
@@ -1120,8 +1127,7 @@ for key in sorted(affected, key=lambda key: (int(before[key][DRAW_LABEL]), key))
     card_text_status = TEXT.CHANGED if key in changed_cards else TEXT.NO_TRANSITION
     print(TEXT.CARD_STATUS.format(label=TEXT.CARD_TEXT, value=card_text_status))
     changed_fields = tuple(column for column in changes.get(key, ()) if column != KTP_PARTITION_COL)
-    if not changed_fields:
-        print(TEXT.CARD_STATUS.format(label=TEXT.OTHER_FIELDS, value=TEXT.NO_TRANSITION))
+    print(TEXT.CARD_STATUS.format(label=TEXT.OTHER_FIELDS, value=TEXT.CHANGED if changed_fields else TEXT.NO_TRANSITION))
     for column in changed_fields:
         print(TEXT.CARD_STATUS.format(label=column, value=transition(old[column], new[column])))
 
@@ -1160,7 +1166,7 @@ def ineligibility_counts(assessments):
 old_categories = ineligibility_counts(old_status)
 new_categories = ineligibility_counts(new_status)
 print(TEXT.CATEGORY_COUNTS)
-for category in sorted(old_categories.keys() | new_categories.keys()):
+for category in sorted(old_categories.keys() | new_categories.keys() | {item.value for item in v.AiAugmentIneligibilityCategory} | {TEXT.UNCLASSIFIED}):
     print(TEXT.CATEGORY_COUNT.format(category=category, movement=transition(old_categories[category], new_categories[category])))
 ' "{{ before_csv }}" "{{ after_csv }}" "{{ before_cards_dir }}" "{{ after_cards_dir }}" "{{ config_flag }}" "{{ config_path }}"
 """
