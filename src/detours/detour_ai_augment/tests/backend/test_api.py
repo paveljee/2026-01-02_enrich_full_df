@@ -6475,6 +6475,25 @@ def backend_startup_config_for_test(
     return config_path
 
 
+def test_subset_9_researchers_are_released_ground_truth(
+    tmp_path: Path,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    context = server.configure_runtime(
+        backend_startup_config_for_test(tmp_path, backend_test_paths)
+    )
+    by_namekey = {
+        item.namekey.to_json_key(): item
+        for item in context.ai_augment_singular_outerdict_blueprints
+    }
+    for index in range(196, 207):
+        namekey = NameKey(first_name=f"Case {index:03}", last_name="Startup")
+        assert (
+            by_namekey[namekey.to_json_key()].ai_augment_cohort
+            is AiAugmentCohort.GROUND_TRUTH
+        )
+
+
 def test_main_ipc_only_runs_only_the_dashboard_query_server(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -105,12 +105,13 @@ def source_population(path: Path, release_map: Path) -> None:
     """Synthetic source tables satisfy the real 307-person population invariants."""
     groups = (
         (196, "subset 1", 1, False, 0),
-        (78, "unreleased", 4, False, 1),
+        (11, "subset 9", 0, False, 0),
+        (67, "unreleased", 4, False, 1),
         (1, "subset 1", 1, False, 0),  # the explicitly excluded duplicate identity
         (3, "subset 8", 1, False, 0),
-        (7, "unreleased", 2, False, 0),
+        (8, "unreleased", 2, False, 0),
         (6, "unreleased", 4, True, 1),
-        (16, "unreleased", 4, False, 2),
+        (15, "unreleased", 4, False, 2),
     )
     with duckdb.connect(str(path)) as connection, release_map.open("w") as mapping:
         writer = csv.writer(mapping)

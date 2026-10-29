@@ -256,10 +256,10 @@ VALID_NONBLANK: Callable[[object], bool] = lambda value: (
 
 AI_AUGMENT_RND_START = 1
 MAP_COLUMNS = (DRAW_LABEL, BATCH_LABEL)
-EXPECTED_GROUND_TRUTH_RESEARCHERS = 196
+EXPECTED_GROUND_TRUTH_RESEARCHERS = 207
 EXPECTED_NO_GROUND_TRUTH_RESEARCHERS = 67  # pre ri_sample_1 2026-10-15: 78
-EXPECTED_ELIGIBLE_RESEARCHERS = 263  # pre ri_sample_1 2026-10-15: 274
-EXPECTED_INELIGIBLE_RESEARCHERS = 44  # pre ri_sample_1 2026-10-15: 33
+EXPECTED_ELIGIBLE_RESEARCHERS = 274  # pre ri_sample_1 2026-10-15: 274
+EXPECTED_INELIGIBLE_RESEARCHERS = 33  # pre ri_sample_1 2026-10-15: 33
 EXPECTED_SOURCE_RESEARCHERS = (
     EXPECTED_ELIGIBLE_RESEARCHERS + EXPECTED_INELIGIBLE_RESEARCHERS
 )
@@ -272,7 +272,9 @@ MAP_SUBSET_0_TO_BATCH_KEY = "map_subset_0_to_batch"
 REPLAY_LOG_KEY = "detour_ai_augment_backend_api_replay_log"
 
 # ground truth is defined explicitly by released batch, exclusive of dupe
-GROUND_TRUTH_RELEASE_BATCHES = frozenset({"subset 1", "subset 5", "subset 6", "subset 7"})
+GROUND_TRUTH_RELEASE_BATCHES = frozenset({
+    "subset 1", "subset 5", "subset 6", "subset 7", "subset 9",
+})
 EXCLUDED_NAMEKEY = json.dumps(
     {KTP_FIRST_NAME_COL: "Mercouri G.", KTP_LAST_NAME_COL: "Kanatzidis"},
     sort_keys=True,
@@ -318,7 +320,7 @@ EXPECTED_INELIGIBILITY_COUNTS = {
     AiAugmentIneligibilityCategory.RELEASE_BATCH_SUBSET_8: 3,
     AiAugmentIneligibilityCategory.STAGING_PARTITION_2: 8,  # pre ri_sample_1 2026-10-15: 7
     AiAugmentIneligibilityCategory.STAGING_PARTITION_4_XLSX_NON_EXACT: 6,
-    AiAugmentIneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN: 15,  # pre ri_sample_1 2026-10-15: 16
+    AiAugmentIneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN: 15,  # pre ri_sample_1 2026-10-15: 16  # noqa: E501
 }
 
 
