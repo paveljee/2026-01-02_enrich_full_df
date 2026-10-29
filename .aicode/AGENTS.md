@@ -74,6 +74,9 @@ a substitute for current user instructions.
 - Make surgical edits within the requested scope. Reuse existing production
   helpers and local step logic rather than inventing abstractions or making
   unrelated refactors. Preserve established data flow and serialization.
+  When centralizing literals in an inline task, group meaningful input patterns
+  and report templates; keep routine API arguments and punctuation inline rather
+  than inventing enums, dictionaries, or constants for them.
   OpenAlex HTTP-log serialization currently uses
   `record.model_dump_json(ensure_ascii=True)`; do not propose a second format.
 - For OpenAlex HTTP tests, use real `requests.Response` objects and intercept
