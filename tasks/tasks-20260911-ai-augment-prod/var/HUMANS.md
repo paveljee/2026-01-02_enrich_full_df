@@ -82,3 +82,16 @@ accepted = assessment.accepted and applied
 ```
 
 So a retry can make an allowed change without yet passing evidence validation; if it has **no contract violations**, that change becomes part of the obligations for the *next* retry. Final acceptance requires no contract violations **and**, in every evidence-bearing field, at least one exact match with all remaining items exact or withdrawn ([vars.py](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/backend/helpers/vars.py:193)).
+
+# cloud init is making my head ache very strongly. why is it like that and taking loads of time? can we somehow wait idk before cloud init finishes for good, full stop, and then provision? but actually i thought limactl is doing all provisioning. how's that work and what can we do, surgically?
+
+> some edits in my prompt above for style
+> signed off: Pavel
+
+Lima **is** doing the provisioning, but it hands the YAML’s `mode: system` script to **cloud-init**. In this run, that script began before Lima finished the reverse-SSHFS mount. It failed when `architecture.py` was not yet visible; Lima still printed READY because its boot scripts had *finished*, not succeeded.
+
+The surgical fix is already in the worktree: [provision.sh](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/agent_runtime/provision.sh:362) waits for the mount before reading shipped files, and [deploy.sh](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/agent_runtime/deploy.sh:387) checks cloud-init’s result before claiming success. The supplied log shows Lima mounts before checking its final boot-script requirement, so that wait should not deadlock.
+
+Letting cloud-init finish **before** AIVM provisioning is possible, but would mean taking the provisioning script out of Lima’s `provision:` block and running it from `deploy.sh` after `limactl start`. That is a larger orchestration change and would not shorten the total install. In this failed run, AIVM provisioning lasted about **56 seconds**, much of it installing `acl`; the two roughly two-minute SSH/SSHFS readiness waits were separate Lima stages. The mount-wait fix addresses the failure, not those delays. It still needs a Mac redeploy to verify.
+
+I am a nonhuman model, cannot personally bear accountability, and my words alone are not evidence.

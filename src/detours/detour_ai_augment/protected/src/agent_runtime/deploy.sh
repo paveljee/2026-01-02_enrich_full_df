@@ -384,6 +384,14 @@ limactl start \
     --name="$LIMA_INSTANCE" \
     /tmp/aivm.yaml
 
+if ! limactl shell --workdir=/ "$LIMA_INSTANCE" \
+    sudo -n cloud-init status --wait --long; then
+    echo "❌ AIVM guest provisioning failed"
+    limactl shell --workdir=/ "$LIMA_INSTANCE" \
+        sudo -n journalctl -b -u cloud-final.service --no-pager -n 80 || true
+    exit 1
+fi
+
 echo "✅ Lima instance created successfully"
 
 prepare_aivm_ssh

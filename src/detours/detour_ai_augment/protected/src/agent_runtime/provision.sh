@@ -359,6 +359,14 @@ install -d \
     "$AIVM_CODEX_PATH" \
     "$AIVM_CODEX_SESSIONS_PATH"
 
+# Lima may start system provisioning before its reverse-sshfs mount is ready.
+if ! mountpoint -q "$AIVM_RESTRICTED_PATH"; then
+    echo "Waiting for reverse-sshfs mount at $AIVM_RESTRICTED_PATH"
+    until mountpoint -q "$AIVM_RESTRICTED_PATH"; do
+        sleep 1
+    done
+fi
+
 # Root-owned import location serves both the audit executable and appendwatch service.
 install -d -m 0755 -o root -g root /usr/local/libexec/src/helpers
 install -m 0644 -o root -g root \

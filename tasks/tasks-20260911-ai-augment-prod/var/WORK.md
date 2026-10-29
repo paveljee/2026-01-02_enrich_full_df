@@ -1,3 +1,8 @@
+# Current AIVM deployment failure — 2026-10-29
+
+- Operator's failed Lima run reached `READY`, then private `ai` SSH failed. Guest `aivm-sshd.service` does not exist. `cloud-final.service` failed at `provision.sh`'s first read of a host-shipped file: `install: cannot stat '/Volumes/home/aicode/aivm/home/ai/.aivm-control/appendwatch/architecture.py'`. This is a reverse-sshfs mount/provision ordering race: cloud-init system provisioning began before the Lima host agent finished mounting the source tree. The 120-second Lima user-SSH/sshfs requirements are separate built-in stages; containerd's boot script exited 0, so it was not this failure.
+- Code patch waits for the actual reverse-sshfs mount before the first shipped-file read; `deploy.sh` checks `cloud-init status --wait --long` after `limactl start` and prints the cloud-final journal on failure before claiming success. Targeted shell-syntax/ownership test passed (1/1); no Lima/production detour was run here. Operator Mac redeploy is needed to verify the race is gone. The patch does not claim to accelerate the built-in user-SSH/sshfs stages.
+
 # Sample 1 DOCX replacement — established diagnostics and current cohort migration
 
 - Operator supplied old/new parsed DOCX JSON in `tmp/RI_sample_1_2025AUG22_HI/`, `tmp/output-diff.patch`, pre/post diagnostics under `tmp/20261020_134940_mode0_run_from_reconciled_ai_augment/` and `tmp/20261028_142639_mode0_run_post_detour_ai_augment_rc1/`, and two pipeline DBs (`data/scisci_process.duckdb`, `tmp/scisci_process_new.duckdb`; read-only only). Never run `src.repl` or detour. This host has 1 CPU/961 MiB RAM/1 GiB swap; serial lightweight commands only (see `.aicode/AGENTS.md`).
