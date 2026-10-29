@@ -680,14 +680,12 @@ def running_dashboard(runtime: OperatorRuntime) -> Generator[DashboardProcess]:
             dashboard.stop()
 
 
-def target_namekey(
-    runtime: OperatorRuntime, *, randomize_target: bool = False,
-    exclude_namekey: NameKey | None = None,
-) -> NameKey:
-    _operator_log("selecting the operator workflow target")
+def operator_workflow_candidate_namekeys(
+    config_path: Path, *, randomize_target: bool,
+) -> tuple[NameKey, ...]:
     configuration = AiAugmentBackendContext(
         pipeline_config=AiAugmentDetourConfig.from_json(
-            runtime.config_path,
+            config_path,
             verify_hash_on_init=False,
         )
     )
@@ -697,34 +695,49 @@ def target_namekey(
         if OPERATOR_TARGET_DRAW_NUMBER in item.draw_numbers
         and item.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
     )
+    if not randomize_target:
+        return (namekey,)
+    first_six = sorted(
+        (
+            item
+            for item in configuration.ai_augment_singular_outerdict_blueprints
+            if item.ai_augment_cohort is AiAugmentCohort.GROUND_TRUTH
+        ),
+        key=lambda item: item.ai_augment_rnd,
+    )[:6]
+    _operator_log("first six workflow candidates by ai_augment_rnd:")
+    for item in first_six:
+        _operator_log(f"ai_augment_rnd={item.ai_augment_rnd}: {item.namekey.to_json_key()}")
+    assert tuple(item.namekey.model_dump_json(by_alias=True) for item in first_six) == (
+        '{"ktp.first_name":"Kenneth G","ktp.last_name":"Cassman"}',
+        '{"ktp.first_name":"Lars Vedel","ktp.last_name":"Kessing"}',
+        '{"ktp.first_name":"John","ktp.last_name":"Haanen"}',
+        '{"ktp.first_name":"Antoine","ktp.last_name":"Guisan"}',
+        '{"ktp.first_name":"David N","ktp.last_name":"Spergel"}',
+        '{"ktp.first_name":"Gaoquan ","ktp.last_name":"Shi"}',
+    )
+    _operator_log(
+        f"added to workflow candidates: "
+        f"{namekey.model_dump_json(by_alias=True)}"
+    )
+    return (namekey, *(item.namekey for item in first_six))
+
+
+def target_namekey(
+    runtime: OperatorRuntime, *, randomize_target: bool = False,
+    exclude_namekey: NameKey | None = None,
+) -> NameKey:
+    _operator_log("selecting the operator workflow target")
+    candidates = operator_workflow_candidate_namekeys(
+        runtime.config_path, randomize_target=randomize_target,
+    )
     if randomize_target:
-        first_six = sorted(
-            (
-                item
-                for item in configuration.ai_augment_singular_outerdict_blueprints
-                if item.ai_augment_cohort is AiAugmentCohort.GROUND_TRUTH
-            ),
-            key=lambda item: item.ai_augment_rnd,
-        )[:6]
-        _operator_log("first six workflow candidates by ai_augment_rnd:")
-        for item in first_six:
-            _operator_log(f"ai_augment_rnd={item.ai_augment_rnd}: {item.namekey.to_json_key()}")
-        assert tuple(item.namekey.model_dump_json(by_alias=True) for item in first_six) == (
-            '{"ktp.first_name":"Kenneth G","ktp.last_name":"Cassman"}',
-            '{"ktp.first_name":"Lars Vedel","ktp.last_name":"Kessing"}',
-            '{"ktp.first_name":"John","ktp.last_name":"Haanen"}',
-            '{"ktp.first_name":"Antoine","ktp.last_name":"Guisan"}',
-            '{"ktp.first_name":"David N","ktp.last_name":"Spergel"}',
-            '{"ktp.first_name":"Gaoquan ","ktp.last_name":"Shi"}',
-        )
-        _operator_log(
-            f"added to workflow candidates: "
-            f"{namekey.model_dump_json(by_alias=True)}"
-        )
         namekey = Random().choice(tuple(
-            candidate for candidate in (namekey, *(item.namekey for item in first_six))
+            candidate for candidate in candidates
             if candidate != exclude_namekey
         ))
+    else:
+        namekey = candidates[0]
     _operator_log(f"randomly selected workflow target {namekey}")
     return namekey
 

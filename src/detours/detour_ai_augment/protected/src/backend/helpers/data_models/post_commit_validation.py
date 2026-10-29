@@ -42,7 +42,10 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pyd
     AgeFirstPublicationSubmission,
     AgeFromBirth,
     AgeFromFirstPublication,
+    BirthComputation,
     CommentsSubmission,
+    ComputedNumeral,
+    CurrentBiologicalAge,
     EvidenceSubmission,
     EvidenceWithdrawal,
     FieldSubmission,
@@ -161,20 +164,40 @@ class _DetourDbValidationReads(FrozenStrictModel):
     field_audits: LazyResultFactory[[], tuple[_FieldAudit, ...], Exception]
 
 
-RETRY_EVIDENCE_SUBMISSION_EXAMPLE = L_FEI_FEI_RETRY_FIXTURE.submission.model_dump(
-    by_alias=True,
-    mode="json",
-)
-RETRY_SUBMISSION_PUBLIC_GUIDANCE = (
-    Locale.EVIDENCE_RETRY_STANDARDIZED_VALUES
-    + Locale.EVIDENCE_RETRY_EXAMPLE_TEMPLATE.format(
-        example=json.dumps(
-            RETRY_EVIDENCE_SUBMISSION_EXAMPLE,
-            ensure_ascii=False,
-            indent=2,
+def _retry_submission_public_guidance(
+    pull_response_record: PullResponseRecord,
+) -> str:
+    pull_date = utc_datetime_from_unix_usec(
+        pull_response_record.ready_to_respond_at_unix_usec
+    ).date()
+
+    example = L_FEI_FEI_RETRY_FIXTURE.submission.model_copy(deep=True)
+    existing_age = example.age_first_publication.standardized_value
+    assert isinstance(existing_age, AgeFromBirth)
+    birth = existing_age.age.computed.birth
+    age = birth.inferred.infer_age(pull_date)
+    assert isinstance(age, CurrentBiologicalAge)
+    example.age_first_publication.standardized_value = AgeFromBirth(
+        age=ComputedNumeral(
+            computed=BirthComputation(
+                basis="birth",
+                birth=birth,
+                as_of=pull_date,
+            ),
+            inferred=age,
+        ),
+    )
+    return (
+        Locale.EVIDENCE_RETRY_STANDARDIZED_VALUES
+        + Locale.EVIDENCE_RETRY_EXAMPLE_TEMPLATE.format(
+            example=json.dumps(
+                example.model_dump(by_alias=True, mode="json"),
+                ensure_ascii=False,
+                indent=2,
+            )
         )
     )
-)
+
 
 AIVM_WORKDIR = PurePosixPath("/home/ai/workdir")
 
@@ -1267,6 +1290,7 @@ def _validate_progress_template(template: str) -> str:
 def _assessment_public_detail(
     assessment: _EvidenceAssessment,
     *,
+    pull_response_record: PullResponseRecord,
     progress_template: str | None,
     violations: Sequence[_RetryViolation] = (),
     include_retry_contract: bool = False,
@@ -1311,7 +1335,7 @@ def _assessment_public_detail(
     if items_to_compare or violations:
         lines.append(Locale.EVIDENCE_RETRY_RESUBMIT_INSTRUCTION)
     if include_retry_contract:
-        lines.append(RETRY_SUBMISSION_PUBLIC_GUIDANCE)
+        lines.append(_retry_submission_public_guidance(pull_response_record))
     return "\n".join(lines)
 
 
@@ -2126,6 +2150,7 @@ def _evaluate_submission_for_commit(
                 schema_detail = _schema_public_detail(schema_issues)
                 assessment_detail = _assessment_public_detail(
                     evidence_assessment,
+                    pull_response_record=body.pull_response_record,
                     progress_template=progress_template,
                     violations=retry_violations,
                     # Preserving from legacy times
@@ -2152,6 +2177,7 @@ def _evaluate_submission_for_commit(
                     Locale.EVIDENCE_SUBMISSION_REJECTED,
                     public_detail=_assessment_public_detail(
                         evidence_assessment,
+                        pull_response_record=body.pull_response_record,
                         progress_template=progress_template,
                         violations=retry_violations,
                         # Preserving from legacy times
@@ -2183,6 +2209,7 @@ def _evaluate_submission_for_commit(
                     validation_result=BackendLifecycle.REJECTED,
                     detail=_assessment_public_detail(
                         evidence_assessment,
+                        pull_response_record=body.pull_response_record,
                         progress_template=Locale.EVIDENCE_GOOD_PROGRESS_TEMPLATE,
                         include_retry_contract=True,
                     ),
@@ -2271,7 +2298,11 @@ def _evaluate_submission_for_commit(
                 # pydantic validation.
                 # Signed off: human
                 # + (f"\n{RETRY_SUBMISSION_PUBLIC_GUIDANCE}" if retry_submission_expected else ""),
-                + (f"\n{RETRY_SUBMISSION_PUBLIC_GUIDANCE}" if standardized_required else ""),
+                + (
+                    f"\n{_retry_submission_public_guidance(body.pull_response_record)}"
+                    if standardized_required
+                    else ""
+                ),
                 error=exc,
             )
         except (OSError, ValueError, duckdb.Error, subprocess.SubprocessError) as exc:
@@ -2451,6 +2482,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.cod
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (  # noqa: E402, E501
     BackendCommitRequestRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event import (  # noqa: E402, E501
+    PullResponseRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.push_event import (  # noqa: E402, E501
     PushResponseRecord,

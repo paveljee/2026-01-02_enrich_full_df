@@ -1365,6 +1365,16 @@ def operator_aivm(
 ) -> None:
     if request.node.get_closest_marker(OPERATOR_MARKER) is None:
         return
+    if request.node.get_closest_marker(REQUIRES_CODEX_AUTH_MARKER) is not None:
+        from src.detours.detour_ai_augment.protected.tests.operator import (
+            test_operator_e2e as workflow,
+        )
+
+        _operator_log("checking configured operator workflow candidates")
+        workflow.operator_workflow_candidate_namekeys(
+            repository_root / workflow.CONFIG_FILENAME,
+            randomize_target=True,
+        )
     # ======================================
     # OpenAlex key must come explicitly
     # from Human Operator at deploy-time and

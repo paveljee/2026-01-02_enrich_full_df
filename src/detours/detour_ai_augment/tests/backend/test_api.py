@@ -88,6 +88,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.sto
     initialize_backend_store,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_fixture import (  # noqa: E501
+    AGE_EXAMPLE_AS_OF,
     L_FEI_FEI_INITIAL_FIXTURE,
     L_FEI_FEI_RETRY_FIXTURE,
 )
@@ -422,6 +423,7 @@ def persisted_http_record(
     request_body: str | None = None,
     response_body: str = "",
     response_headers: dict[str, str] | None = None,
+    ready_to_respond_at_unix_usec: int = 2,
 ) -> HttpRequestLogRecord:
     if (
         response_headers is None
@@ -437,7 +439,7 @@ def persisted_http_record(
         scheme="http",
         host="testserver",
         port=None,
-        ready_to_respond_at_unix_usec=2,
+        ready_to_respond_at_unix_usec=ready_to_respond_at_unix_usec,
         path=path,
         query="",
         request_headers={},
@@ -447,6 +449,23 @@ def persisted_http_record(
         response_body=response_body,
         received_at_unix_usec=None,
         duration_usec=1,
+    )
+
+
+def guidance_pull_response_record(pull_date: date) -> PullResponseRecord:
+    return PullResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+            method=HTTP_GET_METHOD,
+            path=PULL_PATH,
+            response_code=HTTPStatus.OK,
+            ready_to_respond_at_unix_usec=int(
+                datetime(
+                    pull_date.year, pull_date.month, pull_date.day,
+                    tzinfo=timezone.utc,
+                ).timestamp() * MICROSECONDS_PER_SECOND
+            ),
+        )
     )
 
 
@@ -3598,8 +3617,11 @@ def test_openapi_example_is_a_complete_pydantic_valid_submission(
         L_FEI_FEI_RETRY_FIXTURE.submission,
         StandardizedSubmission,
     )
-    assert post_commit_validation.RETRY_EVIDENCE_SUBMISSION_EXAMPLE == (
-        L_FEI_FEI_RETRY_FIXTURE.submission.model_dump(by_alias=True, mode="json")
+    retry_example = L_FEI_FEI_RETRY_FIXTURE.submission.model_dump(
+        by_alias=True, mode="json"
+    )
+    retry_guidance = post_commit_validation._retry_submission_public_guidance(
+        guidance_pull_response_record(AGE_EXAMPLE_AS_OF)
     )
     assert all(
         FIELD_STANDARDIZED_VALUE_FIELD not in field
@@ -3608,19 +3630,19 @@ def test_openapi_example_is_a_complete_pydantic_valid_submission(
     )
     assert all(
         FIELD_STANDARDIZED_VALUE_FIELD in field
-        for column, field in post_commit_validation.RETRY_EVIDENCE_SUBMISSION_EXAMPLE.items()
+        for column, field in retry_example.items()
         if column in AI_AUGMENT_EVIDENCE_COLUMNS and isinstance(field, dict)
     )
     source = backend_test_paths.pydantic_to_paste.read_text(encoding=TEXT_ENCODING).rstrip()
     assert PYDANTIC_TO_PASTE_SOURCE == source
-    assert source in post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE
+    assert source in retry_guidance
     assert (
         json.dumps(
-            post_commit_validation.RETRY_EVIDENCE_SUBMISSION_EXAMPLE,
+            retry_example,
             ensure_ascii=False,
             indent=2,
         )
-        in post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE
+        in retry_guidance
     )
     assert "class CurrentBiologicalAge(" in source
     assert "class CurrentAgeFromFirstPublication(" in source
@@ -3630,6 +3652,19 @@ def test_openapi_example_is_a_complete_pydantic_valid_submission(
     assert "class FirstPublicationComputation(" in source
     assert 'NotReported: TypeAlias = Literal["NR"]' in source
     assert 'NotAvailableOrApplicable: TypeAlias = Literal["NA"]' in source
+
+
+@pytest.mark.parametrize("pull_date", (date(2026, 10, 28), date(2027, 10, 28)))
+def test_retry_guidance_example_uses_linked_pull_date(pull_date: date) -> None:
+    guidance = post_commit_validation._retry_submission_public_guidance(
+        guidance_pull_response_record(pull_date)
+    )
+    example = json.loads(guidance.split("```json\n", 1)[1].split("\n```", 1)[0])
+    age = example[KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL][
+        FIELD_STANDARDIZED_VALUE_FIELD
+    ]
+    assert age["age"]["computed"]["as_of"] == pull_date.isoformat()
+    pydantic_to_paste.AgeFromBirth.model_validate_json(json.dumps(age))
 
 
 def test_pydantic_failure_reports_exact_rejected_input() -> None:
@@ -3973,6 +4008,7 @@ def test_evidence_assessment_is_exhaustive_and_public_guidance_is_nonrevealing(
         )
         detail = post_commit_validation._assessment_public_detail(
             assessment,
+            pull_response_record=guidance_pull_response_record(AGE_EXAMPLE_AS_OF),
             progress_template=Locale.EVIDENCE_GOOD_PROGRESS_TEMPLATE,
         )
     finally:
@@ -4024,18 +4060,22 @@ def test_retry_guidance_separates_exact_progress_from_blocking_contract_violatio
             f"{Locale.STANDARDIZED_VALUE_RETRY_VIOLATION}"
         ),
     )
+    pull_response_record = guidance_pull_response_record(AGE_EXAMPLE_AS_OF)
     detail = post_commit_validation._assessment_public_detail(
         assessment,
+        pull_response_record=pull_response_record,
         progress_template=Locale.EVIDENCE_PROGRESS_TEMPLATE,
         violations=(violation,),
     )
     age_detail = post_commit_validation._assessment_public_detail(
         assessment,
+        pull_response_record=pull_response_record,
         progress_template=Locale.EVIDENCE_PROGRESS_TEMPLATE,
         violations=(age_violation,),
     )
     combined_detail = post_commit_validation._assessment_public_detail(
         assessment,
+        pull_response_record=pull_response_record,
         progress_template=Locale.EVIDENCE_PROGRESS_TEMPLATE,
         violations=(violation, age_violation),
     )
@@ -4522,6 +4562,7 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
     if expected_outcome == EVIDENCE_OUTCOME_WITHDRAWN:
         detail = post_commit_validation._assessment_public_detail(
             retry_assessment,
+            pull_response_record=guidance_pull_response_record(AGE_EXAMPLE_AS_OF),
             progress_template=Locale.EVIDENCE_GOOD_PROGRESS_TEMPLATE,
         )
         location = f"{field}.web_search_excerpts[1]"
@@ -7238,7 +7279,9 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
                     total=len(AI_AUGMENT_EVIDENCE_COLUMNS),
                 )
             )
-            assert post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE in response.text
+            assert post_commit_validation._retry_submission_public_guidance(
+                commit_request_record.commit_request_body.pull_response_record
+            ) in response.text
         if schema_case == "comments_extra":
             assert response.text.startswith(
                 "1 submission issue needs correction:\n"
@@ -7410,23 +7453,18 @@ def test_evidence_retry_uses_original_pull_for_schema_and_projection(
                         assert outcome.submission_type is None
                     pull = await client.get(PULL_PATH)
                     assert pull.status_code == expected_pull_status
+                    retry_guidance = post_commit_validation._retry_submission_public_guidance(
+                        validation.validation_request_body.commit_request_record
+                        .commit_request_body.pull_response_record
+                    )
                     if submission is rejected_evidence:
-                        assert (
-                            post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE
-                            not in pull.text
-                        )
+                        assert retry_guidance not in pull.text
                     elif submission is invalid_submission:
-                        assert (
-                            post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE
-                            not in pull.text
-                        )
+                        assert retry_guidance not in pull.text
                     elif submission is standardized:
-                        assert (
-                            post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE
-                            not in pull.text
-                        )
+                        assert retry_guidance not in pull.text
                     elif submission is plain:
-                        assert post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE in pull.text
+                        assert retry_guidance in pull.text
                     elif submission is standardized_age_invalid:
                         assert (
                             f"{KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL}: "

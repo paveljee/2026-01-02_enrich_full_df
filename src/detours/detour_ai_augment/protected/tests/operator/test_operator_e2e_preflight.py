@@ -91,6 +91,17 @@ from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
 completed_query_files = browser_tests.completed_query_files
 
 
+def test_configured_operator_workflow_candidates_match_release(
+    pytestconfig: pytest.Config,
+) -> None:
+    """Check the real ranked cohort before the paid AIVM operator workflow."""
+    candidates = workflow.operator_workflow_candidate_namekeys(
+        pytestconfig.rootpath / CONFIG_FILENAME,
+        randomize_target=True,
+    )
+    assert len(candidates) == 7
+
+
 def test_operator_preparation_does_not_create_a_backend_launch(
     startup_files: StartupFiles,
     tmp_path: Path,
