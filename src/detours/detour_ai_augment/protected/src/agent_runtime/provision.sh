@@ -361,7 +361,7 @@ install -d \
 
 # Lima may start system provisioning before its reverse-sshfs mount is ready.
 if ! mountpoint -q "$AIVM_RESTRICTED_PATH"; then
-    echo "Waiting for reverse-sshfs mount at $AIVM_RESTRICTED_PATH"
+    echo "Waiting for mount at $AIVM_RESTRICTED_PATH"
     until mountpoint -q "$AIVM_RESTRICTED_PATH"; do
         sleep 1
     done
