@@ -88,6 +88,11 @@ a substitute for current user instructions.
   permission to launch `src.repl`, detours, or access prohibited artifacts.
 - For UI formatting changes or claims, assert the rendered card in a browser;
   source-Markdown order alone does not verify displayed cells or line breaks.
+- After a cohort release or source-partition migration, trace data-dependent
+  operator candidate assertions as well as cohort counts and synthetic fixtures.
+  The synthetic 307-person fixture cannot validate real ranked NameKeys; arrange
+  a human-operated read-only candidate check before paying for an AIVM E2E run.
+  This does not expand the agent's data-access permissions above.
 
 ## Detour architecture (review only, not execution permission)
 

@@ -698,19 +698,20 @@ def target_namekey(
         and item.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
     )
     if randomize_target:
-        first_five = sorted(
+        first_six = sorted(
             (
                 item
                 for item in configuration.ai_augment_singular_outerdict_blueprints
                 if item.ai_augment_cohort is AiAugmentCohort.GROUND_TRUTH
             ),
             key=lambda item: item.ai_augment_rnd,
-        )[:5]
-        _operator_log("first five workflow candidates by ai_augment_rnd:")
-        for item in first_five:
+        )[:6]
+        _operator_log("first six workflow candidates by ai_augment_rnd:")
+        for item in first_six:
             _operator_log(f"ai_augment_rnd={item.ai_augment_rnd}: {item.namekey.to_json_key()}")
-        assert tuple(item.namekey.model_dump_json(by_alias=True) for item in first_five) == (
+        assert tuple(item.namekey.model_dump_json(by_alias=True) for item in first_six) == (
             '{"ktp.first_name":"Kenneth G","ktp.last_name":"Cassman"}',
+            '{"ktp.first_name":"Lars Vedel","ktp.last_name":"Kessing"}',
             '{"ktp.first_name":"John","ktp.last_name":"Haanen"}',
             '{"ktp.first_name":"Antoine","ktp.last_name":"Guisan"}',
             '{"ktp.first_name":"David N","ktp.last_name":"Spergel"}',
@@ -721,7 +722,7 @@ def target_namekey(
             f"{namekey.model_dump_json(by_alias=True)}"
         )
         namekey = Random().choice(tuple(
-            candidate for candidate in (namekey, *(item.namekey for item in first_five))
+            candidate for candidate in (namekey, *(item.namekey for item in first_six))
             if candidate != exclude_namekey
         ))
     _operator_log(f"randomly selected workflow target {namekey}")
