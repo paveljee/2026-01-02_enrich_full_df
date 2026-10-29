@@ -43,7 +43,7 @@
       "desc": "Detour AI Augment Backend API replay log"
     },
     "map_subset_0_to_batch": {
-      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/tmp/map_subset0_to_batch.csv",
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/map_subset0_to_batch.csv",
       "sha256": "a1cd6f3c4a045eff4a248b11b958c552d3c5520066139ec0102ab65e325a5a7c",
       "desc": "map subset 0 to release batches"
     },
