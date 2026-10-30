@@ -1,6 +1,17 @@
 # Full pre-commit-operator suite audit — 2026-10-30
 
 - Collection denominator: **1,077 distinct tests**: main 157; Step 4 5; Mode 3 6; Mode 0 4; AI-augment 890; Mac Chrome UI 10; Lima operator E2E 5. The 10 Mac UI, 5 Lima E2E, and 3 sudo tests were not runnable here (18). The other 1,059 were attempted serially under the 1 CPU/961 MiB limit: **1,040 passed, 12 skipped, 7 failed on environment prerequisites**. The two mock-HTTP Step 09 cases initially failed for lack of `OPENALEX_API_KEY` but passed with `OPENALEX_API_KEY=test-only` (counted as passes). Main remaining failures (3): configured `splink_udfs` platform key/binary and missing manual-review XLSX. Mode 0 failures (2): Kaleido Chromium cannot start under this sandbox (`shutdown: Operation not permitted`). AI-augment failures (2): missing configured source DB and Mac-absolute release-map path. Step 4's slow real-config test skipped for absent resources. The separately invoked real-API tests skipped (one empty case set, one missing key). Ruff and default mypy passed. The AI-augment mypy failure was fixed by importing `CONFIG_FILENAME` directly from its defining `vars.py` in `pytest_plugin.py`; rerun passed on 69 source files, and focused Ruff passed. The suite was not rerun after this import-only edit.
+- New Mac logs (`logs/from_operator`, 2026-10-30): lint, main/other detour tests, 10 Chrome UI tests, real-API tests and three sudo tests passed. Lima AI-augment suite: 881 passed, 2 intentionally skipped, 3 sudo deselected, **4 failed**. All four `test_rootpath_tmp_marker_retains_unique_directories` cases exposed a regression from importing `vars.py` at pytest-plugin import time: `vars.py` reads `pydantic_to_paste.py` relative to CWD, while the nested pytest process runs in a temporary directory. Reproduced locally (4 failed), moved the same direct `CONFIG_FILENAME` import into the operator-only fixture branch, then reran all four (4 passed), Ruff, and AI-augment mypy (69 files) successfully. The separate Mac operator E2E did not complete: it was interrupted during `deploy.sh`/Lima's `user session is ready for ssh` wait; four tests were intentionally skipped and the active two-researcher test did not run. A fresh Mac full-suite/operator run remains unverified.
+
+The earlier import was at the **top of the pytest plugin**. A nested pytest test starts a child process from a temporary working directory and loads that plugin before running any test. Importing `CONFIG_FILENAME` also imported `vars.py`, which immediately executes:
+
+```python
+Path("src/detours/detour_ai_augment/protected/src/backend/helpers/data_models/pydantic_to_paste.py").read_text(...)
+```
+
+That path is relative to the child’s temporary directory, so plugin startup raised `FileNotFoundError`. The four test variants all failed before their intended assertions ran.
+
+The patch moves the same import **inside `operator_aivm`**, after its check for the `operator` marker. The nested tests have no such marker, so they return without importing `vars.py`; all four passed locally after the change. This verifies the specific failure is fixed. It does **not** verify the interrupted Mac operator E2E, which has not rerun.
 
 # Current AIVM deployment — 2026-10-29
 

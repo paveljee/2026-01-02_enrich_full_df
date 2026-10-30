@@ -16,7 +16,6 @@ from typing import Protocol
 import pytest
 from pydantic import PrivateAttr
 
-from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import CONFIG_FILENAME
 from src.helpers.architecture import FrozenStrictModel
 
 DEPLOY_SCRIPT_RELATIVE_PATH = (
@@ -1367,6 +1366,7 @@ def operator_aivm(
     if request.node.get_closest_marker(OPERATOR_MARKER) is None:
         return
     if request.node.get_closest_marker(REQUIRES_CODEX_AUTH_MARKER) is not None:
+        from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import CONFIG_FILENAME
         from src.detours.detour_ai_augment.protected.tests.operator import (
             test_operator_e2e as workflow,
         )
