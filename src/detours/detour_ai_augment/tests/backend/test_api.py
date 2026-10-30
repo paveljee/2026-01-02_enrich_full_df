@@ -567,6 +567,7 @@ def evaluate_retry_submission_for_test(
     session_id: UUID,
     synthetic_record_id_seed: str,
     submission_payload: Submission | StandardizedSubmission,
+    rollout_index: post_commit_validation._RolloutIndex,
     assessment: post_commit_validation._EvidenceAssessment,
 ) -> tuple[str, ...]:
     original_pull, commit_request_record = retry_commit_records(
@@ -597,6 +598,7 @@ def evaluate_retry_submission_for_test(
             else None,
             previous.get(field, post_commit_validation._FieldPinState()),
             assessment=field_assessment,
+            rollout_index=rollout_index,
             push_response_record=commit_request_record.commit_request_body.push_response_record,
         ))
     store._project_field_audits(
@@ -612,19 +614,7 @@ def evaluate_retry_submission_for_test(
 def test_age_evidence_validation_uses_push_utc_date_and_logs_privately(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    def retained_obligations(
-        field: pydantic_to_paste.AgeFirstPublicationSubmission,
-    ) -> tuple[post_commit_validation._EvidenceObligation, ...]:
-        return tuple(
-            post_commit_validation._EvidenceObligation(
-                outcome=EVIDENCE_OUTCOME_V1_EXACT,
-                submission=excerpt,
-            )
-            for excerpt in field.web_search_excerpts
-        )
-
     age_field = L_FEI_FEI_RETRY_FIXTURE.submission.age_first_publication
-    age_obligations = retained_obligations(age_field)
     age_value = age_field.standardized_value
     assert isinstance(age_value, pydantic_to_paste.AgeFromBirth)
     as_of = age_value.age.computed.as_of
@@ -643,15 +633,15 @@ def test_age_evidence_validation_uses_push_utc_date_and_logs_privately(
         "duration_usec": MICROSECONDS_PER_SECOND,
     })
 
-    assert not post_commit_validation._age_evidence_check_failed(
+    assert not post_commit_validation._age_evidence_violations(
         age_field,
-        evidence_obligations=age_obligations,
+        rollout_index=build_citation_index(((TEST_URL, "1976"),)),
         push_response_record=push,
     )
     with caplog.at_level(logging.WARNING):
-        assert post_commit_validation._age_evidence_check_failed(
+        assert post_commit_validation._age_evidence_violations(
             age_field,
-            evidence_obligations=age_obligations,
+            rollout_index=build_citation_index(((TEST_URL, "1976"),)),
             push_response_record=push.model_copy(update={
                 "ready_to_respond_at_unix_usec": (
                     push.ready_to_respond_at_unix_usec + 2 * MICROSECONDS_PER_SECOND
@@ -661,18 +651,18 @@ def test_age_evidence_validation_uses_push_utc_date_and_logs_privately(
     assert "age evidence as_of mismatch" in caplog.text
     assert str(push_usec + 2 * MICROSECONDS_PER_SECOND) in caplog.text
 
-    without_reported_year = age_field.model_copy(update={
-        "web_search_excerpts": [WebSearchExcerpt(excerpt="No date stated", url=TEST_URL)],
-    })
     caplog.clear()
     with caplog.at_level(logging.WARNING):
-        assert post_commit_validation._age_evidence_check_failed(
+        assert post_commit_validation._age_evidence_violations(
             age_field,
-            evidence_obligations=retained_obligations(without_reported_year),
+            rollout_index=build_citation_index(((TEST_URL, "No date stated"),)),
             push_response_record=push,
         )
     assert "reported='1976'" in caplog.text
-    assert "No date stated" in caplog.text
+    assert (
+        f"field={KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL}."
+        f"{FIELD_STANDARDIZED_VALUE_FIELD}.age.computed.birth.reported"
+    ) in caplog.text
 
     verbatim_age = age_field.model_copy(update={
         "standardized_value": age_value.model_copy(update={
@@ -688,14 +678,14 @@ def test_age_evidence_validation_uses_push_utc_date_and_logs_privately(
             excerpt="born in nineteen seventy-six", url=TEST_URL,
         )],
     })
-    assert not post_commit_validation._age_evidence_check_failed(
+    assert not post_commit_validation._age_evidence_violations(
         verbatim_age,
-        evidence_obligations=retained_obligations(verbatim_age),
+        rollout_index=build_citation_index(((TEST_URL, "born in nineteen seventy-six"),)),
         push_response_record=push,
     )
-    assert post_commit_validation._age_evidence_check_failed(
+    assert post_commit_validation._age_evidence_violations(
         verbatim_age,
-        evidence_obligations=age_obligations,
+        rollout_index=build_citation_index(((TEST_URL, "1976"),)),
         push_response_record=push,
     )
 
@@ -774,6 +764,7 @@ def test_rejected_age_evidence_edit_cannot_launder_standardized_pin() -> None:
     rejected = post_commit_validation._transition_field(
         field, age, age, prior,
         assessment=assess(age, first_outcome=EVIDENCE_OUTCOME_UNMATCHED),
+        rollout_index=build_citation_index(((TEST_URL, undated.excerpt),)),
         push_response_record=push,
     )
     assert rejected.violations
@@ -784,10 +775,13 @@ def test_rejected_age_evidence_edit_cannot_launder_standardized_pin() -> None:
     restored_audit = post_commit_validation._transition_field(
         field, restored, restored, rejected.state,
         assessment=assess(restored, first_outcome=EVIDENCE_OUTCOME_V1_EXACT),
+        rollout_index=build_citation_index(((TEST_URL, undated.excerpt),)),
         push_response_record=push,
     )
-    assert [v.message for v in restored_audit.violations] == [
-        f"{field.value}: {Locale.STANDARDIZED_VALUE_RETRY_VIOLATION}"
+    assert [violation.message for violation in restored_audit.violations] == [
+        Locale.STANDARDIZED_REPORTED_NOT_IN_WEB_RESULTS_TEMPLATE.format(
+            location=f"{field.value}.standardized_value.age.computed.birth.reported"
+        )
     ]
     assert restored_audit.state == prior
 
@@ -4154,6 +4148,7 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="commit-near",
                 submission_payload=near_submission,
+                rollout_index=index,
                 assessment=near_assessment,
             )
             == ()
@@ -4165,6 +4160,7 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
             session_id=TEST_SESSION_ID,
             synthetic_record_id_seed="commit-contract-invalid",
             submission_payload=invalid_contract_submission,
+            rollout_index=index,
             assessment=post_commit_validation.assess_submission_evidence(
                 index, invalid_contract_submission, config_facts=MATCH_V2_CONFIG_FACTS,
             ),
@@ -4180,6 +4176,7 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
             session_id=TEST_SESSION_ID,
             synthetic_record_id_seed="commit-changed-education-before-applied",
             submission_payload=changed_education_submission,
+            rollout_index=index,
             assessment=post_commit_validation.assess_submission_evidence(
                 index, changed_education_submission, config_facts=MATCH_V2_CONFIG_FACTS,
             ),
@@ -4199,6 +4196,7 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="commit-near-standardized",
                 submission_payload=near_standardized_submission,
+                rollout_index=index,
                 assessment=post_commit_validation.assess_submission_evidence(
                     index, near_standardized_submission, config_facts=MATCH_V2_CONFIG_FACTS,
                 ),
@@ -4219,6 +4217,7 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
             session_id=TEST_SESSION_ID,
             synthetic_record_id_seed="commit-changed-standardized",
             submission_payload=changed_submission,
+            rollout_index=index,
             assessment=post_commit_validation.assess_submission_evidence(
                 index, changed_submission, config_facts=MATCH_V2_CONFIG_FACTS,
             ),
@@ -4236,6 +4235,7 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="commit-exact",
                 submission_payload=exact_submission,
+                rollout_index=index,
                 assessment=exact_assessment,
             )
             == ()
@@ -4291,6 +4291,7 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="commit-near",
                 submission_payload=near_submission,
+                rollout_index=index,
                 assessment=near_assessment,
             )
             == ()
@@ -4311,6 +4312,7 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
             session_id=TEST_SESSION_ID,
             synthetic_record_id_seed="commit-changed",
             submission_payload=changed_submission,
+            rollout_index=index,
             assessment=changed_assessment,
         )
         near_retry_submission = StandardizedSubmission.model_validate(
@@ -4323,6 +4325,7 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
             session_id=TEST_SESSION_ID,
             synthetic_record_id_seed="commit-near-again",
             submission_payload=near_retry_submission,
+            rollout_index=index,
             assessment=near_assessment,
         )
         field_audits = connection.execute(
@@ -4379,6 +4382,7 @@ def test_retry_preserves_exact_items_inside_a_rejected_field(
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="commit-baseline",
                 submission_payload=baseline_submission,
+                rollout_index=index,
                 assessment=baseline_assessment,
             )
             == ()
@@ -4399,6 +4403,7 @@ def test_retry_preserves_exact_items_inside_a_rejected_field(
             session_id=TEST_SESSION_ID,
             synthetic_record_id_seed="commit-changed",
             submission_payload=changed_submission,
+            rollout_index=index,
             assessment=changed_assessment,
         )
     finally:
@@ -4443,6 +4448,7 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts(
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="commit-baseline",
                 submission_payload=baseline_submission,
+                rollout_index=index,
                 assessment=baseline_assessment,
             )
             == ()
@@ -4463,6 +4469,7 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts(
             session_id=TEST_SESSION_ID,
             synthetic_record_id_seed="commit-changed",
             submission_payload=changed_submission,
+            rollout_index=index,
             assessment=changed_assessment,
         )
     finally:
@@ -4530,6 +4537,7 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="commit-baseline",
                 submission_payload=baseline_submission,
+                rollout_index=index,
                 assessment=baseline_assessment,
             )
             == ()
@@ -4550,6 +4558,7 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
             session_id=TEST_SESSION_ID,
             synthetic_record_id_seed="commit-retry",
             submission_payload=retry_submission,
+            rollout_index=index,
             assessment=retry_assessment,
         )
     finally:
@@ -4606,6 +4615,7 @@ def test_v2_near_evidence_cannot_be_withdrawn(
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="commit-baseline",
                 submission_payload=baseline_submission,
+                rollout_index=index,
                 assessment=baseline_assessment,
             )
             == ()
@@ -4626,6 +4636,7 @@ def test_v2_near_evidence_cannot_be_withdrawn(
             session_id=TEST_SESSION_ID,
             synthetic_record_id_seed="commit-withdrawal",
             submission_payload=withdrawal_submission,
+            rollout_index=index,
             assessment=withdrawal_assessment,
         )
     finally:
@@ -4678,6 +4689,7 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_original_pull(
                     session_id=TEST_SESSION_ID,
                     synthetic_record_id_seed=synthetic_record_id_seed,
                     submission_payload=submission,
+                    rollout_index=index,
                     assessment=assessment,
                 )
                 == ()
@@ -4711,6 +4723,7 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_original_pull(
                     session_id=TEST_SESSION_ID,
                     synthetic_record_id_seed=synthetic_record_id_seed,
                     submission_payload=exact_submission,
+                    rollout_index=index,
                     assessment=exact_assessment,
                 )
                 == ()
@@ -4801,6 +4814,7 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
                         session_id=TEST_SESSION_ID,
                         synthetic_record_id_seed=synthetic_record_id_seed,
                         submission_payload=submission,
+                        rollout_index=index,
                         assessment=assessment,
                     )
                     == ()
@@ -4874,6 +4888,7 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
                     session_id=TEST_SESSION_ID,
                     synthetic_record_id_seed=synthetic_record_id_seed,
                     submission_payload=candidate_submission,
+                    rollout_index=index,
                     assessment=candidate_assessment,
                 )
                 == ()
@@ -4898,6 +4913,7 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
                 session_id=TEST_SESSION_ID,
                 synthetic_record_id_seed="audit-third",
                 submission_payload=retry_submission,
+                rollout_index=index,
                 assessment=candidate_assessment,
             )
     finally:
@@ -4954,6 +4970,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
                 session_id=HAANEN_SESSION_ID,
                 synthetic_record_id_seed=HAANEN_REJECTED_CAPTURE_ID,
                 submission_payload=original_submission,
+                rollout_index=index,
                 assessment=original_assessment,
             )
             == ()
@@ -4982,6 +4999,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
             session_id=HAANEN_SESSION_ID,
             synthetic_record_id_seed=HAANEN_ACCEPTED_CAPTURE_ID,
             submission_payload=archived_retry,
+            rollout_index=index,
             assessment=archived_retry_assessment,
         )
         assert archived_retry_violations
@@ -5053,6 +5071,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
                 session_id=HAANEN_SESSION_ID,
                 synthetic_record_id_seed=f"{HAANEN_ACCEPTED_CAPTURE_ID}-ideal",
                 submission_payload=ideal_retry,
+                rollout_index=index,
                 assessment=ideal_assessment,
             )
             == ()

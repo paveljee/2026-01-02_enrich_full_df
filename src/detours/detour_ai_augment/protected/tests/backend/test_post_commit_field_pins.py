@@ -1,3 +1,5 @@
+from uuid import UUID
+
 import pytest
 
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (  # noqa: E501
@@ -11,6 +13,8 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pos
     _EvidenceSubmissionColumn,
     _FieldPin,
     _FieldPinState,
+    _RolloutIndex,
+    _SessionMetadata,
     _StandardizedPin,
     _transition_field,
 )
@@ -27,6 +31,18 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     EVIDENCE_OUTCOME_UNMATCHED,
     EVIDENCE_OUTCOME_V1_EXACT,
     EVIDENCE_OUTCOME_WITHDRAWN,
+)
+
+EMPTY_ROLLOUT_INDEX = _RolloutIndex(
+    session=_SessionMetadata(
+        session_id=UUID(int=0),
+        timestamp="",
+        rollout_filename="",
+        summary_json="{}",
+    ),
+    fc_rows=(),
+    fco_rows=(),
+    turn_ref_rows=(),
 )
 
 
@@ -136,13 +152,14 @@ def test_pinned_age_is_not_checked_against_a_later_push(
     def fail_if_checked(*_args: object, **_kwargs: object) -> bool:
         raise AssertionError("a pinned age must not be rechecked")
 
-    monkeypatch.setattr(post_commit_validation, "_age_evidence_check_failed", fail_if_checked)
+    monkeypatch.setattr(post_commit_validation, "_age_evidence_violations", fail_if_checked)
     audit = _transition_field(
         _EvidenceSubmissionColumn.AGE_FIRST_PUBLICATION,
         field,
         field,
         previous,
         assessment=_assessment(_EvidenceSubmissionColumn.AGE_FIRST_PUBLICATION.value, field),
+        rollout_index=EMPTY_ROLLOUT_INDEX,
         push_response_record=object(),  # type: ignore[arg-type]
     )
     assert not audit.violations
@@ -174,6 +191,7 @@ def test_valid_evidence_edit_releases_narrative_and_standardized_despite_other_v
     rejected = _transition_field(
         column, changed, changed, previous,
         assessment=_assessment(column.value, changed),
+        rollout_index=EMPTY_ROLLOUT_INDEX,
         push_response_record=object(),  # type: ignore[arg-type]
     )
     assert rejected.violations
@@ -187,6 +205,7 @@ def test_valid_evidence_edit_releases_narrative_and_standardized_despite_other_v
     accepted = _transition_field(
         column, restored, restored, rejected.state,
         assessment=_assessment(column.value, restored),
+        rollout_index=EMPTY_ROLLOUT_INDEX,
         push_response_record=object(),  # type: ignore[arg-type]
     )
     assert not accepted.violations

@@ -541,9 +541,19 @@ class Locale:
         "- {location}; its wording appears close to the cited web result but may "
         "differ in case, accents, punctuation, whitespace, or line breaks."
     )
+    # Retry violations receive their "- " prefix in _assessment_public_detail.
+    STANDARDIZED_REPORTED_NEAR_ITEM_TEMPLATE: Final = (
+        "{location}; its wording appears close to the web result but may "
+        "differ in case, accents, punctuation, whitespace, or line breaks."
+    )
     EVIDENCE_UNMATCHED_ITEM_TEMPLATE: Final = (
         "- {location}; does not appear to match its cited web result. Verify this "
         "excerpt and URL against the original web-tool output."
+    )
+    # Retry violations receive their "- " prefix in _assessment_public_detail.
+    STANDARDIZED_REPORTED_NOT_IN_WEB_RESULTS_TEMPLATE: Final = (
+        "{location}; does not appear to match our records. Verify this "
+        "reported value against the original web-tool output."
     )
     EVIDENCE_WITHDRAWN_ITEM_TEMPLATE: Final = (
         "- {location}; was withdrawn as not present in the web results and does "
@@ -606,11 +616,6 @@ class Locale:
         "age evidence as_of mismatch: submitted=%s push_utc_date=%s "
         "push_received_at_unix_usec=%s"
     )
-    AGE_EVIDENCE_REPORTED_NOT_FOUND_LOG: Final = (
-        "age reported numeral absent from submitted age excerpts: "
-        "reported=%r excerpts=%r"
-    )
-
     REPLAY_LOG_UNREADABLE: Final = "authoritative replay log is unreadable"
     REPLAY_LOG_ALREADY_LOCKED: Final = (
         "another backend process already owns the authoritative replay log"
@@ -904,6 +909,10 @@ class Locale:
         "commit_record_id={commit_record_id} evidence field={field} index={index} "
         "outcome={outcome} excerpt={excerpt!r} raw_submitted_url={raw_submitted_url!r} "
         "decoded_submitted_url={decoded_submitted_url!r} candidates=[{candidates}]"
+    )
+    STANDARDIZED_EVIDENCE_REPORTED_NOT_FOUND_LOG: Final = (
+        "standardized evidence field={field} outcome={outcome} reported={reported!r} "
+        "candidates=[{candidates}]"
     )
     EVIDENCE_CANDIDATE_ASSESSMENT_LOG: Final = (
         "{{ref_id={ref_id!r} call_id={call_id!r} cite_text={cite_text!r} "

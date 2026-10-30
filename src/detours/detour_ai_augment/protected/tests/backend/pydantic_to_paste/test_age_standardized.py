@@ -1,6 +1,7 @@
 import json
 from datetime import date
 from typing import Final
+from uuid import UUID
 
 import pytest
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -12,8 +13,14 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models imp
     pydantic_to_paste as schema,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
-    _age_evidence_check_failed,
-    _EvidenceObligation,
+    _age_evidence_violations,
+    _assessment_public_detail,
+    _CodexFcoRow,
+    _CodexFcRow,
+    _CodexTurnRefRow,
+    _EvidenceAssessment,
+    _RolloutIndex,
+    _SessionMetadata,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EARLIEST_YEAR,
@@ -41,9 +48,10 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pyd
     PublicationSpanAtDeath,
     ReportedNumeral,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     COMPACT_JSON_SEPARATORS,
-    EVIDENCE_OUTCOME_V1_EXACT,
+    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
     NOT_REPORTED_VALUE,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.render import (
@@ -749,39 +757,80 @@ def test_deceased_age_requires_death_evidence() -> None:
         standardized_value=value,
         web_search_excerpts=[birth_excerpt],
     )
-    birth_obligations = (
-        _EvidenceObligation(
-            outcome=EVIDENCE_OUTCOME_V1_EXACT,
-            submission=birth_excerpt,
-        ),
+
+    def rollout_index(*results: str) -> _RolloutIndex:
+        return _RolloutIndex(
+            session=_SessionMetadata(
+                session_id=UUID(int=0),
+                timestamp="",
+                rollout_filename="",
+                summary_json="{}",
+            ),
+            fc_rows=(_CodexFcRow(
+                timestamp="2026-10-27T00:00:00Z",
+                fc_id="fc",
+                call_id="call",
+                name="run",
+                namespace="web",
+                arguments_json="{}",
+            ),),
+            fco_rows=(_CodexFcoRow(
+                timestamp="2026-10-27T00:00:00Z",
+                fco_id="fco",
+                call_id="call",
+            ),),
+            turn_ref_rows=tuple(
+                _CodexTurnRefRow(
+                    ref_id=f"ref-{index}",
+                    call_id="call",
+                    domain=None,
+                    snippet=None,
+                    thumbnail_url=None,
+                    title=None,
+                    url=f"https://example.test/{index}",
+                    cite_text=result,
+                )
+                for index, result in enumerate(results)
+            ),
+        )
+
+    birth_result = "Born September 20, 1963"
+    death_result = "Died October 27, 2020"
+    location = (
+        f"{KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL}.standardized_value."
+        "age.computed.as_of.reported"
     )
-    assert _age_evidence_check_failed(
+    violations = _age_evidence_violations(
         birth_only,
-        evidence_obligations=birth_obligations,
+        rollout_index=rollout_index(birth_result),
         push_response_record=object(),  # type: ignore[arg-type]
     )
-    both = birth_only.model_copy(update={
-        "web_search_excerpts": [
-            birth_excerpt,
-            schema.WebSearchExcerpt(
-                excerpt="Died October 27, 2020",
-                url="https://example.test/death",
-            ),
-        ],
-    })
-    assert _age_evidence_check_failed(
-        both,
-        evidence_obligations=birth_obligations,
+    assert len(violations) == 1
+    assert violations[0].message == (
+        Locale.STANDARDIZED_REPORTED_NOT_IN_WEB_RESULTS_TEMPLATE.format(location=location)
+    )
+    near_violations = _age_evidence_violations(
+        birth_only,
+        rollout_index=rollout_index(birth_result, death_result.lower()),
         push_response_record=object(),  # type: ignore[arg-type]
     )
-    assert not _age_evidence_check_failed(
-        both,
-        evidence_obligations=(
-            *birth_obligations,
-            _EvidenceObligation(
-                outcome=EVIDENCE_OUTCOME_V1_EXACT,
-                submission=both.web_search_excerpts[1],
-            ),
-        ),
+    assert len(near_violations) == 1
+    assert near_violations[0].message == (
+        Locale.STANDARDIZED_REPORTED_NEAR_ITEM_TEMPLATE.format(location=location)
+    )
+    for rejected, template in (
+        (violations, Locale.STANDARDIZED_REPORTED_NOT_IN_WEB_RESULTS_TEMPLATE),
+        (near_violations, Locale.STANDARDIZED_REPORTED_NEAR_ITEM_TEMPLATE),
+    ):
+        detail = _assessment_public_detail(
+            _EvidenceAssessment(items=()),
+            pull_response_record=object(),  # type: ignore[arg-type]
+            progress_template=None,
+            violations=rejected,
+        )
+        assert f"- {template.format(location=location)}" in detail.splitlines()
+    assert not _age_evidence_violations(
+        birth_only,
+        rollout_index=rollout_index(birth_result, death_result),
         push_response_record=object(),  # type: ignore[arg-type]
     )

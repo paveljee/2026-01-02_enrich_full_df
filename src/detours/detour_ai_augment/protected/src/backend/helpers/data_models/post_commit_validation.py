@@ -37,8 +37,6 @@ from src.detours.detour_ai_augment.protected.src.architecture import BackendComp
 from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     Age,
-    AgeAtDeathFromBirth,
-    AgeAtDeathFromFirstPublication,
     AgeFirstPublicationSubmission,
     AgeFromBirth,
     AgeFromFirstPublication,
@@ -49,6 +47,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pyd
     EvidenceSubmission,
     EvidenceWithdrawal,
     FieldSubmission,
+    ReportedNumeral,
     StandardizedFieldSubmission,
     StandardizedSubmission,
     StandardizedValue,
@@ -999,18 +998,27 @@ def _near_evidence_candidates(
     def position_for(row: _CodexTurnRefRow) -> int | None:
         if not evidence_urls_match(url, row.url):
             return None
-        tokens = _normalized_evidence_tokens(row.cite_text)
-        width = len(submitted_tokens)
-        return next(
-            (
-                index + 1
-                for index in range(len(tokens) - width + 1)
-                if tokens[index:index + width] == submitted_tokens
-            ),
-            None,
-        )
+        return _near_evidence_position(row.cite_text, submitted_tokens)
 
     return _evidence_candidates(rollout_index, position_for)
+
+
+def _near_evidence_position(
+    cite_text: str,
+    submitted_tokens: tuple[str, ...],
+) -> int | None:
+    if not submitted_tokens:
+        return None
+    tokens = _normalized_evidence_tokens(cite_text)
+    width = len(submitted_tokens)
+    return next(
+        (
+            index + 1
+            for index in range(len(tokens) - width + 1)
+            if tokens[index:index + width] == submitted_tokens
+        ),
+        None,
+    )
 
 
 def _candidate_match(
@@ -1339,16 +1347,32 @@ def _assessment_public_detail(
     return "\n".join(lines)
 
 
-def _age_evidence_check_failed(
+def _age_evidence_violations(
     age_standardized_submission: AgeFirstPublicationSubmission,
     *,
-    evidence_obligations: tuple[_EvidenceObligation, ...],
+    rollout_index: _RolloutIndex,
     push_response_record: PushResponseRecord,
-) -> bool:
+) -> tuple[_RetryViolation, ...]:
+    """
+    Proof of concept: standardized values have no separate evidence submission.
+    Checking the reported text anywhere in eligible rollout web results is
+    implicit, including across fields. An explicit evidence submission
+    phase would make that linkage and its retry guidance clearer; for now,
+    require at least a verbatim web-result match and identify wording
+    failures publicly – separate for non-matches and near-matches.
+    
+    Only for age at this point because no other standardized value
+    models use the reported-computed data format.
+
+    Signed off: @paveljee
+    """
+
     age_value = age_standardized_submission.standardized_value
     if not isinstance(age_value, Age):
-        return False
-    failed = False
+        return ()
+
+    field = _EvidenceSubmissionColumn.AGE_FIRST_PUBLICATION
+    violations: list[_RetryViolation] = []
     if isinstance(age_value, (AgeFromBirth, AgeFromFirstPublication)):
         push_received_at_unix_usec = (
             push_response_record.ready_to_respond_at_unix_usec
@@ -1362,29 +1386,48 @@ def _age_evidence_check_failed(
                 push_date,
                 push_received_at_unix_usec,
             )
-            failed = True
-    reported = (
-        age_value.age.computed.birth
-        if isinstance(age_value, (AgeFromBirth, AgeAtDeathFromBirth))
-        else age_value.age.computed.first_publication
-    )
-    reported_texts = [reported.reported]
-    if isinstance(age_value, (AgeAtDeathFromBirth, AgeAtDeathFromFirstPublication)):
-        reported_texts.append(age_value.age.computed.as_of.reported)
-    excerpts = tuple(
-        item.submission.excerpt
-        for item in evidence_obligations
-        if isinstance(item.submission, WebSearchExcerpt)
-    )
-    for reported_text in reported_texts:
-        if not any(reported_text in excerpt for excerpt in excerpts):
-            logger.warning(
-                Locale.AGE_EVIDENCE_REPORTED_NOT_FOUND_LOG,
-                reported_text,
-                excerpts,
-            )
-            failed = True
-    return failed
+            violations.append(_RetryViolation(
+                submission_column=field,
+                message=f"{field.value}: {Locale.STANDARDIZED_VALUE_RETRY_VIOLATION}",
+            ))
+
+    computation = age_value.age.computed
+    for field_name in type(computation).model_fields:
+        reported = getattr(computation, field_name)
+        if not isinstance(reported, ReportedNumeral):
+            continue
+        if _exact_evidence_candidates(rollout_index, excerpt=reported.reported):
+            continue
+        submitted_tokens = _normalized_evidence_tokens(reported.reported)
+        near_candidates = _evidence_candidates(
+            rollout_index,
+            lambda row: _near_evidence_position(row.cite_text, submitted_tokens),
+        )
+        location = (
+            f"{field.value}.{STANDARDIZED_VALUE_FIELD}.age.computed."
+            f"{field_name}.reported"
+        )
+        outcome = EVIDENCE_OUTCOME_V2_NEAR if near_candidates else EVIDENCE_OUTCOME_UNMATCHED
+        logger.warning(
+            Locale.STANDARDIZED_EVIDENCE_REPORTED_NOT_FOUND_LOG.format(
+                field=location,
+                outcome=outcome,
+                reported=reported.reported,
+                candidates="; ".join(
+                    f"{candidate.ref_id!r}: {candidate.cite_text!r}"
+                    for candidate in near_candidates
+                ),
+            ),
+        )
+        violations.append(_RetryViolation(
+            submission_column=field,
+            message=(
+                Locale.STANDARDIZED_REPORTED_NEAR_ITEM_TEMPLATE
+                if outcome == EVIDENCE_OUTCOME_V2_NEAR
+                else Locale.STANDARDIZED_REPORTED_NOT_IN_WEB_RESULTS_TEMPLATE
+            ).format(location=location),
+        ))
+    return tuple(violations)
 
 
 def _obligation_item_is_unchanged(
@@ -1556,6 +1599,7 @@ def _review_field(
         standardized_submission,
         previous,
         assessment=assessment,
+        rollout_index=rollout_index,
         push_response_record=push_response_record,
     ), assessment
 
@@ -1567,6 +1611,7 @@ def _transition_field(
     previous: _FieldPinState,
     *,
     assessment: _EvidenceAssessment,
+    rollout_index: _RolloutIndex,
     push_response_record: PushResponseRecord,
 ) -> _FieldAudit:
     obligations, evidence_violations, evidence_changed = _apply_retry_obligations(
@@ -1611,21 +1656,20 @@ def _transition_field(
                         immutable=f"{field.value}.{STANDARDIZED_VALUE_FIELD}",
                     ),
                 ))
-        elif (
-            isinstance(standardized_submission, AgeFirstPublicationSubmission)
-            and _age_evidence_check_failed(
-                standardized_submission,
-                evidence_obligations=obligations,
-                push_response_record=push_response_record,
+        else:
+            age_violations = (
+                _age_evidence_violations(
+                    standardized_submission,
+                    rollout_index=rollout_index,
+                    push_response_record=push_response_record,
+                )
+                if isinstance(standardized_submission, AgeFirstPublicationSubmission)
+                else ()
             )
-        ):
-            violations.append(_RetryViolation(
-                submission_column=field,
-                message=f"{field.value}: {Locale.STANDARDIZED_VALUE_RETRY_VIOLATION}",
-            ))
-        elif submission.value == narrative_value:
-            standardized_value = candidate
-            pins |= _FieldPin.STANDARDIZED
+            violations.extend(age_violations)
+            if not age_violations and submission.value == narrative_value:
+                standardized_value = candidate
+                pins |= _FieldPin.STANDARDIZED
 
     state = _FieldPinState(
         pins=pins,
