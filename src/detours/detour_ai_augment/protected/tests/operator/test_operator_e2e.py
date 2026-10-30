@@ -211,6 +211,7 @@ BROWSER_CHANNEL = "chrome"
 GRID_ROW_SELECTOR = ".ag-center-cols-container .ag-row"
 RUN_OUTCOME_HISTORY_ROW_SELECTOR = "tbody tr"
 OPERATOR_TARGET_DRAW_NUMBER = "146"
+GAOQUAN_SHI_NAMEKEY = NameKey(first_name="Gaoquan ", last_name="Shi")
 DARWIN_AF_UNIX_PATH_CAPACITY_BYTES = 104
 PYTEST_CURRENT_TEST_ENV_NAME = "PYTEST_CURRENT_TEST"
 OPERATOR_LIVE_OUTPUT = sys.__stdout__ or sys.stdout
@@ -714,7 +715,7 @@ def operator_workflow_candidate_namekeys(
         '{"ktp.first_name":"John","ktp.last_name":"Haanen"}',
         '{"ktp.first_name":"Antoine","ktp.last_name":"Guisan"}',
         '{"ktp.first_name":"David N","ktp.last_name":"Spergel"}',
-        '{"ktp.first_name":"Gaoquan ","ktp.last_name":"Shi"}',
+        GAOQUAN_SHI_NAMEKEY.model_dump_json(by_alias=True),
     )
     _operator_log(
         f"added to workflow candidates: "
@@ -1922,18 +1923,44 @@ def test_completed_dashboard_backend_codex_workflow_renders_researcher_card(
 
 
 @pytest.mark.requires_codex_auth
-def test_two_researchers_complete_sequential_dashboard_backend_codex_workflows(
+def test_two_random_researchers_plus_optional_gaoquan_complete_sequential_workflows(
     operator_runtime: OperatorRuntime,
 ) -> None:
+    """Sample one of N candidates, then another of N-1; add Gaoquan Shi if available
+    and not sampled to exercise deceased-age and China checks in the same workflow.
+    N comes from operator_workflow_candidate_namekeys: the eligible draw-146
+    researcher plus the first six ground-truth researchers by ai_augment_rnd.
+    """
     _assert_deployed_appendwatch_topology(operator_runtime)
-    _operator_log("preparing isolated two-researcher workflow runtime")
+    _operator_log("preparing isolated sequential-workflow runtime")
     first_namekey = target_namekey(operator_runtime, randomize_target=True)
+    second_namekey = target_namekey(
+        operator_runtime,
+        randomize_target=True,
+        exclude_namekey=first_namekey,
+    )
+    assert second_namekey != first_namekey
+    selected_namekeys = [first_namekey, second_namekey]
+    if GAOQUAN_SHI_NAMEKEY in selected_namekeys:
+        _operator_log("sampled two random researchers; Gaoquan Shi is already selected")
+    elif GAOQUAN_SHI_NAMEKEY in operator_workflow_candidate_namekeys(
+        operator_runtime.config_path, randomize_target=True,
+    ):
+        selected_namekeys.append(GAOQUAN_SHI_NAMEKEY)
+        _operator_log(
+            "sampled two random researchers without Gaoquan Shi; he is available, "
+            "so adding him for deceased-age and China checks"
+        )
+    else:
+        _operator_log(
+            "sampled two random researchers; Gaoquan Shi is unavailable, "
+            "so no third researcher is added"
+        )
     empty_date_directories_before = _guest_empty_session_date_directories()
     completed: list[tuple[NameKey, str, str, UUID]] = []
 
     with running_dashboard(operator_runtime) as dashboard:
-        namekey = first_namekey
-        for expected_completed_count in (1, 2):
+        for expected_completed_count, namekey in enumerate(selected_namekeys, 1):
             card_text, response_body, session_id = run_completed_workflow(
                 operator_runtime,
                 dashboard,
@@ -1952,22 +1979,16 @@ def test_two_researchers_complete_sequential_dashboard_backend_codex_workflows(
                 browser_run_outcome_response_body=response_body,
                 expected_completed_count=expected_completed_count,
             )
-            if expected_completed_count == 1:
+            if expected_completed_count < len(selected_namekeys):
                 assert_final_replay_rebuilds(operator_runtime)
-                namekey = target_namekey(
-                    operator_runtime,
-                    randomize_target=True,
-                    exclude_namekey=first_namekey,
-                )
-                assert namekey != first_namekey
 
-    assert len({item[3] for item in completed}) == 2
+    assert len({item[3] for item in completed}) == len(selected_namekeys)
     for namekey, card_text, response_body, _session_id in completed:
         assert_completed_workflow_artifacts(
             operator_runtime,
             namekey=namekey,
             card_text=card_text,
             browser_run_outcome_response_body=response_body,
-            expected_completed_count=2,
+            expected_completed_count=len(selected_namekeys),
         )
     assert_final_replay_rebuilds(operator_runtime)
