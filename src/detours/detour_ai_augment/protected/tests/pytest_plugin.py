@@ -16,6 +16,7 @@ from typing import Protocol
 import pytest
 from pydantic import PrivateAttr
 
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import CONFIG_FILENAME
 from src.helpers.architecture import FrozenStrictModel
 
 DEPLOY_SCRIPT_RELATIVE_PATH = (
@@ -1372,7 +1373,7 @@ def operator_aivm(
 
         _operator_log("checking configured operator workflow candidates")
         workflow.operator_workflow_candidate_namekeys(
-            repository_root / workflow.CONFIG_FILENAME,
+            repository_root / CONFIG_FILENAME,
             randomize_target=True,
         )
     # ======================================
