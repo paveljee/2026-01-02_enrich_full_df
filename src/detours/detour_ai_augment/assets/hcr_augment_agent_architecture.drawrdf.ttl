@@ -1,0 +1,38 @@
+@base <https://example.org/hcr-agent-architecture> .
+@prefix : <https://example.org/hcr-agent-architecture#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+rdfs:label a owl:DatatypeProperty .
+
+:HumanOperator a owl:NamedIndividual ;
+    rdfs:label "Human Operator" ;
+    :operates :AgentRuntime,
+        :Backend,
+        :ControlCentre ;
+    :optionallyOperates :InferenceAPI .
+
+:isClientOf a owl:ObjectProperty .
+
+:operates a owl:ObjectProperty .
+
+:optionallyOperates a owl:ObjectProperty .
+
+:orchestrates a owl:ObjectProperty .
+
+:ControlCentre a owl:NamedIndividual ;
+    rdfs:label "Control Centre" ;
+    :orchestrates :AgentRuntime,
+        :Backend .
+
+:InferenceAPI a owl:NamedIndividual ;
+    rdfs:label "LLM Inference API (OpenAI by default)" ;
+    :operates :AgentRuntime .
+
+:AgentRuntime a owl:NamedIndividual ;
+    rdfs:label "AI Agent Runtime" ;
+    :isClientOf :Backend .
+
+:Backend a owl:NamedIndividual ;
+    rdfs:label "Back end (API + DB)" .
+

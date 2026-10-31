@@ -1,0 +1,134 @@
+from types import FunctionType
+from typing import Any, Callable, TypeVar, get_args
+
+from pydantic import BaseModel, ConfigDict
+
+# Reusable generic type variable
+T = TypeVar("T")
+
+
+class implements[Proto, Base = object]:
+    """
+    Generic decorator for statically asserting that a concrete class
+    structurally implements a `Protocol`.
+
+    When `Proto` is a `Protocol` class, applying `@implements[Proto]()`
+    to a concrete class causes a static type checker such as mypy
+    to check that the class structurally satisfies `type[Proto]`,
+    in particular `Proto`'s read-only `@property` definitions.
+
+    For a concrete class `C`, this decorator imposes essentially
+    the same static compatibility check as:
+
+    ```python
+    _check: type[Proto] = C
+    ```
+
+    Normal mypy protocol compatibility rules apply, including
+    compatibility of member signatures and nested member types.
+
+    At runtime, no conformance check is performed.
+
+    When `Base` and keyword arguments are provided, the concrete
+    class is additionally required at runtime to inherit from `Base`
+    and to have matching class attributes for those arguments.
+
+    Returns the original class unchanged.
+
+    Note 1: The static type checker neither asserts nor enforces
+    that `Proto` is a `Protocol` class; rather, this is mandated
+    as a convention in this code base.
+
+    Note 2: Even though not enforced by the static type checker,
+    unintended use (i.e., where `Proto` is not a `Protocol` class)
+    may tend to fail for other reasons, e.g.:
+
+    - mypy's `[empty-body]` error if `Proto` has properties
+    defined with only a signature and `...`);
+    - mypy's `[arg-type]` error if `C` does not nominally
+    inherit from `Proto`.
+
+    signed off: human (credit to gpt-6-astra-pro for conceiving)
+    """
+
+    __orig_class__: Any  # for static typing
+
+    def __init__(self, **requirements: Any) -> None:
+        self.requirements = requirements
+
+    def __call__(self, cls: type[Proto]) -> type[Proto]:
+        base: type[Base]  # for static typing
+        _, base = get_args(self.__orig_class__)
+
+        candidate: type[Any] = cls   # for static typing
+
+        if not issubclass(candidate, base):
+            raise TypeError(
+                f"{cls.__qualname__} must inherit from {base.__qualname__}."
+            )
+
+        for name, expected in self.requirements.items():
+            actual = getattr(cls, name)
+
+            if actual != expected:
+                raise TypeError(
+                    f"{cls.__qualname__}.{name} must equal "
+                    f"{expected!r}; got {actual!r}."
+                )
+
+        return cls
+
+
+# For demo purposes;
+# mypy this then import this
+@implements[object, BaseModel](
+    model_config=ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+    ),
+)
+class FrozenStrictModel(BaseModel):
+    """
+    Hardened drop-in replacement for Pydantic `BaseModel`:
+    
+    - `extra="forbid"` -> reject unknown fields;
+    - `frozen=True` -> instances are immutable after creation;
+    - `strict=True` -> avoid automatic type coercion.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+    )
+
+
+# Helpful for passing sync lazy stuff.
+# Not separating Result out to keep
+# the definition boringly explicit.
+type LazyResultFactory[**P, T, E] = Callable[
+    P,
+    tuple[T | None, E | None],
+]
+
+
+def nameof(selector: Callable[[], Any]) -> str:
+    """
+    Extracts an attribute name from a simple lambda expression, avoiding
+    hardcoded strings. Applies to, but is not specific to, Pydantic fields.
+    Requires at least Python 3.5+.
+
+    This reads the last bytecode name, not a parsed attribute expression:
+    use only a simple lambda selecting one attribute. Complex expressions
+    can return the wrong name.
+
+    Usage:
+        nameof(lambda: FieldSubmission.value)  # "value"
+        nameof(lambda: FieldSubmission.web_search_excerpts)  # "web_search_excerpts"
+
+    Callable objects other than Python functions and lambdas are rejected.
+    """
+    if not isinstance(selector, FunctionType):
+        raise TypeError
+    return selector.__code__.co_names[-1]

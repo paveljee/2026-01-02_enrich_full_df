@@ -1,0 +1,75 @@
+## Sample installation on macOS
+
+```shell
+REPO_DIR="/path/to/this/repo"
+ENV_FILE_PATH="$REPO_DIR/.env"
+DEPLOY_SCRIPT="$REPO_DIR/src/detours/detour_ai_augment/protected/src/agent_runtime/deploy.sh"
+
+cat >> ~/.zshrc <<EOF
+
+aivm() {
+    OPENALEX_API_KEY="\$(
+        python -c 'from dotenv import dotenv_values; print(dotenv_values("$ENV_FILE_PATH").get("OPENALEX_API_KEY", ""), end="")'
+    )" \\
+    REPO_DIR="$REPO_DIR" \\
+    bash "$DEPLOY_SCRIPT" "\$@"
+}
+EOF
+```
+
+Deployment creates one host-held Ed25519 key and authorizes its public key for
+two private guest accounts. The Human Operator and Control Centre use `ai` to
+run Codex. Backend uses `aivm-audit`, whose SSH authorization has no shell or
+forwarding and accepts only the installed read protocol for Codex rollout
+discovery/streaming and the configured appendwatch report. The report and the
+protected audit configuration remain under the Lima `--mount` control
+directory. Appendwatch retains its generic `0600` report default; this
+deployment opts into `0640`. Because reverse SSHFS does not support assigning
+guest ownership to this host-mounted directory, `aivm-audit` reads the
+atomically replaced report only through its forced, narrowly scoped root
+dispatcher rather than through direct filesystem access.
+
+## OpenAI's official guide on reasoning effort
+Captured from 
+`https://developers.openai.com/api/docs/guides/reasoning.md` on
+2026-09-04 11:37:43 UTC-4
+and available at
+`src/detours/detour_ai_augment/protected/src/agent_runtime/docs/reasoning.md`.
+
+Based on this guide,
+`high` seems to be
+the appropriate setting
+for this detour's AI Agent Runtime.
+
+On a separate note
+(outside of this guide),
+`high` seems to be
+the highest option available
+in ChatGPT Plus chat interface,
+which may also signal that
+this is sufficient
+for most workflows.
+
+## openai/codex/commits/rust-v0.146.0-alpha.3.1/codex-rs/codex-api/src/search.rs
+Downloaded from
+<https://raw.githubusercontent.com/openai/codex/2ca20d522451adf0340403fc15cd54d4926f14b0/codex-rs/codex-api/src/search.rs>
+on 2026-09-18 UTC-4.
+
+## Codex base instructions
+Taken out from one of the rollouts’
+`"session_meta"` event,
+`"base_instructions"` node
+(payload excerpts:
+`"timestamp": "2026-10-08T18:57:39.433Z"`,
+`"originator": "codex_exec"`,
+`"cli_version": "0.146.0-alpha.3.1"`)
+for review, available here:
+`src/detours/detour_ai_augment/protected/src/agent_runtime/docs/base_instructions.md`.
+
+These are then followed
+by a developer instruction
+in the rollout –
+these may be reviewed, for example, here:
+`src/detours/detour_ai_augment/protected/src/llm_inference_api/sample_rollouts/`.
+Note that the base instructions
+appear to be different there.

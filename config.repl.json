@@ -35,6 +35,11 @@
   "pilot_xlsx_name": "2024_HCR.xlsx",
   "total_draws": 310,
   "files_config": {
+    "manual_outerdict_mask": {
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/tmp/manual_outerdict_mask.json",
+      "sha256": "190c1bb7a6e5581d4be8c2d37c2867f1bcd3ea54b529840ec40f621b22196629",
+      "desc": "manual OuterDict mask"
+    },
     "openalex_paper_title_parquet": {
       "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/output/openalex_paper_titles.parquet",
       "sha256": "3511bf749a170086f92556fcd2fdf464d8fe1c44191b77c06cab414da5f99fb8",
@@ -166,9 +171,9 @@
       "desc": "RI pilot extraction 2025 AUG 19 HI (n=10) + fixed space + norm header + fixed edu"
     },
     "ri_sample_1": {
-      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions/RI_sample_1_2025AUG22_HI_fixed_edu.docx",
-      "sha256": "e135e406e3bae7b5df120f2551a5699afcbbf3763fdcc9ae9d13a5d4e0a077c6",
-      "desc": "RI sample 1 2025 AUG 22 HI + fixed edu"
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions/RI_sample_1_2025AUG22_HI (n=20)_from_HI_2026-10-15.docx",
+      "sha256": "1c72668bf1bc0a0fffa80a400b50297d04473183e9359b9368f6e6831eb226ec",
+      "desc": "RI sample 1 2025 AUG 22 HI (n=20) from HI 2026-10-15"
     },
     "ri_sample_2": {
       "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions/RI_sample_2_2025SEPT16_DR_fixed_names.docx",

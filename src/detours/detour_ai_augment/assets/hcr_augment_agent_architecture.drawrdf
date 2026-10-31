@@ -1,0 +1,158 @@
+<mxfile host="gbad-project.github.io" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36" version="24.7.5">
+  <diagram name="Agent Architecture" id="agent-architecture">
+    <mxGraphModel dx="794" dy="425" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="500" math="0" shadow="0">
+      <root>
+        <gbadMetadata label="" csvPath="" baseUri="https://example.org/hcr-agent-architecture#" rdfParserSettings="{&quot;version&quot;:1,&quot;settings&quot;:{&quot;includePreamble&quot;:false,&quot;inferTypeOfLiterals&quot;:true,&quot;includeLabel&quot;:false,&quot;strictMode&quot;:false,&quot;stripHtml&quot;:true,&quot;mintFromLiterals&quot;:true,&quot;mintFromTypes&quot;:false,&quot;mintFromArrows&quot;:true,&quot;indentation&quot;:2,&quot;maxGap&quot;:10,&quot;ontologyIri&quot;:null,&quot;prefix&quot;:null,&quot;prefixIri&quot;:null,&quot;capitalisationScheme&quot;:&quot;upper-camel&quot;,&quot;metacharacterStrategy&quot;:&quot;url&quot;,&quot;metacharacterEntries&quot;:[],&quot;literalDefinitions&quot;:[{&quot;attrKey&quot;:&quot;style&quot;,&quot;attrVal&quot;:&quot;rounded=1&quot;}]}}" id="0">
+          <userObjectPreambleElement rdfPrefix="rdf" rdfIRI="http://www.w3.org/1999/02/22-rdf-syntax-ns#" />
+          <userObjectPreambleElement rdfPrefix="rdfs" rdfIRI="http://www.w3.org/2000/01/rdf-schema#" />
+          <userObjectPreambleElement rdfPrefix="owl" rdfIRI="http://www.w3.org/2002/07/owl#" />
+          <mxCell />
+          <mxCell />
+        </gbadMetadata>
+        <mxCell id="1" parent="0" />
+        <mxCell id="edge-human-control" value="" style="endArrow=classic;html=1;rounded=0;exitX=0;exitY=0.75;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="QKB0DqXHp5CYsl35qaso-4" target="QKB0DqXHp5CYsl35qaso-5" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="411.7857142857142" y="115" as="sourcePoint" />
+            <mxPoint x="243.21428571428578" y="195" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="label-human-control" value="operates" style="edgeLabel;resizable=0;html=1;align=center;verticalAlign=middle;" parent="edge-human-control" connectable="0" vertex="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-human-runtime" value="" style="endArrow=classic;html=1;rounded=0;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="QKB0DqXHp5CYsl35qaso-4" target="QKB0DqXHp5CYsl35qaso-1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="503.6363636363635" y="115" as="sourcePoint" />
+            <mxPoint x="761" y="385" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="label-human-runtime" value="operates" style="edgeLabel;resizable=0;html=1;align=center;verticalAlign=middle;" parent="edge-human-runtime" connectable="0" vertex="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-human-backend" value="" style="endArrow=classic;html=1;rounded=0;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="QKB0DqXHp5CYsl35qaso-4" target="QKB0DqXHp5CYsl35qaso-7" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="461.3636363636365" y="115" as="sourcePoint" />
+            <mxPoint x="337.29508196721304" y="385" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="label-human-backend" value="operates" style="edgeLabel;resizable=0;html=1;align=center;verticalAlign=middle;" parent="edge-human-backend" connectable="0" vertex="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-human-inference" value="" style="endArrow=classic;html=1;rounded=0;dashed=1;exitX=1;exitY=0.75;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="QKB0DqXHp5CYsl35qaso-4" target="QKB0DqXHp5CYsl35qaso-3" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="560.9090909090908" y="115" as="sourcePoint" />
+            <mxPoint x="704.090909090909" y="165" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="label-human-inference" value="optionallyOperates" style="edgeLabel;resizable=0;html=1;align=center;verticalAlign=middle;" parent="edge-human-inference" connectable="0" vertex="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-control-runtime" value="" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" parent="1" source="QKB0DqXHp5CYsl35qaso-5" target="QKB0DqXHp5CYsl35qaso-1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="276.31578947368416" y="255" as="sourcePoint" />
+            <mxPoint x="693.6842105263158" y="385" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="label-control-runtime" value="orchestrates" style="edgeLabel;resizable=0;html=1;align=center;verticalAlign=middle;" parent="edge-control-runtime" connectable="0" vertex="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-control-backend" value="" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" parent="1" source="QKB0DqXHp5CYsl35qaso-5" target="QKB0DqXHp5CYsl35qaso-7" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="202.8947368421052" y="255" as="sourcePoint" />
+            <mxPoint x="299" y="385" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="label-control-backend" value="orchestrates" style="edgeLabel;resizable=0;html=1;align=center;verticalAlign=middle;" parent="edge-control-backend" connectable="0" vertex="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-inference-runtime" value="" style="endArrow=classic;html=1;rounded=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" parent="1" source="QKB0DqXHp5CYsl35qaso-3" target="QKB0DqXHp5CYsl35qaso-1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="790" y="225" as="sourcePoint" />
+            <mxPoint x="790" y="385" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="label-inference-runtime" value="operates" style="edgeLabel;resizable=0;html=1;align=center;verticalAlign=middle;" parent="edge-inference-runtime" connectable="0" vertex="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-runtime-backend" value="" style="endArrow=classic;html=1;rounded=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;exitX=0;exitY=0.5;exitDx=0;exitDy=0;" parent="1" source="QKB0DqXHp5CYsl35qaso-1" target="QKB0DqXHp5CYsl35qaso-7" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="690" y="415" as="sourcePoint" />
+            <mxPoint x="440" y="415" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="label-runtime-backend" value="isClientOf" style="edgeLabel;resizable=0;html=1;align=center;verticalAlign=middle;" parent="edge-runtime-backend" connectable="0" vertex="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-20" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" parent="1" source="QKB0DqXHp5CYsl35qaso-1" target="QKB0DqXHp5CYsl35qaso-19" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-21" value="rdfs:label" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" parent="QKB0DqXHp5CYsl35qaso-20" vertex="1" connectable="0">
+          <mxGeometry x="-0.534" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-1" value="AgentRuntime" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="700" y="390" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-17" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" parent="1" source="QKB0DqXHp5CYsl35qaso-3" target="QKB0DqXHp5CYsl35qaso-12" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-18" value="rdfs:label" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" parent="QKB0DqXHp5CYsl35qaso-17" vertex="1" connectable="0">
+          <mxGeometry x="-0.3006" y="-1" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-3" value="InferenceAPI" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="730" y="160" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="QKB0DqXHp5CYsl35qaso-4" target="QKB0DqXHp5CYsl35qaso-8" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-11" value="rdfs:label" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" parent="QKB0DqXHp5CYsl35qaso-10" vertex="1" connectable="0">
+          <mxGeometry x="-0.2602" y="1" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-4" value="HumanOperator" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="420" y="50" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-23" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.25;entryY=1;entryDx=0;entryDy=0;" parent="1" source="QKB0DqXHp5CYsl35qaso-5" target="QKB0DqXHp5CYsl35qaso-22" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-24" value="rdfs:label" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" parent="QKB0DqXHp5CYsl35qaso-23" vertex="1" connectable="0">
+          <mxGeometry x="-0.2341" y="-1" relative="1" as="geometry">
+            <mxPoint x="14" y="1" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-5" value="ControlCentre" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="130" y="200" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-28" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="QKB0DqXHp5CYsl35qaso-7" target="QKB0DqXHp5CYsl35qaso-25" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-29" value="rdfs:label" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" parent="QKB0DqXHp5CYsl35qaso-28" vertex="1" connectable="0">
+          <mxGeometry x="0.1771" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-7" value="Backend" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="290" y="390" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-8" value="Human Operator" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="640" y="65" width="120" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-12" value="LLM Inference API (OpenAI by default)" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="870" y="40" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-19" value="AI Agent Runtime" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="860" y="290" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-22" value="Control Centre" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="20" y="110" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="QKB0DqXHp5CYsl35qaso-25" value="Back end&lt;br&gt;(API + DB)" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="90" y="390" width="110" height="60" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

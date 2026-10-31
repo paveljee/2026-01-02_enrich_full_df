@@ -1,11 +1,118 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+import requests
+from pydantic import ValidationError
+
+from src.helpers.architecture import nameof
 from src.helpers.data_models.http_request_log import (
+    HttpRequestLogRecord,
+    HttpRequestLogSchemaVersion,
+    HttpRequestLogSchemaVersionV1,
     append_http_request_log_record,
     http_request_log_record,
     matching_http_request_log_record,
     redact_http_request_log_query,
 )
+from src.helpers.vars import (
+    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+)
+
+TEST_HTTP_HOST = "api.openalex.org"
+TEST_HTTP_IPV6_HOST = "::1"
+TEST_HTTP_DEFAULT_HTTPS_PORT = 443
+TEST_HTTP_LOCAL_PORT = 8612
+TEST_HTTP_READY_TO_RESPOND_AT_UNIX_USEC = 123457
+
+
+def test_http_request_log_schema_version_uses_strings_and_legacy_v1_int() -> None:
+    version_1 = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body='{"title":"A Fine Paper"}',
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump()
+    version_1_1 = HttpRequestLogRecord.model_validate(
+        version_1
+        | {
+            nameof(lambda: HttpRequestLogRecord.schema_version): (
+                KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+            )
+        }
+    )
+    legacy_version_1 = HttpRequestLogRecord.model_validate(
+        version_1 | {nameof(lambda: HttpRequestLogRecord.schema_version): 1}
+    )
+    restored_legacy_version_1 = HttpRequestLogRecord.model_validate_json(
+        legacy_version_1.model_dump_json()
+    )
+
+    assert version_1[nameof(lambda: HttpRequestLogRecord.schema_version)] == "1"
+    assert isinstance(version_1[nameof(lambda: HttpRequestLogRecord.schema_version)], str)
+    assert legacy_version_1.schema_version == 1
+    assert isinstance(legacy_version_1.schema_version, int)
+    assert (
+        nameof(lambda: HttpRequestLogRecord.record_id)
+        not in legacy_version_1.model_dump()
+    )
+    assert (
+        nameof(lambda: HttpRequestLogRecord.coerce_schema_v1)
+        not in legacy_version_1.model_dump()
+    )
+    assert restored_legacy_version_1.model_dump() == legacy_version_1.model_dump()
+    assert restored_legacy_version_1.schema_version == 1
+    assert version_1_1.schema_version == "1.1"
+    assert isinstance(version_1_1.schema_version, str)
+    for invalid_schema_version in ("1.0", 1.1, 2):
+        with pytest.raises(ValidationError):
+            HttpRequestLogRecord.model_validate(
+                version_1
+                | {
+                    nameof(lambda: HttpRequestLogRecord.schema_version): (
+                        invalid_schema_version
+                    )
+                }
+            )
+
+
+def test_http_request_log_record_id_defaults_to_unique_uuid7_in_v1_1() -> None:
+    version_1 = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host="api.openalex.org",
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body='{"title":"A Fine Paper"}',
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump()
+    version_1_1 = version_1 | {
+        nameof(lambda: HttpRequestLogRecord.schema_version): (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        )
+    }
+    record = HttpRequestLogRecord.model_validate(version_1_1)
+    another = HttpRequestLogRecord.model_validate(version_1_1)
+    restored = HttpRequestLogRecord.model_validate_json(record.model_dump_json())
+
+    assert nameof(lambda: HttpRequestLogRecord.record_id) not in version_1
+    assert record.record_id.version == 7
+    assert another.record_id.version == 7
+    assert another.record_id != record.record_id
+    assert nameof(lambda: HttpRequestLogRecord.coerce_schema_v1) not in record.model_dump()
+    assert restored == record
+    assert restored.record_id == record.record_id
 
 
 def test_append_http_request_log_record_writes_escaped_unicode_jsonl(
@@ -52,7 +159,7 @@ def test_appended_http_request_log_record_roundtrips_unicode(tmp_path) -> None:
 
     restored = matching_http_request_log_record(
         log_path=log_path,
-        schema_version=1,
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
         method="GET",
         scheme="https",
         host="api.openalex.org",
@@ -64,9 +171,631 @@ def test_appended_http_request_log_record_roundtrips_unicode(tmp_path) -> None:
     assert restored.response_body == '{"title":"A Fine Paper 你好"}'
 
 
+def test_http_request_log_schema_version_1_omits_and_rejects_v1_1_fields() -> None:
+    record = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body='{"title":"A Fine Paper"}',
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    )
+    serialized = record.model_dump()
+
+    assert nameof(lambda: HttpRequestLogRecord.record_id) not in serialized
+    assert nameof(lambda: HttpRequestLogRecord.port) not in serialized
+    assert nameof(lambda: HttpRequestLogRecord.coerce_schema_v1) not in serialized
+    assert (
+        nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec)
+        not in serialized
+    )
+    for field in (
+        nameof(lambda: HttpRequestLogRecord.record_id),
+        nameof(lambda: HttpRequestLogRecord.port),
+        nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec),
+    ):
+        with pytest.raises(ValidationError) as raised:
+            HttpRequestLogRecord.model_validate(serialized | {field: None})
+
+        assert raised.value.errors(include_url=False) == [
+            {
+                "type": "extra_forbidden",
+                "loc": (field,),
+                "msg": "Extra inputs are not permitted",
+                "input": None,
+            }
+        ]
+    explicit_false = HttpRequestLogRecord.model_validate(
+        serialized | {nameof(lambda: HttpRequestLogRecord.coerce_schema_v1): False}
+    )
+
+    assert explicit_false.schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION
+    assert explicit_false.coerce_schema_v1 is False
+    assert explicit_false.model_dump() == serialized
+
+
+def test_received_at_may_be_omitted_in_v1_1_but_is_required_in_v1() -> None:
+    legacy = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body='{"title":"A Fine Paper"}',
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump()
+    legacy.pop("received_at_unix_usec")
+    version_1_1 = legacy | {
+        nameof(lambda: HttpRequestLogRecord.schema_version): (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        ),
+        nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec): (
+            TEST_HTTP_READY_TO_RESPOND_AT_UNIX_USEC
+        ),
+    }
+
+    record = HttpRequestLogRecord.model_validate_json(json.dumps(version_1_1))
+    assert record.received_at_unix_usec is None
+    assert HttpRequestLogRecord.model_validate_json(record.model_dump_json()) == record
+
+    for timestamps in (
+        {},
+        {"received_at_unix_usec": None},
+        {nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec): None},
+        {
+            "received_at_unix_usec": None,
+            nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec): None,
+        },
+    ):
+        with pytest.raises(ValidationError, match="must be non-null"):
+            HttpRequestLogRecord.model_validate_json(json.dumps(
+                legacy | {
+                    nameof(lambda: HttpRequestLogRecord.schema_version): (
+                        KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+                    ),
+                    **timestamps,
+                }
+            ))
+
+    for schema_version in (1, KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION):
+        for coerce_schema_v1 in (False, True):
+            version_1 = legacy | {
+                nameof(lambda: HttpRequestLogRecord.schema_version): schema_version,
+                nameof(lambda: HttpRequestLogRecord.coerce_schema_v1): coerce_schema_v1,
+            }
+            for received_at, expected_type in (
+                (None, "int_type"),
+                ("123456", "int_type"),
+            ):
+                with pytest.raises(ValidationError) as raised:
+                    HttpRequestLogRecord.model_validate(
+                        version_1 | {"received_at_unix_usec": received_at}
+                    )
+                assert [(item["loc"], item["type"]) for item in raised.value.errors()] == [
+                    (("received_at_unix_usec",), expected_type),
+                ]
+            with pytest.raises(ValidationError) as raised:
+                HttpRequestLogRecord.model_validate_json(json.dumps(version_1))
+            assert [(item["loc"], item["type"]) for item in raised.value.errors()] == [
+                (("received_at_unix_usec",), "missing"),
+            ]
+
+
+@pytest.mark.parametrize(
+    ("host", "port"),
+    [
+        (TEST_HTTP_HOST, None),
+        (TEST_HTTP_HOST, TEST_HTTP_DEFAULT_HTTPS_PORT),
+        ("127.0.0.1", TEST_HTTP_LOCAL_PORT),
+        (TEST_HTTP_IPV6_HOST, TEST_HTTP_LOCAL_PORT),
+    ],
+)
+def test_http_request_log_schema_version_1_1_roundtrips_optional_port(
+    host: str,
+    port: int | None,
+) -> None:
+    version_1 = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=host,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body='{"title":"A Fine Paper"}',
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump()
+    version_1_1 = version_1 | {
+        nameof(lambda: HttpRequestLogRecord.schema_version): (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        ),
+        nameof(lambda: HttpRequestLogRecord.port): port,
+    }
+    expected_version_1_1 = version_1_1 | {
+        nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec): None,
+    }
+
+    record = HttpRequestLogRecord.model_validate(version_1_1)
+    restored = HttpRequestLogRecord.model_validate_json(record.model_dump_json())
+
+    assert restored.model_dump(
+        exclude={nameof(lambda: HttpRequestLogRecord.record_id)}
+    ) == expected_version_1_1
+    assert restored.record_id == record.record_id
+
+
+@pytest.mark.parametrize("schema_version", [1, "1"])
+def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in(
+    schema_version: HttpRequestLogSchemaVersionV1,
+) -> None:
+    version_1 = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body='{"title":"A Fine Paper"}',
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump()
+    version_1[nameof(lambda: HttpRequestLogRecord.schema_version)] = schema_version
+    version_1_1 = version_1 | {
+        nameof(lambda: HttpRequestLogRecord.schema_version): (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        )
+    }
+
+    native_version_1 = HttpRequestLogRecord.model_validate(version_1)
+    restored_native_version_1 = HttpRequestLogRecord.model_validate_json(
+        native_version_1.model_dump_json()
+    )
+    native = HttpRequestLogRecord.model_validate_json(
+        HttpRequestLogRecord.model_validate(
+            version_1_1
+            | {
+                nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec): (
+                    TEST_HTTP_READY_TO_RESPOND_AT_UNIX_USEC
+                )
+            }
+        ).model_dump_json()
+    )
+    coerced = HttpRequestLogRecord.model_validate(
+        version_1 | {nameof(lambda: HttpRequestLogRecord.coerce_schema_v1): True}
+    )
+    restored_coerced = HttpRequestLogRecord.model_validate_json(
+        coerced.model_dump_json()
+    )
+    json_schema = HttpRequestLogRecord.model_json_schema()
+
+    assert nameof(lambda: HttpRequestLogRecord.record_id) in json_schema["properties"]
+    assert nameof(lambda: HttpRequestLogRecord.record_id) not in json_schema["required"]
+    assert nameof(lambda: HttpRequestLogRecord.port) in json_schema["properties"]
+    assert nameof(lambda: HttpRequestLogRecord.port) not in json_schema["required"]
+    assert (
+        nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec)
+        in json_schema["properties"]
+    )
+    assert (
+        nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec)
+        not in json_schema["required"]
+    )
+    assert (
+        native_version_1.schema_version
+        == schema_version
+    )
+    assert (
+        nameof(lambda: HttpRequestLogRecord.record_id)
+        not in native_version_1.model_dump()
+    )
+    assert (
+        nameof(lambda: HttpRequestLogRecord.coerce_schema_v1)
+        not in native_version_1.model_dump()
+    )
+    assert restored_native_version_1.model_dump() == native_version_1.model_dump()
+    assert native.port is None
+    assert native.coerce_schema_v1 is False
+    assert (
+        native.ready_to_respond_at_unix_usec
+        == TEST_HTTP_READY_TO_RESPOND_AT_UNIX_USEC
+    )
+    assert native.model_dump()[nameof(lambda: HttpRequestLogRecord.port)] is None
+    assert nameof(lambda: HttpRequestLogRecord.coerce_schema_v1) not in native.model_dump()
+    assert coerced.schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+    assert coerced.record_id.version == 7
+    assert nameof(lambda: HttpRequestLogRecord.record_id) in coerced.model_dump()
+    assert nameof(lambda: HttpRequestLogRecord.coerce_schema_v1) not in coerced.model_dump()
+    assert coerced.port is None
+    assert coerced.coerce_schema_v1 is True
+    assert coerced.ready_to_respond_at_unix_usec is None
+    assert coerced.model_dump()[nameof(lambda: HttpRequestLogRecord.port)] is None
+    assert restored_coerced == coerced.model_copy(
+        update={nameof(lambda: HttpRequestLogRecord.coerce_schema_v1): False}
+    )
+
+
+def test_invalid_schema_version_1_is_rejected_before_opt_in_migration() -> None:
+    version_1 = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body='{"title":"A Fine Paper"}',
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump()
+    version_1["method"] = 1
+
+    with pytest.raises(ValidationError) as raised:
+        HttpRequestLogRecord.model_validate(
+            version_1 | {nameof(lambda: HttpRequestLogRecord.coerce_schema_v1): True}
+        )
+
+    assert raised.value.errors(include_url=False) == [
+        {
+            "type": "string_type",
+            "loc": ("method",),
+            "msg": "Input should be a valid string",
+            "input": 1,
+        }
+    ]
+
+
+def test_schema_version_1_reports_ordinary_and_versioned_pydantic_errors() -> None:
+    version_1 = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body="response",
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump() | {
+        "method": 1,
+        "response_body": None,
+        nameof(lambda: HttpRequestLogRecord.port): None,
+    }
+
+    with pytest.raises(ValidationError) as raised:
+        HttpRequestLogRecord.model_validate(version_1)
+
+    assert raised.value.errors(include_url=False) == [
+        {
+            "type": "string_type",
+            "loc": ("method",),
+            "msg": "Input should be a valid string",
+            "input": 1,
+        },
+        {
+            "type": "string_type",
+            "loc": ("response_body",),
+            "msg": "Input should be a valid string",
+            "input": None,
+        },
+        {
+            "type": "extra_forbidden",
+            "loc": (nameof(lambda: HttpRequestLogRecord.port),),
+            "msg": "Extra inputs are not permitted",
+            "input": None,
+        },
+    ]
+
+
 def test_redact_http_request_log_query_can_preserve_filter_separators() -> None:
     query = "filter=openalex_id:W123|W456&select=title&api_key=test-key"
 
     assert redact_http_request_log_query(query, safe=":|") == (
         "filter=openalex_id:W123|W456&select=title&api_key=REDACTED"
     )
+
+
+@pytest.mark.parametrize(
+    (
+        "schema_version",
+        "response_body",
+        "coerce_schema_v1",
+        "valid",
+        "expected_schema_version",
+    ),
+    [
+        # Schema v1 requires a string response body.
+        (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+            "response",
+            None,
+            True,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        ),
+        (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+            "response",
+            False,
+            True,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        ),
+        (KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION, None, None, False, None),
+        # Opt-in migration promotes only valid v1 input.
+        (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+            "response",
+            True,
+            True,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        ),
+        (KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION, None, True, False, None),
+        # Native schema v1.1 allows either string or null.
+        (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+            "response",
+            False,
+            True,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        ),
+        (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+            None,
+            False,
+            True,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        ),
+        # Schema v1.1 ignores the migration flag.
+        (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+            "response",
+            True,
+            True,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        ),
+        (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+            None,
+            True,
+            True,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        ),
+    ],
+)
+def test_http_request_log_response_body_is_required_in_v1_and_nullable_in_v1_1(
+    schema_version: HttpRequestLogSchemaVersion,
+    response_body: str | None,
+    coerce_schema_v1: bool | None,
+    valid: bool,
+    expected_schema_version: HttpRequestLogSchemaVersion | None,
+) -> None:
+    value = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body="response",
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump()
+
+    value[nameof(lambda: HttpRequestLogRecord.schema_version)] = schema_version
+    value["response_body"] = response_body
+
+    if coerce_schema_v1 is not None:
+        value[nameof(lambda: HttpRequestLogRecord.coerce_schema_v1)] = coerce_schema_v1
+
+    if valid:
+        record = HttpRequestLogRecord.model_validate(value)
+        restored = HttpRequestLogRecord.model_validate_json(
+            record.model_dump_json()
+        )
+
+        assert restored.response_body == response_body
+        assert restored.schema_version == expected_schema_version
+        assert nameof(lambda: HttpRequestLogRecord.coerce_schema_v1) not in record.model_dump()
+        assert restored.coerce_schema_v1 is False
+    else:
+        with pytest.raises(ValidationError) as raised:
+            HttpRequestLogRecord.model_validate(value)
+
+        assert raised.value.errors(include_url=False) == [
+            {
+                "type": "string_type",
+                "loc": ("response_body",),
+                "msg": "Input should be a valid string",
+                "input": None,
+            }
+        ]
+
+
+@pytest.mark.parametrize(
+    ("field", "error_type", "error_message"),
+    [
+        (
+            nameof(lambda: HttpRequestLogRecord.response_headers),
+            "dict_type",
+            "Input should be a valid dictionary",
+        ),
+        (
+            nameof(lambda: HttpRequestLogRecord.duration_usec),
+            "int_type",
+            "Input should be a valid integer",
+        ),
+    ],
+)
+def test_http_request_log_response_metadata_is_nonnull_in_v1_and_nullable_in_v1_1(
+    field: str,
+    error_type: str,
+    error_message: str,
+) -> None:
+    version_1 = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body="response",
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump()
+    nullable_version_1_1 = version_1 | {
+        nameof(lambda: HttpRequestLogRecord.schema_version): (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        ),
+        field: None,
+    }
+
+    record = HttpRequestLogRecord.model_validate(nullable_version_1_1)
+    restored = HttpRequestLogRecord.model_validate_json(record.model_dump_json())
+
+    assert record.model_dump()[field] is None
+    assert restored == record
+    for schema_version in (1, "1"):
+        for coerce_schema_v1 in (False, True):
+            invalid_version_1 = version_1 | {
+                nameof(lambda: HttpRequestLogRecord.schema_version): schema_version,
+                nameof(lambda: HttpRequestLogRecord.coerce_schema_v1): coerce_schema_v1,
+                field: None,
+            }
+            with pytest.raises(ValidationError) as raised:
+                HttpRequestLogRecord.model_validate(invalid_version_1)
+
+            assert raised.value.errors(include_url=False) == [
+                {
+                    "type": error_type,
+                    "loc": (field,),
+                    "msg": error_message,
+                    "input": None,
+                }
+            ]
+
+
+@pytest.mark.parametrize("field", ["request_headers", "response_headers"])
+def test_http_request_log_schema_version_1_1_requires_string_header_values(
+    field: str,
+) -> None:
+    value = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body="response",
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump() | {
+        nameof(lambda: HttpRequestLogRecord.schema_version): (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        ),
+        field: {"x-test-header": 1},
+    }
+
+    with pytest.raises(ValidationError) as raised:
+        HttpRequestLogRecord.model_validate(value)
+
+    assert raised.value.errors(include_url=False) == [
+        {
+            "type": "string_type",
+            "loc": (field, "x-test-header"),
+            "msg": "Input should be a valid string",
+            "input": 1,
+        }
+    ]
+
+
+@pytest.mark.parametrize("coerce_schema_v1", [None, False, True])
+def test_invalid_schema_version_1_1_ignores_v1_coercion_flag(
+    coerce_schema_v1: bool | None,
+) -> None:
+    value = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body="response",
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump() | {
+        nameof(lambda: HttpRequestLogRecord.schema_version): (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        ),
+        nameof(lambda: HttpRequestLogRecord.port): "8612",
+    }
+    if coerce_schema_v1 is not None:
+        value[nameof(lambda: HttpRequestLogRecord.coerce_schema_v1)] = coerce_schema_v1
+
+    with pytest.raises(ValidationError) as raised:
+        HttpRequestLogRecord.model_validate(value)
+
+    assert raised.value.errors(include_url=False) == [
+        {
+            "type": "int_type",
+            "loc": ("port",),
+            "msg": "Input should be a valid integer",
+            "input": "8612",
+        }
+    ]
+
+
+def test_response_record_roundtrip_preserves_prepared_request_and_redacts_query() -> None:
+    response = requests.Response()
+    response.status_code = 422
+    response.request = requests.Request(
+        "POST", "https://[::1]:8443/check?api_key=secret&item=one",
+        headers={"X-Model": "submission"}, data='{"name":"Málaga"}'.encode(),
+    ).prepare()
+    response.headers["Content-Type"] = "application/json; charset=utf-8"
+    response.encoding = "utf-8"
+    response._content = '{"detail":"invalide — rejeté"}'.encode()
+    record = HttpRequestLogRecord.from_response(
+        response, received_at_unix_usec=100,
+        ready_to_respond_at_unix_usec=130, duration_usec=30,
+    )
+    assert record.record_id.version == 7
+    assert record.host == "::1" and record.port == 8443
+    assert record.query == "api_key=REDACTED&item=one"
+    assert record.request_body == '{"name":"Málaga"}'
+    assert record.request_headers == dict(response.request.headers)
+    restored = HttpRequestLogRecord.model_validate_json(record.model_dump_json()).to_response()
+    assert restored.status_code == 422
+    assert restored.json() == response.json()
+    assert restored.headers == response.headers
+    assert restored.request.method == "POST"
+    assert restored.request.url == "https://[::1]:8443/check?api_key=REDACTED&item=one"
+    assert restored.request.headers["X-Model"] == "submission"
+    with pytest.raises(requests.HTTPError):
+        restored.raise_for_status()
+
+
+def test_from_response_rejects_missing_request() -> None:
+    with pytest.raises(ValueError, match="prepared request"):
+        HttpRequestLogRecord.from_response(requests.Response())
+
+
+def test_to_response_does_not_invent_a_response_for_request_only_record() -> None:
+    record = HttpRequestLogRecord(
+        schema_version="1.1", method="POST", scheme="http", host="invalid",
+        path="/validate", query="", response_code=None, response_headers=None,
+        response_body=None, received_at_unix_usec=1, duration_usec=0,
+    )
+    with pytest.raises(OSError, match="did not receive"):
+        record.to_response()

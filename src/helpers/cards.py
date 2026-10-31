@@ -7,13 +7,15 @@ import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from io import BytesIO
 from pathlib import Path
 from typing import Callable
 from zipfile import ZipFile
 
 import pandas as pd
+from lxml import etree
 
-from .data_models import OuterDict
+from .data_models import InnerDict, OuterDict
 from .vars import (
     DRAW_LABEL,
     IS_A_KTP_FILENAME_COLUMN,
@@ -24,6 +26,20 @@ from .vars import (
 
 MARKDOWN_CODE_DELIMITER = "`"
 MARKDOWN_LITERAL_LABEL_MARKER = "_"
+# For proper pandoc line breaks in tables, thanks to:
+# <https://github.com/jgm/pandoc/discussions/9536>
+LINEBREAKS_LUA = "\n".join((
+    "function RawInline(el)",
+    "  if el.format == [[html]] and",
+    "     el.text:lower():match([[^<br%s*/?>$]]) then",
+    "    return pandoc.LineBreak()",
+    "  end",
+    "end",
+))
+# Default-ish Word table border style
+WORD_TABLE_BORDER_STYLE = "single"  # solid line
+WORD_TABLE_BORDER_WIDTH_EIGHTHS_OF_POINT = "4"  # half-point width
+WORD_TABLE_BORDER_COLOR_HEX = "000000"  # black colour
 
 
 def _markdown_literal(value: str) -> str:
@@ -79,6 +95,7 @@ def build_cards(
     intro: str,
     excluded_cols: set[str],
     progress_callback: Callable[[int, int, str], None] | None = None,
+    field_renderer: Callable[[InnerDict, str], str | None] | None = None,
 ) -> dict[str, str]:
     cards: dict[str, str] = {}
     intro_prefix = intro if intro.endswith("\n\n") else f"{intro}\n\n"
@@ -125,7 +142,13 @@ def build_cards(
             rendered_filename = _markdown_literal(str(filename))
             card += f"\n\n#### {filename_label}: {rendered_filename}\n"
             for col, val in inner.data.items():
-                if col in excluded_cols or pd.isna(val):
+                if col in excluded_cols:
+                    continue
+                replacement = field_renderer(inner, col) if field_renderer else None
+                if replacement is not None:
+                    card += replacement
+                    continue
+                if pd.isna(val):
                     continue
                 rendered_col = _markdown_literal(col)
                 # Note that values are intentionally
@@ -168,6 +191,72 @@ def build_cards(
     return cards
 
 
+def _add_plain_table_borders(docx_bytes: bytes) -> bytes:
+    """Postprocessing of a pandoc *.docx because
+    pandoc will not render borders for tables.
+    This takes bytes and returns recompiled bytes."""
+
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    document_part = "word/document.xml"
+
+    with ZipFile(BytesIO(docx_bytes)) as source:
+        root = etree.fromstring(source.read(document_part))
+        changed = False
+
+        for table in root.iter(f"{w}tbl"):
+            properties = table.find(f"{w}tblPr")
+            if properties is None:
+                properties = etree.Element(f"{w}tblPr")
+                table.insert(0, properties)
+            if properties.find(f"{w}tblBorders") is not None:
+                # Tables with existing borders are skipped
+                continue
+
+            borders = etree.Element(f"{w}tblBorders")
+            # Set all four borders in the table
+            for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+                border = etree.SubElement(borders, f"{w}{edge}")
+                border.set(f"{w}val", WORD_TABLE_BORDER_STYLE)
+                border.set(
+                    f"{w}sz", WORD_TABLE_BORDER_WIDTH_EIGHTHS_OF_POINT
+                )
+                border.set(f"{w}color", WORD_TABLE_BORDER_COLOR_HEX)
+
+            # tblBorders precedes these properties in WordprocessingML.
+            later = {
+                f"{w}{name}"
+                for name in (
+                    "shd", "tblLayout", "tblCellMar", "tblLook",
+                    "tblCaption", "tblDescription", "tblPrChange",
+                )
+            }
+            position = next(
+                (i for i, child in enumerate(properties) if child.tag in later),
+                len(properties),
+            )
+            properties.insert(position, borders)
+            changed = True
+
+        if not changed:
+            return docx_bytes
+
+        revised_document = etree.tostring(
+            root, encoding="UTF-8", xml_declaration=True
+        )
+        output = BytesIO()
+        with ZipFile(output, "w") as target:
+            target.comment = source.comment
+            for member in source.infolist():
+                target.writestr(
+                    member,
+                    revised_document
+                    if member.filename == document_part
+                    else source.read(member.filename),
+                )
+
+    return output.getvalue()
+
+
 def _render_docx(md_path: Path, docx_path: Path, reference_docx: Path) -> Path:
     subprocess.run(
         [
@@ -175,11 +264,15 @@ def _render_docx(md_path: Path, docx_path: Path, reference_docx: Path) -> Path:
             str(md_path),
             "-o",
             str(docx_path),
+            "--lua-filter=/dev/stdin",  # for proper line breaks in tables
             "--reference-doc",
             str(reference_docx),
         ],
+        input=LINEBREAKS_LUA.encode("utf-8"),
         check=True,
     )
+
+    docx_path.write_bytes(_add_plain_table_borders(docx_path.read_bytes()))
     return docx_path
 
 

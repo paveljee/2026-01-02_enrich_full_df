@@ -1,0 +1,97 @@
+> I copy and paste into here
+> from chat if there is some bits
+> I would like to persist, for a while.
+> The text below may be AI-generated;
+> this file is just called `HUMANS.md`
+> because I maintain it vs. agents.
+> signed off: Pavel
+
+# correct me if i'm wrong but my understanding is this. detour http records table is truly a duckdb representation of replay log  -every replayed jsonl line goes into there, and the code enforces that the table is same length as replay log and same record uuids etc. then codex output rows is the actual workhorse - it stores the actual kind of workbook of what we need ; it's indexed by _accepted_ push , that is, by _attempt_ (in architecture.py definition - that is, same as validation request); so there are as many rows as there were ever validation request records produced simply put. now, codex innerdicts is simply a flat representation of it and it doesn't include failed validations. and then codex run outcome json table is just again a representation of codex output rows that contains basically all same info but represented as full serialization of run outcome response record for convenienet replay. and then there is completely secondary codex_fco and whatnot tables that i cannot even bother to enumerate (pls do this for me) that contain data solely for validation's internal needs like evidence retries etc. now, looking through the lens i impose here - look in actual code and say if my lens actually holds water. provide response by following my narrative exactly and providing your comment based on actual code, to each atomic bit of what i said (and i mean atomic - better take my text verbatim and break it down into smallest meaningful atoms, and constrcut a table where left col is my atom and right col is your actual verification against code base). and be sure in your code review to stress the TOTAL number of ALL tables in detour db, that is, we need a full audit of all any any tables in this db to check if they actually are meaningful/used appropriately
+
+> may be outdated after today's edit.
+> also, my prompt above has been edited
+> very lightly for standing alone.
+> signed off: Pavel
+
+**The detour DB defines 11 persistent user tables in a completed lifecycle.** This is a source-code inventory, not an inspection of a particular DB file. Schema creation is lazy: an empty rebuild has 2 tables, the first accepted `/push` brings the total to 10, and the first completed accepted output brings it to 11. There are also up to 2 views and one briefly created-and-dropped materialization table. The creation paths are in [Store](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:1212) and the [innerdict materializer](/home/moshi/2026-01-02_enrich_full_df/src/helpers/duckdb_utils.py:37).
+
+### Your narrative, checked atom by atom
+
+| Your words | What the code does |
+|---|---|
+| “detour http records table is truly a duckdb representation of replay log” | Yes. It holds each projected HTTP envelope, its log ordinal and UUID, and a raw-line SHA-256. |
+| “every replayed jsonl line goes into there” | Yes, for every **successfully** replayed line. Both live append and rebuild use the record-application path. [Store:1261](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:1261) |
+| “the code enforces that the table is same length as replay log” | Yes at startup: it checks ordinal coverage and row count against log lines, along with hash coverage. [Store:1115](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:1115) |
+| “and same record uuids etc.” | **Not fully at startup.** That verification reads `record_ordinal` and `raw_line_sha256`, not each projected UUID or JSON envelope. Live append does compare its newly reconstructed record. [Store:1126](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:1126), [Store:603](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:603) |
+| “codex output rows is the actual workhorse” / “stores the actual kind of workbook of what we need” | Broadly yes: it holds the accepted flat researcher-card values before completion and is updated with outcome links afterward. [Store:2511](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2511), [Store:2854](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2854) |
+| “it's indexed by _accepted_ push” | No. Its unique record link is **commit-request ID**, with a separate unique `(filename, fragment)` constraint; it stores no push-ID key. [Vars:335](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/backend/helpers/vars.py:335), [Store:2523](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2523) |
+| “by _attempt_ (in architecture.py definition - that is, same as validation request)” | The **object** identification is right: `AgentRuntimeAttempt` aliases `BackendValidationRequestRecord`. But that does not make the output table keyed by attempt/validation ID. [attempt.py:6](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/agent_runtime/helpers/data_models/attempt.py:6) |
+| “as many rows as there were ever validation request records produced” | No. A validation can be rejected. `_project_validation` inserts an output row only when it has an accepted output; the separate commit→validation index records validation IDs. [Store:1896](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:1896), [Store:1258](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:1258) |
+| “codex innerdicts is simply a flat representation of it” | Yes. It is grouped by namekey into the common two-column innerdict/JSONL shape; its JSONL records are flat card data. [Store:2540](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2540), [materializer:37](/home/moshi/2026-01-02_enrich_full_df/src/helpers/duckdb_utils.py:37) |
+| “it doesn't include failed validations” | Correct—and it also excludes **accepted validations not yet completed**. The `codex_output` view requires both validation and outcome IDs before materialization. [Store:2550](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2550) |
+| “codex run outcome json table is just again a representation of codex output rows” / “contains basically all same info” | No. `codex_run_outcome_records` holds the serialized outcome HTTP record **and its validation/pull/push/commit/provider graph**. It does not hold the flat researcher-card values. The two tables are complementary. [Store:2866](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2866), [codex_innerdict.py](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/codex_innerdict.py) |
+| “represented as full serialization of run outcome response record” | Substantially yes: it is the *query-ready graph snapshot*, not the lean replay-log serialization of that record. |
+| “for convenienet replay” | No. Replay **creates** this table from the logged outcome and reconstructed references. Historical **query readback** consumes it. [Store:2916](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2916) |
+| “completely secondary codex_fco and whatnot tables” | Secondary in **authority**, yes: their contents are projected from replay/CAS inputs. Several remain operationally necessary to the current validation and provenance checks. [Store:2170](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2170) |
+| “solely for validation's internal needs like evidence retries” | Too broad. Retry tables serve that purpose; the provenance tables also enforce cumulative call/citation consistency, while output, outcome, and innerdict tables serve completion and query. |
+
+### Every persistent detour table
+
+| Table | Writer → actual reader/use | Assessment |
+|---|---|---|
+| [detour_http_records](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/backend/helpers/vars.py:132) | Every applied log line → HTTP-record resolution, provider lookup, replay checks, startup coverage check. | Essential log projection; startup UUID/payload verification is narrower than your description. |
+| [commit_validation_request_record_index](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/backend/helpers/vars.py:141) | Every validation → validation idempotency and run-outcome link checks. | Meaningful two-ID index, **not** a stored Attempt object. |
+| [codex_fc](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2409) | CAS rollout function-call projection → repeat-value and linkage/integrity checks. | Used for persisted provenance consistency; not card data. |
+| [codex_fco](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2450) | CAS rollout function-output projection → repeat-value and linkage/integrity checks. | Same limited but real provenance role. |
+| [codex_calls](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2459) | Links call, function-call/output IDs and rollout filename → cumulative-prefix and linkage checks. | Operationally used. |
+| [codex_turn_ref](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2470) | Citation/reference projection → cumulative-prefix, duplicate-value and call-link checks. | Operationally used. |
+| [codex_retry_baselines](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2421) | Initial retry obligations → later retry-baseline reads. | Needed by current retry validation. Its `attempt_id` means **commit ID** here. |
+| [codex_evidence_attempts](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2434) | Parsed submission/assessment and applied flags → later applied-retry audit reads. | Needed by current retry validation; not one row for every validation failure. |
+| [codex_output_rows](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2523) | Accepted validation inserts flat values; completed outcome fills links/body → identity checks, materialization, historical outcome-ID lookup. | The accepted-card working table. Completed values duplicate the final innerdict, but the table still supplies the outcome link. |
+| [codex_run_outcome_records](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2535) | Matching completed accepted outcome inserts graph JSON → historical query reconstruction. | Purposeful secondary snapshot; **not** the flat-card table or an input to replay. |
+| [codex_innerdicts](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2562) | Completed-output view is materialized as grouped flat JSONL → Store query builds `CodexInnerDict` and outerdicts. | Required final card representation. |
+
+**Other relations:** `codex_output` is a used view that filters completed rows for `codex_innerdicts`. `codex_turn_ref_normalized` is a match-version-2 view that is created but has **no production reader I could find**; it is the one relation whose current utility I cannot justify. [Store:2487](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2487) The shared materializer briefly creates and drops `codex_innerdicts_frame`, so it is **not a twelfth persistent table**. The sample proxy’s `pricing_daily` and `requests` belong to a separate SQLite DB, not this DuckDB.
+
+# on retry, what are opportunities for client? enumerate the complete list of what extent and in what specific ways in which client can modify the submission vs the baseline.
+
+There are **two kinds of retry**. After a schema or rollout rejection *before* an evidence baseline exists, the client still submits `Submission`. Once an evidence-rejected submission establishes the baseline, every later push in that original-pull chain must submit a **complete `StandardizedSubmission`**, not a patch ([post_commit_validation.py](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/backend/helpers/data_models/post_commit_validation.py:1777)).
+
+For that post-baseline retry, the comparison is against the **current obligations**: the original baseline plus earlier *applied* audits, not necessarily the original push unchanged.
+
+| Part of the new submission | What the client may change |
+| --- | --- |
+| Nine evidence-bearing fields | All must remain present. Each must now include a type-valid `standardized_value`. |
+| `standardized_value` | May be supplied or changed independently on **any** field—even one whose evidence and raw `value` are frozen. The retry-obligation check does not compare standardized values; Pydantic and provider checks still apply. |
+| Optional comments | May be added, edited, or removed. They are not in the evidence obligations. |
+| Raw `value` of a fully accepted field | **Cannot change.** A field becomes accepted when it has at least one exact item and every other item is exact or withdrawn. Its entire evidence list is then frozen too. |
+| Raw `value` of a not-yet-accepted field | May change, subject to its schema. It **must** change if this retry withdraws a previously unmatched item in that field. |
+| Previously exact evidence item | Its excerpt and URL must remain identical at that index. |
+| Previously near-match item | Cannot be withdrawn or given a different URL. Its excerpt may change only while retaining the same normalized word tokens and assessing as near or exact—principally corrections to case, accents, punctuation, or spacing. Once exact in an applied retry, it becomes immutable. |
+| Previously unmatched item | May be replaced with a different excerpt and/or URL, retained, or replaced by the explicit attested withdrawal object. A withdrawal is not a way to delete the slot. |
+| Previously withdrawn item | Must remain a withdrawal; it cannot be restored as an excerpt. |
+| Evidence-list length | A not-yet-accepted field may gain new excerpt items at the end, but cannot lose prior positions. A new item cannot *start* as a withdrawal. An accepted field cannot gain items. |
+
+These are **index-based** rules; there is no separate evidence-item ID. Reordering is permissible only insofar as every resulting position still satisfies its rule. The model also requires nonblank, unique excerpt/URL pairs and at least one evidence entry per field ([pydantic_to_paste.py](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/backend/helpers/data_models/pydantic_to_paste.py:378), [post_commit_validation.py](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/backend/helpers/data_models/post_commit_validation.py:1225)).
+
+The key checks are:
+
+```python
+applied = not violations
+accepted = assessment.accepted and applied
+```
+
+So a retry can make an allowed change without yet passing evidence validation; if it has **no contract violations**, that change becomes part of the obligations for the *next* retry. Final acceptance requires no contract violations **and**, in every evidence-bearing field, at least one exact match with all remaining items exact or withdrawn ([vars.py](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/backend/helpers/vars.py:193)).
+
+# cloud init is making my head ache very strongly. why is it like that and taking loads of time? can we somehow wait idk before cloud init finishes for good, full stop, and then provision? but actually i thought limactl is doing all provisioning. how's that work and what can we do, surgically?
+
+> some edits in my prompt above for style
+> signed off: Pavel
+
+Lima **is** doing the provisioning, but it hands the YAML’s `mode: system` script to **cloud-init**. In this run, that script began before Lima finished the reverse-SSHFS mount. It failed when `architecture.py` was not yet visible; Lima still printed READY because its boot scripts had *finished*, not succeeded.
+
+The surgical fix is already in the worktree: [provision.sh](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/agent_runtime/provision.sh:362) waits for the mount before reading shipped files, and [deploy.sh](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/agent_runtime/deploy.sh:387) checks cloud-init’s result before claiming success. The supplied log shows Lima mounts before checking its final boot-script requirement, so that wait should not deadlock.
+
+Letting cloud-init finish **before** AIVM provisioning is possible, but would mean taking the provisioning script out of Lima’s `provision:` block and running it from `deploy.sh` after `limactl start`. That is a larger orchestration change and would not shorten the total install. In this failed run, AIVM provisioning lasted about **56 seconds**, much of it installing `acl`; the two roughly two-minute SSH/SSHFS readiness waits were separate Lima stages. The mount-wait fix addresses the failure, not those delays. It still needs a Mac redeploy to verify.
+
+I am a nonhuman model, cannot personally bear accountability, and my words alone are not evidence.

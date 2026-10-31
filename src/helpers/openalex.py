@@ -264,6 +264,7 @@ def openalex_work_title_rows_from_log(
                 record,
                 line_number=line_number,
             )
+            assert record.response_body is not None  # type safety - HttpRequestLogRecord v1
             titles = parse_openalex_work_titles_response(
                 record.response_body,
                 requested_paperids=paperids,
@@ -443,6 +444,8 @@ def _result_from_record(
     record: HttpRequestLogRecord,
     reused: bool,
 ) -> OpenAlexAuthorCheckResult:
+    assert record.response_body is not None  # type safety - HttpRequestLogRecord v1
+    assert record.duration_usec is not None  # type safety - HttpRequestLogRecord v1
     top_author_id = parse_openalex_top_author_id(record.response_body)
     return OpenAlexAuthorCheckResult(
         source_key=source_key,
@@ -500,6 +503,7 @@ def check_openalex_author(
     response = resolved_request_get(url, timeout=OPENALEX_AUTHOR_SEARCH_TIMEOUT_SECONDS)
     duration_usec = (time.monotonic_ns() - start_ns) // 1_000
     received_at_unix_usec = time.time_ns() // 1_000
+    response_body = response.text
     record = http_request_log_record(
         schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
         method="GET",
@@ -508,13 +512,13 @@ def check_openalex_author(
         path=OPENALEX_AUTHOR_SEARCH_PATH,
         redacted_query=redacted_query,
         response_code=response.status_code,
-        response_body=response.text,
+        response_body=response_body,
         received_at_unix_usec=received_at_unix_usec,
         duration_usec=duration_usec,
     )
     if response.status_code != HTTPStatus.OK:
         raise _OpenAlexNonOKResponse(record)
-    top_author_id = parse_openalex_top_author_id(record.response_body)
+    top_author_id = parse_openalex_top_author_id(response_body)
     matched = top_author_id == selected_author_id
     append_http_request_log_record(log_path=resolved_log_path, record=record)
     return OpenAlexAuthorCheckResult(
@@ -552,6 +556,7 @@ def fetch_openalex_work_titles_batch(
     response = resolved_request_get(url, timeout=OPENALEX_AUTHOR_SEARCH_TIMEOUT_SECONDS)
     duration_usec = (time.monotonic_ns() - start_ns) // 1_000
     received_at_unix_usec = time.time_ns() // 1_000
+    response_body = response.text
     record = http_request_log_record(
         schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
         method="GET",
@@ -560,14 +565,14 @@ def fetch_openalex_work_titles_batch(
         path=OPENALEX_WORKS_PATH,
         redacted_query=redacted_query,
         response_code=response.status_code,
-        response_body=response.text,
+        response_body=response_body,
         received_at_unix_usec=received_at_unix_usec,
         duration_usec=duration_usec,
     )
     if response.status_code != HTTPStatus.OK:
         raise _OpenAlexNonOKResponse(record)
     titles_by_paperid = parse_openalex_work_titles_response(
-        record.response_body,
+        response_body,
         requested_paperids=cleaned_paperids,
     )
     append_http_request_log_record(log_path=resolved_log_path, record=record)
