@@ -21,7 +21,7 @@
     "codex_match": 2
   },
   "pandoc_reference_docx": "resources/pandoc-custom-reference.docx",
-  "rollout_cas_dir": "/Volumes/home/aicode/2026-01-02_enrich_full_df/tmp/test_merged_replay_log/merged-rollout-cas",
+  "rollout_cas_dir": "/Volumes/home/aicode/2026-01-02_enrich_full_df/tmp/test_merged_mqvjqjkk_onwards/merged-mqvjqjkk-onwards-cas",
   "timezone": "America/Toronto",
   "sample_seed": 42,
   "sample_draw_sizes": [
@@ -38,8 +38,8 @@
   "total_draws": 310,
   "files_config": {
     "detour_ai_augment_backend_api_replay_log": {
-      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/tmp/test_merged_replay_log/merged-backend-replay.jsonl",
-      "sha256": "d476b03efee6b81004b8a315c9d4f6a4f261c09d3767b8daad15f0cb2df5a428",
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/tmp/test_merged_mqvjqjkk_onwards/merged-mqvjqjkk-onwards-backend-replay.jsonl",
+      "sha256": "5a03bae5397153aada95453ce3dd8498f5937ed639dfc747834a028bedb4f287",
       "desc": "Detour AI Augment Backend API replay log"
     },
     "map_subset_0_to_batch": {

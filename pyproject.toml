@@ -1408,3 +1408,48 @@ cwd = "."
 # =================================================
 # End discontinued experimental humandiff renders
 # =================================================
+
+# # ===============================================
+# # Sample script to copy CAS out of a merged log.
+# # May be helpful, for example, if dashboard runs
+# # were run into a merged log and one would like
+# # to isolate them. For the replay log itself, this
+# # is as easy as identifying the first corresponding
+# # `/init` record and the last corresponding
+# # `/completed` one and then doing something like:
+# # ```
+# # sed -n '175,289p' \
+# #   ./tmp/test_merged_mqvjqjkk_onwards/merged-mqvjqjkk-onwards-backend-replay.jsonl \
+# #   > ./tmp/dashboard_runs_20261031T0214Z/replay.jsonl
+# # ```
+# # But then CAS records need to be isolated also.
+# # This is what the script below does.
+# # ===============================================
+# pixi run python - <<'PY'
+# from pathlib import Path
+# import re
+# import shutil
+# base = Path("/Volumes/home/aicode/2026-01-02_enrich_full_df/tmp")
+# src = base / "test_merged_mqvjqjkk_onwards/merged-mqvjqjkk-onwards-cas"
+# run = base / "dashboard_runs_20261031T0214Z"
+# dst = run / "cas"
+# text = (run / "replay.jsonl").read_text()
+# hashes = sorted(set(re.findall(r'\\"codex_rollout_record\\":\{\\"sha256\\":\\"([a-fA-F0-9]{64})\\"', text)))
+# for i, h in enumerate(hashes, 1):
+#     rel = Path(h[:2]) / h[2:4] / h
+#     source = src / rel
+#     target = dst / rel
+#     if not source.is_file():
+#         status = "MISSING"
+#     else:
+#         try:
+#             target.parent.mkdir(parents=True, exist_ok=True)
+#             with source.open("rb") as inp, target.open("xb") as out:
+#                 shutil.copyfileobj(inp, out)
+#             status = "COPIED"
+#         except FileExistsError:
+#             status = "EXISTS"
+#         except OSError as e:
+#             status = f"ERROR: {e}"
+#     print(f"{i:04d} {status}: {rel}", flush=True)
+# PY

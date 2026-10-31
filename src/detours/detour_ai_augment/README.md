@@ -320,6 +320,34 @@ In contrast, the defensive measures in place tentatively establish session rollo
 ## Note on self-hosting LLM Inference API
 This specific set-up has been tested, to a degree, for the feasibility of reproducing it with a self-hosted LLM Inference API instead of OpenAI.
 
+> [!NOTE]
+> On 2026-10-31 UTC,
+> an attempt was made
+> to use the production
+> AI Agent Runtime to
+> re-log in using an OpenAI API key
+> and change the Codex model to 
+> `gpt-oss-120b`, but it was not
+> supported nor shown among the
+> supported `/v1/models`.
+> It was therefore impossible to
+> attempt runs using an open-weight
+> model while also using the native
+> OpenAI's Codex `web.run` namespace
+> that is required by this detour's
+> Codex rollout parser.
+> Third-party providers who would
+> serve an open-weight model while
+> also providing a fully compatible
+> `web.run` endpoint were also not
+> found online.
+> Serving the endpoint on our own
+> and/or rewriting the rollout
+> parsing logic would be a 
+> considerable additional 
+> undertaking that, at the time,
+> would be out of scope.
+
 **Takeaway: The KTP HCR AI Augmentation detour architecture ([Figure 1](#architecture)) can be successfully deployed and run as documented using a self-hosted LLM Inference API instead of OpenAI.**
 Caveat: Provisioning a separate web search / web page retrieval service (e.g., Serper or Jina, respectively) would be necessary, and some of the intended Codex tooling would not work (or would not work as expected).
 This caveat was an important reason behind the decision to go with OpenAI on this project despite the vendor lock and token-for-token irreproducibility in the long run as older models get deprecated by the provider – coupled with the expected overall better performance of a frontier LLM such as GPT-5.6-Sol over a smaller self-hosted model, and considering the generous Codex usage allowance coming with ChatGPT Plus pricing (e.g., CA$28.24/month inclusive of applicable taxes as of August 2026).
