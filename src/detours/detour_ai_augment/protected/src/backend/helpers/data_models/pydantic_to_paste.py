@@ -1,0 +1,830 @@
+#!/usr/bin/env python3
+
+# --- pyproject.toml ---
+# [project]
+# requires-python = ">=3.14.2,<3.15"
+# dependencies = [
+#     "pydantic==2.13.4",
+#     "pydantic-extra-types==2.11.1",
+#     "pycountry==24.6.1",
+#     "requests==2.32.5",
+# ]
+
+import os
+from calendar import monthrange
+from datetime import date
+from enum import StrEnum
+from http import HTTPStatus
+from typing import (
+    Annotated,
+    Literal,
+    Self,
+    TypeAlias,
+    TypeVar,
+    cast,
+    get_args,
+)
+from urllib.parse import urlsplit
+
+import requests
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    RootModel,
+    StrictStr,
+    StringConstraints,
+    model_validator,
+)
+from pydantic_extra_types.country import CountryAlpha3
+from pydantic_extra_types.language_code import ISO639_3
+
+# OpenAPI hint: patch this
+from ..locale import Locale
+
+# OpenAPI hint: see submission example
+from ..vars import (
+    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
+    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
+    KTP_AI_AUGMENT_COMMENTS_COL,
+    KTP_AI_AUGMENT_EDUCATION_COL,
+    KTP_AI_AUGMENT_GENDER_COL,
+    KTP_AI_AUGMENT_LINKS_COL,
+    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
+    KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
+    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
+    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
+)
+
+# OpenAPI hint: patch this
+from .submission_mixin import SubmissionMixin
+
+MIN_VALUE_CHARACTERS = 1
+MIN_TARGET_WEB_SEARCH_QUERY_LANGUAGES = 1
+MIN_EDUCATION_RECORDS = 1
+MIN_ACADEMIC_POSITIONS = 1
+MIN_SOCIAL_CAPITAL_ITEMS = 1
+MIN_RESEARCHER_LINKS = 1
+MIN_EXCERPT_CHARACTERS = 1
+MIN_URL_CHARACTERS = 1
+MIN_EXCERPTS_PER_FIELD = 1
+
+MAX_PUSH_BODY_BYTES = 2 * 1024 * 1024
+MAX_VALUE_CHARACTERS = MAX_PUSH_BODY_BYTES
+MAX_EXCERPT_CHARACTERS = MAX_PUSH_BODY_BYTES
+MAX_URL_CHARACTERS = MAX_PUSH_BODY_BYTES
+MAX_EXCERPTS_PER_FIELD = MAX_PUSH_BODY_BYTES
+
+EARLIEST_YEAR = 1900
+LATEST_BIRTH_YEAR = 2010  # 2026 minus 16
+HCR_CUTOFF_YEAR = 2024    # latest HCR award available
+HUMAN_LIFESPAN = (1, 200)
+# Even when HUMAN_LIFESPAN is used to compute
+# age based on the date of first publication,
+# a minimum of 1 year is reasonable to assume.
+
+DEFAULT_TARGET_WEB_SEARCH_QUERY_LANGUAGE = "eng"
+
+OPENALEX_SCHEME = "https"
+OPENALEX_HOST = "api.openalex.org"
+OPENALEX_INSTITUTIONS_PATH = "/institutions"
+EXPORT_OPENALEX_API_KEY = "OPENALEX_API_KEY"
+OPENALEX_PARAMS: dict[str, str | None] = {"api_key": None}  # updated later
+OPENALEX_INSTITUTION_NAME_FIELD = "display_name"
+OPENALEX_ROR_FIELD = "ror"
+
+ROR_SCHEME = "https"
+ROR_HOST = "api.ror.org"
+ROR_ORGANIZATIONS_PATH = "/v2/organizations"
+ROR_NAMES_KEY = "names"
+ROR_NAME_VALUE_KEY = "value"
+ROR_NAME_TYPES_KEY = "types"
+ROR_DISPLAY_NAME_TYPE = "ror_display"
+
+INSTITUTION_REQUEST_TIMEOUT_SECONDS = 30.0
+
+T = TypeVar("T")
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+SubmissionText: TypeAlias = Annotated[
+    StrictStr,
+    StringConstraints(
+        min_length=MIN_VALUE_CHARACTERS,
+        max_length=MAX_PUSH_BODY_BYTES,
+    ),
+    AfterValidator(
+        lambda value: value
+        if value.strip()
+        else (_ for _ in ()).throw(ValueError(Locale.VALUE_NONBLANK))
+    ),
+]
+
+NotReported: TypeAlias = Literal["NR"]
+NotAvailableOrApplicable: TypeAlias = Literal["NA"]
+SubmissionValueRequired: TypeAlias = T | NotReported
+SubmissionValueOptional: TypeAlias = SubmissionValueRequired[T] | NotAvailableOrApplicable
+
+
+# KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL
+class ResearcherAuthorStandardized(StrictModel):
+    first_name: SubmissionValueOptional[SubmissionText]
+    last_name: SubmissionValueOptional[SubmissionText]
+    orcid: SubmissionValueOptional[HttpUrl]
+    openalex_id: SubmissionValueOptional[HttpUrl]
+
+
+# KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL
+Location: TypeAlias = CountryAlpha3
+class _PlaceOfResidence(StrictModel):
+    place: SubmissionValueRequired[SubmissionText]
+    location: SubmissionValueRequired[Location]
+class PlaceOfResidenceFromPrivateResidence(_PlaceOfResidence):
+    type: Literal["private_residence"]
+class PlaceOfResidenceFromProfessionalAffiliation(_PlaceOfResidence):
+    type: Literal["professional_affiliation"]
+
+PlaceOfResidenceStandardized: TypeAlias = Annotated[
+    PlaceOfResidenceFromPrivateResidence
+    | PlaceOfResidenceFromProfessionalAffiliation,
+    Field(discriminator="type"),
+]
+
+# KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
+Language: TypeAlias = ISO639_3
+
+
+class CLDRLanguageOfficialStatus(StrEnum):
+    """https://www.unicode.org/cldr/charts/48/supplemental/territory_language_information.html"""
+
+    OFFICIAL = "official"
+    OFFICIAL_REGIONAL = "official_regional"
+    DE_FACTO_OFFICIAL = "de_facto_official"
+
+
+class LanguageOfLocation(StrictModel):
+    language: Language
+    official_status: CLDRLanguageOfficialStatus
+    location: Location
+
+
+LanguagePersonUsesOrUsed: TypeAlias = Language
+LanguagePublicationIsIn: TypeAlias = Language
+LanguageOfPlaceOfResidence: TypeAlias = LanguageOfLocation
+LanguageOfAcademicInstitution: TypeAlias = LanguageOfLocation
+
+TargetWebSearchQueryLanguage: TypeAlias = (
+    LanguagePersonUsesOrUsed
+    | LanguagePublicationIsIn
+    | LanguageOfPlaceOfResidence
+    | LanguageOfAcademicInstitution
+    | Language  # any other relevant
+)
+
+
+class RaceEthnicityLanguageCultureStandardized(StrictModel):
+    race: NotAvailableOrApplicable  # banned
+    ethnicity: NotAvailableOrApplicable  # banned
+    language: SubmissionValueRequired[
+        list[TargetWebSearchQueryLanguage],
+    ] = Field(
+        min_length=MIN_TARGET_WEB_SEARCH_QUERY_LANGUAGES,
+        default_factory=lambda: cast(
+            list[TargetWebSearchQueryLanguage],
+            [Language(DEFAULT_TARGET_WEB_SEARCH_QUERY_LANGUAGE)],
+        ),
+    )
+    culture: NotAvailableOrApplicable  # banned
+
+
+# KTP_AI_AUGMENT_GENDER_COL
+GenderStandardized: TypeAlias = SubmissionValueRequired[
+    Literal["Man", "Woman", "Other"]
+]
+
+
+# KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL
+Year: TypeAlias = Annotated[
+    int, Field(strict=True, ge=EARLIEST_YEAR)
+]
+Month: TypeAlias = Annotated[
+    int, Field(strict=True, ge=1, le=12)
+]
+Day: TypeAlias = Annotated[
+    int, Field(strict=True, ge=1, le=31)
+]
+
+AgePoint: TypeAlias = Annotated[
+    int,
+    Field(
+        strict=True,  # prevents from coercing other types into int
+        ge=HUMAN_LIFESPAN[0],
+        le=HUMAN_LIFESPAN[1],
+    ),
+]
+
+class AgeSensitivityInterval(StrictModel):
+    """Use it when reported evidence only
+    allows to compute age as an interval."""
+
+    lower: AgePoint
+    upper: AgePoint
+
+    @model_validator(mode="after")
+    def _(self) -> Self:
+        if self.lower >= self.upper:
+            raise ValueError("Expected lower < upper")
+        return self
+
+class _AgeNumeral(StrictModel):
+    year: Year
+    month: SubmissionValueRequired[Month]
+    day: SubmissionValueRequired[Day]
+
+    @model_validator(mode="after")
+    def _(self) -> Self:
+        if isinstance(self.day, int):
+            if not isinstance(self.month, int):
+                raise ValueError("Day requires reported month")
+            if self.day > monthrange(
+                self.year, self.month
+            )[1]:
+                raise ValueError("Invalid calendar day")
+
+        return self
+
+    def bounds(self) -> tuple[date, date]:
+        if not isinstance(self.month, int):
+            return (
+                date(self.year, 1, 1),
+                date(self.year, 12, 31),
+            )
+
+        if not isinstance(self.day, int):
+            return (
+                date(self.year, self.month, 1),
+                date(
+                    self.year,
+                    self.month,
+                    monthrange(self.year, self.month)[1],
+                ),
+            )
+
+        exact = date(self.year, self.month, self.day)
+        return exact, exact
+
+    def as_date(self) -> date:
+        lower, upper = self.bounds()
+        if lower != upper:
+            raise ValueError("Date is incomplete")
+        return lower
+
+    def _age_value(
+        self,
+        endpoint: date | _AgeNumeral,
+    ) -> AgePoint | AgeSensitivityInterval:
+        start, end = self.bounds()
+
+        if isinstance(endpoint, date):
+            endpoint_lower = endpoint_upper = endpoint
+        else:
+            endpoint_lower, endpoint_upper = endpoint.bounds()
+
+        if start > endpoint_upper:
+            if isinstance(endpoint, date):
+                raise ValueError("Event occurs after as_of")
+            raise ValueError("Event occurs after death")
+
+        def elapsed(start: date, end: date) -> int:
+            return end.year - start.year - (
+                (end.month, end.day)
+                < (start.month, start.day)
+            )
+
+        earliest_endpoint = max(start, endpoint_lower)
+        latest_start = min(end, earliest_endpoint)
+
+        lower = elapsed(latest_start, earliest_endpoint)
+        upper = elapsed(start, endpoint_upper)
+
+        if lower == upper:
+            return lower
+
+        return AgeSensitivityInterval(lower=lower, upper=upper)
+
+
+_AgeBasis: TypeAlias = Literal["birth", "first_publication"]
+
+class _AgeComputation[Basis: _AgeBasis, AsOfT](StrictModel):
+    as_of: AsOfT
+    basis: Basis
+
+
+class CurrentBiologicalAge(
+    RootModel[AgePoint | AgeSensitivityInterval]
+):
+    pass
+
+
+class BiologicalAgeAtDeath(RootModel[AgePoint | AgeSensitivityInterval]):
+    pass
+
+
+class CurrentAgeFromFirstPublication(
+    RootModel[AgePoint | AgeSensitivityInterval]
+):
+    pass
+
+class PublicationSpanAtDeath(RootModel[AgePoint | AgeSensitivityInterval]):
+    pass
+
+class DateOfDeath(_AgeNumeral):
+    pass
+
+class DateOfBirth(_AgeNumeral):
+    year: Annotated[Year, Field(le=LATEST_BIRTH_YEAR)]
+
+    def infer_age(
+        self,
+        endpoint: date | DateOfDeath,
+    ) -> CurrentBiologicalAge | BiologicalAgeAtDeath:
+        value = self._age_value(endpoint)
+        if isinstance(endpoint, date):
+            return CurrentBiologicalAge(root=value)
+        return BiologicalAgeAtDeath(root=value)
+
+
+class DateOfFirstPublication(_AgeNumeral):
+    year: Annotated[Year, Field(le=HCR_CUTOFF_YEAR)]
+
+    def infer_age(
+        self,
+        endpoint: date | DateOfDeath,
+    ) -> CurrentAgeFromFirstPublication | PublicationSpanAtDeath:
+        value = self._age_value(endpoint)
+        if isinstance(endpoint, date):
+            return CurrentAgeFromFirstPublication(root=value)
+        return PublicationSpanAtDeath(root=value)
+
+
+class ReportedNumeral[InferredT](StrictModel):
+    inferred: InferredT
+    provenance: Literal["reported"] = "reported"
+    reported: SubmissionText = Field(
+        ...,
+        description=(
+            "Exactly as reported in the web-tool result "
+            "copied verbatim from the web search excerpt."
+        ),
+    )
+
+
+class ComputedNumeral[InferredT, ComputationT](StrictModel):
+    inferred: InferredT
+    provenance: Literal["computed"] = "computed"
+    computed: ComputationT
+
+
+class BirthComputation(_AgeComputation[Literal["birth"], date]):
+    as_of: date = Field(..., description="Date this submission is made.")
+    birth: ReportedNumeral[DateOfBirth]
+
+
+class BirthToDeathComputation(
+    _AgeComputation[Literal["birth"], ReportedNumeral[DateOfDeath]]
+):
+    as_of: ReportedNumeral[DateOfDeath]
+    birth: ReportedNumeral[DateOfBirth]
+
+
+class FirstPublicationComputation(
+    _AgeComputation[Literal["first_publication"], date]
+):
+    as_of: date = Field(..., description="Date this submission is made.")
+    first_publication: ReportedNumeral[DateOfFirstPublication]
+
+
+class FirstPublicationToDeathComputation(
+    _AgeComputation[
+        Literal["first_publication"], ReportedNumeral[DateOfDeath]
+    ]
+):
+    as_of: ReportedNumeral[DateOfDeath]
+    first_publication: ReportedNumeral[DateOfFirstPublication]
+
+
+class AgeFromBirth(StrictModel):
+    age: ComputedNumeral[
+        CurrentBiologicalAge, BirthComputation
+    ]
+
+    @model_validator(mode="after")
+    def _(self) -> Self:
+        computation = self.age.computed
+        expected = computation.birth.inferred.infer_age(
+            computation.as_of,
+        )
+        if self.age.inferred != expected:
+            raise ValueError(
+                Locale.AGE_EXPECTED_TEMPLATE.format(
+                    expected_age=expected,
+                    actual_age=self.age.inferred,
+                )
+            )
+        return self
+
+
+class AgeAtDeathFromBirth(StrictModel):
+    age: ComputedNumeral[BiologicalAgeAtDeath, BirthToDeathComputation]
+
+    @model_validator(mode="after")
+    def _(self) -> Self:
+        computation = self.age.computed
+        expected = computation.birth.inferred.infer_age(
+            computation.as_of.inferred,
+        )
+        if self.age.inferred != expected:
+            raise ValueError(
+                Locale.AGE_EXPECTED_TEMPLATE.format(
+                    expected_age=expected, actual_age=self.age.inferred,
+                )
+            )
+        return self
+
+
+class AgeFromFirstPublication(StrictModel):
+    age: ComputedNumeral[
+        CurrentAgeFromFirstPublication,
+        FirstPublicationComputation,
+    ]
+
+    @model_validator(mode="after")
+    def _(self) -> Self:
+        computation = self.age.computed
+        expected = computation.first_publication.inferred.infer_age(
+            computation.as_of,
+        )
+        if self.age.inferred != expected:
+            raise ValueError(
+                Locale.AGE_EXPECTED_TEMPLATE.format(
+                    expected_age=expected,
+                    actual_age=self.age.inferred,
+                )
+            )
+        return self
+
+
+class AgeAtDeathFromFirstPublication(StrictModel):
+    age: ComputedNumeral[
+        PublicationSpanAtDeath, FirstPublicationToDeathComputation
+    ]
+
+    @model_validator(mode="after")
+    def _(self) -> Self:
+        computation = self.age.computed
+        expected = computation.first_publication.inferred.infer_age(
+            computation.as_of.inferred,
+        )
+        if self.age.inferred != expected:
+            raise ValueError(
+                Locale.AGE_EXPECTED_TEMPLATE.format(
+                    expected_age=expected, actual_age=self.age.inferred,
+                )
+            )
+        return self
+
+Age: TypeAlias = (
+    AgeFromBirth
+    | AgeAtDeathFromBirth
+    | AgeFromFirstPublication
+    | AgeAtDeathFromFirstPublication
+)
+AgeStandardized: TypeAlias = SubmissionValueRequired[Age]
+
+
+# KTP_AI_AUGMENT_EDUCATION_COL
+class AcademicInstitution(StrictModel):
+    organization_name: SubmissionValueRequired[SubmissionText]
+    openalex_id: SubmissionValueOptional[HttpUrl]
+    ror: SubmissionValueOptional[HttpUrl]
+
+    @model_validator(mode="after")
+    def _(self) -> Self:
+        nr_or_na = frozenset(
+            get_args(NotReported) + get_args(NotAvailableOrApplicable)
+        )
+
+        # OpenAlex
+        if self.openalex_id not in nr_or_na:
+            OPENALEX_PARAMS.update(
+                api_key=os.getenv(EXPORT_OPENALEX_API_KEY),
+            )
+            if None in OPENALEX_PARAMS.values():
+                raise ValueError(Locale.OPENALEX_API_KEY_MISSING)
+            openalex_id = (
+                urlsplit(str(self.openalex_id)).path.rstrip("/").rsplit("/", 1)[-1]
+            )
+            r = requests.get(
+                (
+                    f"{OPENALEX_SCHEME}://{OPENALEX_HOST}"
+                    f"{OPENALEX_INSTITUTIONS_PATH}/{openalex_id}"
+                ),
+                params=OPENALEX_PARAMS,
+                timeout=INSTITUTION_REQUEST_TIMEOUT_SECONDS,
+            )
+            if r.status_code == HTTPStatus.NOT_FOUND:
+                raise ValueError(
+                    Locale.OPENALEX_INSTITUTION_UNKNOWN_TEMPLATE.format(
+                        openalex_id=self.openalex_id
+                    )
+                )
+            r.raise_for_status()
+            oa = r.json()
+            if (
+                self.organization_name not in nr_or_na
+                and oa[OPENALEX_INSTITUTION_NAME_FIELD] != self.organization_name
+            ):
+                raise ValueError(
+                    Locale.OPENALEX_INSTITUTION_NAME_MISMATCH_TEMPLATE.format(
+                        actual=oa[OPENALEX_INSTITUTION_NAME_FIELD],
+                        submitted=self.organization_name,
+                    )
+                )
+
+            if (
+                self.ror not in nr_or_na
+                and oa.get(OPENALEX_ROR_FIELD) != str(self.ror)
+            ):
+                raise ValueError(
+                    Locale.OPENALEX_INSTITUTION_ROR_MISMATCH_TEMPLATE.format(
+                        actual=oa.get(OPENALEX_ROR_FIELD),
+                        submitted=self.ror,
+                    )
+                )
+
+        # ROR
+        if self.ror not in nr_or_na:
+            ror_id = urlsplit(str(self.ror)).path.rstrip("/").rsplit("/", 1)[-1]
+            r = requests.get(
+                (
+                    f"{ROR_SCHEME}://{ROR_HOST}"
+                    f"{ROR_ORGANIZATIONS_PATH}/{ror_id}"
+                ),
+                timeout=INSTITUTION_REQUEST_TIMEOUT_SECONDS,
+            )
+            if r.status_code == HTTPStatus.NOT_FOUND:
+                raise ValueError(
+                    Locale.ROR_INSTITUTION_UNKNOWN_TEMPLATE.format(ror=self.ror)
+                )
+            r.raise_for_status()
+            ror = r.json()
+            ror_name = next(
+                name[ROR_NAME_VALUE_KEY]
+                for name in ror[ROR_NAMES_KEY]
+                if ROR_DISPLAY_NAME_TYPE in name[ROR_NAME_TYPES_KEY]
+            )
+            if (
+                self.organization_name not in nr_or_na
+                and ror_name != self.organization_name
+            ):
+                raise ValueError(
+                    Locale.ROR_INSTITUTION_NAME_MISMATCH_TEMPLATE.format(
+                        actual=ror_name,
+                        submitted=self.organization_name,
+                    )
+                )
+
+        return self
+
+
+class ISCEDTertiaryLevel(StrEnum):
+    """https://unesdoc.unesco.org/ark:/48223/pf0000219109_eng"""
+
+    # LEVEL_0 = "0"  # Early childhood
+    # LEVEL_1 = "1"  # Primary
+    # LEVEL_2 = "2"  # Lower secondary
+    # LEVEL_3 = "3"  # Upper secondary
+    # LEVEL_4 = "4"  # Post-secondary non-tertiary
+    LEVEL_5 = "5"  # Short-cycle tertiary
+    LEVEL_6 = "6"  # Bachelor's or equivalent
+    LEVEL_7 = "7"  # Master's or equivalent, *including most professional doctorates* (like MD or JD)
+    LEVEL_8 = "8"  # Doctoral or equivalent *advanced research qualification* (PhD-tier including joint MD-PhD programs)
+
+
+class EducationRecord(StrictModel):
+    degree_conferred: SubmissionValueRequired[SubmissionText]
+    isced_level: SubmissionValueRequired[ISCEDTertiaryLevel]
+    place_conferred: SubmissionValueRequired[AcademicInstitution]
+    year_conferred: SubmissionValueRequired[Year]
+
+
+EducationStandardized: TypeAlias = SubmissionValueRequired[Annotated[
+    list[EducationRecord],
+    Field(min_length=MIN_EDUCATION_RECORDS),
+]]
+
+
+# KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL
+class FormerAcademicPosition(StrictModel):
+    academic_position: SubmissionValueRequired[SubmissionText]
+    academic_institution: SubmissionValueRequired[AcademicInstitution]
+    start: SubmissionValueRequired[Year]
+    end: SubmissionValueRequired[Year]
+
+
+class CurrentAcademicPosition(StrictModel):
+    academic_position: SubmissionValueRequired[SubmissionText]
+    academic_institution: SubmissionValueRequired[AcademicInstitution]
+    start: SubmissionValueRequired[Year]
+    end: NotAvailableOrApplicable
+
+
+AcademicPositionsStandardized: TypeAlias = SubmissionValueRequired[Annotated[
+    list[FormerAcademicPosition | CurrentAcademicPosition],
+    Field(min_length=MIN_ACADEMIC_POSITIONS),
+]]
+
+
+# KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL
+SocialCapitalStandardized: TypeAlias = SubmissionValueRequired[Annotated[
+    list[SubmissionText],
+    Field(min_length=MIN_SOCIAL_CAPITAL_ITEMS),
+]]
+
+
+# KTP_AI_AUGMENT_LINKS_COL
+class ResearcherLink(StrictModel):
+    url: SubmissionValueRequired[HttpUrl]
+    verified_with_orcid: SubmissionValueRequired[bool]
+
+
+ResearcherLinksStandardized: TypeAlias = SubmissionValueRequired[Annotated[
+    list[ResearcherLink],
+    Field(min_length=MIN_RESEARCHER_LINKS),
+]]
+
+# KTP_AI_AUGMENT_COMMENTS_COL
+# no standardized value
+
+
+class WebSearchExcerpt(StrictModel):
+    excerpt: StrictStr = Field(
+        description="Exact contiguous excerpt copied verbatim from the cited web-tool result.",
+        min_length=MIN_EXCERPT_CHARACTERS,
+        max_length=MAX_EXCERPT_CHARACTERS,
+        pattern=r"\S",
+    )
+    url: StrictStr = Field(
+        description="Exact URL associated with that web-tool result.",
+        min_length=MIN_URL_CHARACTERS,
+        max_length=MAX_URL_CHARACTERS,
+        pattern=r"\S",
+    )
+
+    @model_validator(mode="after")
+    def _(self) -> Self:
+        if not self.excerpt.strip() or not self.url.strip():
+            raise ValueError(Locale.EXCERPT_URL_NONBLANK)
+        return self
+
+
+class EvidenceWithdrawal(StrictModel):
+    action: Literal["withdraw_unverified_evidence"]
+    reason: Literal["not_present_in_web_results"]
+    attested: Literal[True]
+
+
+EvidenceSubmission: TypeAlias = WebSearchExcerpt | EvidenceWithdrawal
+
+
+StandardizedValue: TypeAlias = (
+    ResearcherAuthorStandardized
+    | PlaceOfResidenceStandardized
+    | RaceEthnicityLanguageCultureStandardized
+    | GenderStandardized
+    | AgeStandardized
+    | EducationStandardized
+    | AcademicPositionsStandardized
+    | SocialCapitalStandardized
+    | ResearcherLinksStandardized
+    | NotAvailableOrApplicable
+)
+
+
+class FieldSubmission(StrictModel):
+    value: SubmissionText
+    web_search_excerpts: list[EvidenceSubmission] = Field(
+        min_length=MIN_EXCERPTS_PER_FIELD,
+        max_length=MAX_EXCERPTS_PER_FIELD,
+    )
+
+    @model_validator(mode="after")
+    def _(self) -> Self:
+        evidence_pairs = [
+            (evidence.excerpt, evidence.url)
+            for evidence in self.web_search_excerpts
+            if isinstance(evidence, WebSearchExcerpt)
+        ]
+        if len(set(evidence_pairs)) != len(evidence_pairs):
+            raise ValueError(Locale.EXCERPT_PAIRS_UNIQUE)
+        return self
+
+
+class StandardizedFieldSubmission(FieldSubmission):
+    standardized_value: StandardizedValue
+
+
+class ResearcherAuthorSubmission(StandardizedFieldSubmission):
+    standardized_value: ResearcherAuthorStandardized
+
+
+class PlaceOfResidenceSubmission(StandardizedFieldSubmission):
+    standardized_value: PlaceOfResidenceStandardized
+
+
+class RaceEthnicityLanguageCultureSubmission(StandardizedFieldSubmission):
+    standardized_value: RaceEthnicityLanguageCultureStandardized
+
+
+class GenderSubmission(StandardizedFieldSubmission):
+    standardized_value: GenderStandardized
+
+
+class AgeFirstPublicationSubmission(StandardizedFieldSubmission):
+    standardized_value: AgeStandardized
+
+
+class EducationSubmission(StandardizedFieldSubmission):
+    standardized_value: EducationStandardized
+
+
+class AcademicPositionsSubmission(StandardizedFieldSubmission):
+    standardized_value: AcademicPositionsStandardized
+
+
+class SocialCapitalSubmission(StandardizedFieldSubmission):
+    standardized_value: SocialCapitalStandardized
+
+
+class ResearcherLinksSubmission(StandardizedFieldSubmission):
+    standardized_value: ResearcherLinksStandardized
+
+
+class CommentsSubmission(StrictModel):
+    value: SubmissionText
+
+
+class StandardizedSubmission(
+    StrictModel,
+    SubmissionMixin[StandardizedFieldSubmission, CommentsSubmission],
+    # OpenAPI hint: don't worry about it
+):
+    researcher_author: ResearcherAuthorSubmission = Field(
+        alias=KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
+        description="researcher/author from public academic sources.",
+    )
+    place_of_residence: PlaceOfResidenceSubmission = Field(
+        alias=KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
+        description="place of residence from public academic sources.",
+    )
+    race_ethnicity_language_culture: RaceEthnicityLanguageCultureSubmission = Field(
+        alias=KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
+        description="race/ethnicity/language/culture from public academic sources.",
+    )
+    gender: GenderSubmission = Field(
+        alias=KTP_AI_AUGMENT_GENDER_COL,
+        description="gender from public academic sources.",
+    )
+    age_first_publication: AgeFirstPublicationSubmission = Field(
+        alias=KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
+        description=(
+            "current age/date of birth from public academic sources, or "
+            "year of the first publication according to OpenAlex profile."
+        ),
+    )
+    education: EducationSubmission = Field(
+        alias=KTP_AI_AUGMENT_EDUCATION_COL,
+        description="education from public academic sources.",
+    )
+    academic_positions: AcademicPositionsSubmission = Field(
+        alias=KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
+        description="academic position(s) from public academic sources.",
+    )
+    social_capital: SocialCapitalSubmission = Field(
+        alias=KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
+        description="social capital from public academic sources.",
+    )
+    links: ResearcherLinksSubmission = Field(
+        alias=KTP_AI_AUGMENT_LINKS_COL,
+        description="links from public academic sources.",
+    )
+    comments: CommentsSubmission | None = Field(
+        default=None,
+        alias=KTP_AI_AUGMENT_COMMENTS_COL,
+        description="comments.",
+    )

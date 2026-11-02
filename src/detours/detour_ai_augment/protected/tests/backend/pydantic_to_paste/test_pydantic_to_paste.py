@@ -1,0 +1,419 @@
+from __future__ import annotations
+
+import importlib
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+import pytest
+import requests
+from dotenv import dotenv_values
+from pydantic import BaseModel, ValidationError
+
+from src.helpers.architecture import FrozenStrictModel
+
+pytest.importorskip("pydantic_extra_types")
+
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (  # noqa: E402
+    pydantic_to_paste as schema,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E402, E501
+    Submission,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (  # noqa: E402
+    NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+    NOT_REPORTED_VALUE,
+)
+
+TEST_OPENALEX_API_KEY = "test-openalex-api-key"
+TEST_EXCERPT = "Exact cited text."
+TEST_URL = "https://example.test/result"
+FIELD_VALUE_FIELD, FIELD_EVIDENCE_FIELD = schema.FieldSubmission.model_fields
+(FIELD_STANDARDIZED_VALUE_FIELD,) = (
+    schema.StandardizedFieldSubmission.model_fields.keys()
+    - schema.FieldSubmission.model_fields.keys()
+)
+EVIDENCE_EXCERPT_FIELD, EVIDENCE_URL_FIELD = schema.WebSearchExcerpt.model_fields
+(COMMENTS_VALUE_FIELD,) = schema.CommentsSubmission.model_fields
+TEST_EVIDENCE = [
+    {
+        EVIDENCE_EXCERPT_FIELD: TEST_EXCERPT,
+        EVIDENCE_URL_FIELD: TEST_URL,
+    }
+]
+STANFORD_OPENALEX_ID = "https://openalex.org/I97018004"
+STANFORD_OPENALEX_API_URL = "https://api.openalex.org/institutions/I97018004"
+STANFORD_ROR = "https://ror.org/00f54p054"
+STANFORD_ROR_API_URL = "https://api.ror.org/v2/organizations/00f54p054"
+STANFORD_NAME = "Stanford University"
+
+FIELD_MODEL_CASES = (
+    (
+        schema.ResearcherAuthorSubmission,
+        {
+            "first_name": "Fei-Fei",
+            "last_name": "Li",
+            "orcid": "https://orcid.org/0000-0002-7481-0810",
+            "openalex_id": "https://openalex.org/A5100450462",
+        },
+    ),
+    (
+        schema.PlaceOfResidenceSubmission,
+        {
+            "type": "professional_affiliation",
+            "place": "Stanford, California",
+            "location": "USA",
+        },
+    ),
+    (
+        schema.RaceEthnicityLanguageCultureSubmission,
+        {
+            "race": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+            "ethnicity": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+            "language": ["eng", "cmn"],
+            "culture": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+        },
+    ),
+    (schema.GenderSubmission, "Woman"),
+    (
+        schema.AgeFirstPublicationSubmission,
+        {
+            "age": {
+                "provenance": "computed",
+                "computed": {
+                    "basis": "birth",
+                    "birth": {
+                        "provenance": "reported",
+                        "reported": "1976",
+                        "inferred": {
+                            "year": 1976,
+                            "month": NOT_REPORTED_VALUE,
+                            "day": NOT_REPORTED_VALUE,
+                        },
+                    },
+                    "as_of": "2026-10-19",
+                },
+                "inferred": {"lower": 49, "upper": 50},
+            },
+        },
+    ),
+    (
+        schema.EducationSubmission,
+        [
+            {
+                "degree_conferred": "Ph.D.",
+                "isced_level": "8",
+                "place_conferred": {
+                    "organization_name": "Caltech",
+                    "openalex_id": NOT_REPORTED_VALUE,
+                    "ror": NOT_REPORTED_VALUE,
+                },
+                "year_conferred": 2005,
+            }
+        ],
+    ),
+    (
+        schema.AcademicPositionsSubmission,
+        [
+            {
+                "academic_position": "Professor",
+                "academic_institution": {
+                    "organization_name": "Stanford University",
+                    "openalex_id": NOT_REPORTED_VALUE,
+                    "ror": NOT_REPORTED_VALUE,
+                },
+                "start": NOT_REPORTED_VALUE,
+                "end": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+            }
+        ],
+    ),
+    (schema.SocialCapitalSubmission, ["National Academy member"]),
+    (
+        schema.ResearcherLinksSubmission,
+        [{"url": "https://example.test/profile", "verified_with_orcid": True}],
+    ),
+)
+
+FIELD_MODEL_UNAVAILABLE_CASES = (
+    (
+        schema.ResearcherAuthorSubmission,
+        {
+            "first_name": NOT_REPORTED_VALUE,
+            "last_name": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+            "orcid": NOT_REPORTED_VALUE,
+            "openalex_id": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+        },
+    ),
+    (
+        schema.RaceEthnicityLanguageCultureSubmission,
+        {
+            "race": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+            "ethnicity": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+            "language": NOT_REPORTED_VALUE,
+            "culture": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+        },
+    ),
+    (schema.GenderSubmission, NOT_REPORTED_VALUE),
+    (schema.AgeFirstPublicationSubmission, NOT_REPORTED_VALUE),
+    (schema.EducationSubmission, NOT_REPORTED_VALUE),
+    (schema.AcademicPositionsSubmission, NOT_REPORTED_VALUE),
+    (schema.SocialCapitalSubmission, NOT_REPORTED_VALUE),
+    (schema.ResearcherLinksSubmission, NOT_REPORTED_VALUE),
+)
+
+
+class FakeResponse(FrozenStrictModel):
+    status_code: int
+    payload: dict[str, Any]
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, Any]:  # type: ignore[override]
+        # requests.Response stub, not Pydantic's deprecated JSON-string API.
+        return self.payload
+
+
+@pytest.mark.parametrize(
+    ("model", "standardized_value"),
+    FIELD_MODEL_CASES,
+    ids=lambda value: value.__name__ if isinstance(value, type) else None,
+)
+def test_field_submission_models_round_trip(
+    model: type[BaseModel],
+    standardized_value: object,
+) -> None:
+    payload = {
+        FIELD_VALUE_FIELD: "Plain-text research value.",
+        FIELD_STANDARDIZED_VALUE_FIELD: standardized_value,
+        FIELD_EVIDENCE_FIELD: TEST_EVIDENCE,
+    }
+
+    parsed = model.model_validate_json(json.dumps(payload))
+
+    assert model.model_validate_json(parsed.model_dump_json()) == parsed
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected_type"),
+    (
+        ("private_residence", schema.PlaceOfResidenceFromPrivateResidence),
+        ("professional_affiliation", schema.PlaceOfResidenceFromProfessionalAffiliation),
+    ),
+)
+def test_place_of_residence_discriminator_selects_variant(
+    tag: str, expected_type: type[BaseModel],
+) -> None:
+    payload = {
+        FIELD_VALUE_FIELD: "Plain-text research value.",
+        FIELD_STANDARDIZED_VALUE_FIELD: {
+            "type": tag,
+            "place": "Oxford",
+            "location": "GBR",
+        },
+        FIELD_EVIDENCE_FIELD: TEST_EVIDENCE,
+    }
+
+    parsed = schema.PlaceOfResidenceSubmission.model_validate_json(json.dumps(payload))
+
+    assert type(parsed.standardized_value) is expected_type
+    assert schema.PlaceOfResidenceSubmission.model_validate_json(
+        parsed.model_dump_json()
+    ) == parsed
+
+
+@pytest.mark.parametrize(
+    "standardized_value",
+    (
+        {"place": "Oxford", "location": "GBR"},
+        {"type": "unknown", "place": "Oxford", "location": "GBR"},
+        {"place": NOT_REPORTED_VALUE, "location": NOT_REPORTED_VALUE},
+    ),
+    ids=("missing-type", "unknown-type", "untyped-not-reported"),
+)
+def test_place_of_residence_rejects_missing_or_unknown_type(
+    standardized_value: dict[str, str],
+) -> None:
+    with pytest.raises(ValidationError):
+        schema.PlaceOfResidenceSubmission.model_validate({
+            FIELD_VALUE_FIELD: "Plain-text research value.",
+            FIELD_STANDARDIZED_VALUE_FIELD: standardized_value,
+            FIELD_EVIDENCE_FIELD: TEST_EVIDENCE,
+        })
+
+
+@pytest.mark.parametrize(
+    ("model", "standardized_value"),
+    FIELD_MODEL_UNAVAILABLE_CASES,
+    ids=lambda value: value.__name__ if isinstance(value, type) else None,
+)
+def test_field_submission_models_support_allowed_placeholders(
+    model: type[BaseModel],
+    standardized_value: object,
+) -> None:
+    payload = {
+        FIELD_VALUE_FIELD: "Plain-text research value.",
+        FIELD_STANDARDIZED_VALUE_FIELD: standardized_value,
+        FIELD_EVIDENCE_FIELD: TEST_EVIDENCE,
+    }
+
+    parsed = model.model_validate_json(json.dumps(payload))
+
+    assert parsed.model_dump(mode="json")[FIELD_STANDARDIZED_VALUE_FIELD] == (
+        standardized_value
+    )
+
+
+@pytest.mark.parametrize(
+    ("model", "standardized_value"),
+    (
+        (schema.PlaceOfResidenceSubmission, {
+            "type": "private_residence",
+            "place": NOT_REPORTED_VALUE,
+            "location": NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+        }),
+        (schema.GenderSubmission, NOT_AVAILABLE_OR_APPLICABLE_VALUE),
+        (schema.AgeFirstPublicationSubmission, NOT_AVAILABLE_OR_APPLICABLE_VALUE),
+        (schema.EducationSubmission, NOT_AVAILABLE_OR_APPLICABLE_VALUE),
+        (schema.AcademicPositionsSubmission, NOT_AVAILABLE_OR_APPLICABLE_VALUE),
+        (schema.SocialCapitalSubmission, NOT_AVAILABLE_OR_APPLICABLE_VALUE),
+        (schema.ResearcherLinksSubmission, NOT_AVAILABLE_OR_APPLICABLE_VALUE),
+    ),
+    ids=lambda value: value.__name__ if isinstance(value, type) else None,
+)
+def test_required_standardized_values_reject_na(
+    model: type[BaseModel], standardized_value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate({
+            FIELD_VALUE_FIELD: "Plain-text research value.",
+            FIELD_STANDARDIZED_VALUE_FIELD: standardized_value,
+            FIELD_EVIDENCE_FIELD: TEST_EVIDENCE,
+        })
+
+
+def test_comments_submission_is_optional_plain_text_without_evidence_or_standardization() -> None:
+    assert schema.CommentsSubmission.model_validate({
+        COMMENTS_VALUE_FIELD: "Identity caveat."
+    }).value == "Identity caveat."
+    with pytest.raises(ValidationError):
+        schema.CommentsSubmission.model_validate({
+            COMMENTS_VALUE_FIELD: "Identity caveat.",
+            FIELD_STANDARDIZED_VALUE_FIELD: NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+        })
+    with pytest.raises(ValidationError):
+        schema.CommentsSubmission.model_validate({
+            COMMENTS_VALUE_FIELD: "Identity caveat.",
+            FIELD_EVIDENCE_FIELD: [],
+        })
+
+
+def test_academic_institution_skips_external_validation_for_nr_identifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_get(*_args: object, **_kwargs: object) -> None:
+        pytest.fail(f"{NOT_REPORTED_VALUE} identifiers must not make external requests")
+
+    monkeypatch.setattr(requests, "get", unexpected_get)
+
+    institution = schema.AcademicInstitution.model_validate({
+        "organization_name": "Caltech",
+        "openalex_id": NOT_REPORTED_VALUE,
+        "ror": NOT_REPORTED_VALUE,
+    })
+
+    assert institution.organization_name == "Caltech"
+
+
+def test_academic_institution_validates_openalex_and_ror_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = {
+        STANFORD_OPENALEX_API_URL: FakeResponse(
+            status_code=200,
+            payload={"display_name": STANFORD_NAME, "ror": STANFORD_ROR},
+        ),
+        STANFORD_ROR_API_URL: FakeResponse(
+            status_code=200,
+            payload={
+                "names": [{"value": STANFORD_NAME, "types": ["ror_display"]}],
+            },
+        ),
+    }
+    requested_urls: list[str] = []
+
+    def fake_get(
+        url: str,
+        *,
+        params: dict[str, str | None] | None = None,
+        timeout: float,
+    ) -> FakeResponse:
+        assert timeout == schema.INSTITUTION_REQUEST_TIMEOUT_SECONDS
+        if url == STANFORD_OPENALEX_API_URL:
+            assert params == {"api_key": TEST_OPENALEX_API_KEY}
+        else:
+            assert params is None
+        requested_urls.append(url)
+        return responses[url]
+
+    monkeypatch.setenv(schema.EXPORT_OPENALEX_API_KEY, TEST_OPENALEX_API_KEY)
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    institution = schema.AcademicInstitution.model_validate({
+        "organization_name": STANFORD_NAME,
+        "openalex_id": STANFORD_OPENALEX_ID,
+        "ror": STANFORD_ROR,
+    })
+
+    assert institution.organization_name == STANFORD_NAME
+    assert requested_urls == [STANFORD_OPENALEX_API_URL, STANFORD_ROR_API_URL]
+
+
+def test_l_fei_fei_fixture_builds_without_external_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_get(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("the static submission fixture must not make external requests")
+
+    module_name = (
+        "src.detours.detour_ai_augment.protected.src.backend.helpers.data_models."
+        "submission_fixture"
+    )
+    fixture_module = importlib.import_module(module_name)
+    monkeypatch.setattr(requests, "get", unexpected_get)
+
+    fixture_module = importlib.reload(fixture_module)
+
+    assert fixture_module.L_FEI_FEI_INITIAL_FIXTURE.identity == ("L.", "Fei-Fei")
+    assert isinstance(fixture_module.L_FEI_FEI_INITIAL_FIXTURE.submission, Submission)
+    assert fixture_module.L_FEI_FEI_RETRY_FIXTURE.identity == ("L.", "Fei-Fei")
+    assert isinstance(
+        fixture_module.L_FEI_FEI_RETRY_FIXTURE.submission,
+        schema.StandardizedSubmission,
+    )
+
+
+@pytest.mark.real_api
+def test_academic_institution_round_trips_against_real_apis(
+    monkeypatch: pytest.MonkeyPatch,
+    repository_root: Path,
+) -> None:
+    api_key = os.environ.get(schema.EXPORT_OPENALEX_API_KEY) or dotenv_values(
+        repository_root / ".env"
+    ).get(schema.EXPORT_OPENALEX_API_KEY)
+    if not api_key:
+        pytest.skip(f"{schema.EXPORT_OPENALEX_API_KEY} is unavailable")
+    monkeypatch.setenv(schema.EXPORT_OPENALEX_API_KEY, api_key)
+
+    institution = schema.AcademicInstitution.model_validate({
+        "organization_name": STANFORD_NAME,
+        "openalex_id": STANFORD_OPENALEX_ID,
+        "ror": STANFORD_ROR,
+    })
+
+    assert institution.model_dump(mode="json") == {
+        "organization_name": STANFORD_NAME,
+        "openalex_id": STANFORD_OPENALEX_ID,
+        "ror": STANFORD_ROR,
+    }

@@ -1,0 +1,1031 @@
+from __future__ import annotations
+
+from typing import Final
+
+from .vars import (
+    PYDANTIC_TO_PASTE_SOURCE,
+)
+
+
+class Locale:
+    AGE_EXPECTED_TEMPLATE: Final = "Expected age {expected_age}, got {actual_age}"
+
+    VALIDATION_STAGE_INVALID: Final = "invalid post-commit validation stage"
+    VALIDATION_RESULT_INVALID: Final = "invalid post-commit validation result"
+    VALIDATION_ACCEPTANCE_MISMATCH: Final = "accepted validation stage and result must agree"
+    VALIDATION_SUBMISSION_TYPE_MISMATCH: Final = "Submission type and payload must agree"
+    VALIDATION_SUBMISSION_MISSING: Final = "Accepted validation requires the full submission"
+    VALIDATION_INITIAL_LINK_INVALID: Final = "Initial validation linkage is invalid"
+    VALIDATION_HTTP_REFERENCES_INVALID: Final = (
+        "Model HTTP references must be unique UUIDv7 records"
+    )
+    VALIDATION_RECORD_INVALID: Final = "validation HTTP record has an invalid contour"
+    VALIDATION_BODY_MISMATCH: Final = "validation request body does not match its record"
+    VALIDATION_SUBMISSION_DISCRIMINATOR_MISSING: Final = (
+        "Serialized submission discriminator is missing"
+    )
+    VALIDATION_BODY_MISSING: Final = "validation request body is missing"
+    VALIDATION_COMMIT_LINK_INVALID: Final = "Validation commit linkage is invalid"
+    VALIDATION_HTTP_INPUT_INVALID: Final = (
+        "Validation HTTP input must precede validation and match DB"
+    )
+    VALIDATION_REPLAY_MISMATCH: Final = "Recorded validation does not match its replay inputs"
+    VALIDATION_AFTER_OUTCOME: Final = "Validation must precede its session's run outcome"
+    VALIDATION_RESULT_NOT_APPLIED: Final = "Validation result was not applied"
+    APPLIED_VALIDATION_CURSOR_MISSING: Final = (
+        "Applied validation request record is missing from the current replay cursor"
+    )
+    INDEXED_VALIDATION_CURSOR_MISSING: Final = (
+        "Indexed validation request record is missing from the current replay cursor"
+    )
+    VALIDATION_CURRENT_RECONSTRUCTED_COMMIT_REQUIRED: Final = (
+        "Validation requires the current reconstructed commit"
+    )
+
+    # Store request/response contract and its API/IPC adapters.
+    RUN_OUTCOME_PERSISTED_LOG: Final = 'Run outcome persisted: record=%s; HTTP %s'
+    QUERY_SNAPSHOT_READING_LOG: Final = 'Query IPC: reading wholesale Backend snapshot'
+    QUERY_SNAPSHOT_READY_LOG: Final = 'Query IPC snapshot ready: %d researchers'
+    IPC_REQUEST_UNEXPECTEDLY_PERSISTED: Final = 'IPC unexpectedly persisted a request record'
+    IPC_RESPONSE_MISSING: Final = 'Missing IPC response record'
+    BUFFERED_REQUEST_REQUIRED: Final = 'Backend requires a buffered request body'
+    PUSH_RESULT_STATE_LOG: Final = (
+        'Push %s: commit=%s; validation=%s; stage=%s result=%s; lifecycle=%s'
+    )
+    PULL_STATE_LOG: Final = 'Pull: lifecycle=%s; commit=%s'
+    PULL_PERSISTED_LOG: Final = 'Pull persisted: record=%s; HTTP %s'
+    PUSH_PERSISTED_LOG: Final = "Push persisted: record=%s; HTTP %s"
+    STORE_CONTEXT_UNAVAILABLE: Final = 'Backend Store context is unavailable'
+    INIT_REQUEST_RECORD_INVALID: Final = "Backend init request record is invalid"
+    INIT_REQUEST_RECORD_REQUIRED: Final = "Backend init request record is required"
+    PULL_RESPONSE_LINKAGE_INVALID: Final = "Pull response linkage is invalid"
+    STORE_RESET_CONFIRMATION_REQUIRED: Final = "Database reset confirmation required for --new."
+    REPLAY_CONFIRMATION_REQUIRED: Final = "Nonempty replay log requires replay confirmation"
+    REPLAY_EMPTY_HASH_INVALID: Final = "An empty replay log requires SHA256(empty)"
+    STORE_DB_ISOLATION_REQUIRED: Final = (
+        "Detour database must be separate from source and replay log"
+    )
+    STORE_RECONSTRUCTION_AUTHORITATIVE_MISMATCH: Final = (
+        "Store reconstruction differs from authoritative record"
+    )
+    STORE_RECONSTRUCTION_ORIGINAL_MISMATCH: Final = (
+        "Store reconstruction differs from original object"
+    )
+    STORE_RUN_OUTCOME_RECONSTRUCTION_MISSING: Final = "Store run outcome was not reconstructed"
+    STORE_ANCHOR_TRANSACTION_REQUIRED: Final = "Anchor changes require a Store transaction"
+    REPLAY_ANCHOR_MISSING: Final = "Replay anchor missing; explicit --new is required"
+    REPLAY_PREFIX_TRUNCATED: Final = "Replay prefix is truncated or missing from DB"
+    REPLAY_EMPTY_ANCHOR_HASH_MISMATCH: Final = "Empty replay anchor hash mismatch"
+    REPLAY_COVERAGE_MISMATCH: Final = (
+        "Replay/DB coverage mismatch (extra rows or invalid anchor boundary)"
+    )
+    STORE_FAILED_REBUILD_REQUIRED: Final = "Backend Store failed; rebuild with --new before reuse"
+    STORE_ALREADY_OPEN: Final = "AiAugmentBackendStore is already open"
+    STORE_WRITABLE_CONTEXT_REQUIRED: Final = (
+        "AiAugmentBackendStore must be used inside a writable 'with' block"
+    )
+    STORE_CONTEXT_REQUIRED: Final = "AiAugmentBackendStore must be used inside a 'with' block"
+    STORE_PROJECTION_REPLAY_MISMATCH: Final = "Store projection differs from replay log"
+    STORE_SQL_SCOPE_INVALID: Final = "SQL is not allowed in the current Store transaction scope"
+    STORE_READ_ONLY: Final = "Backend Store is read-only"
+    STORE_NESTED_WRITE_TRANSACTION: Final = "Cannot nest a Store write transaction"
+    STORE_MATERIALIZATION_TRANSACTION_REQUIRED: Final = (
+        "Materialization requires a Store write transaction"
+    )
+    RUN_OUTCOME_COMMIT_NAMEKEY_MISMATCH: Final = "Run outcome commit NameKey does not match"
+    RUN_OUTCOME_ACCEPTED_ROW_VALIDATION_MISSING: Final = (
+        "Run outcome accepted row has no validation record"
+    )
+    RUN_OUTCOME_VALIDATION_LINKAGE_INVALID: Final = "Run outcome validation linkage is invalid"
+    REPLAY_ACCEPTED_HASH_LOG: Final = "Accepted new replay hash %s at line %d byte %d"
+    REPLAY_NEW_DB_LOG: Final = "Replaying %d lines (%d bytes) into new detour DB"
+    REPLAY_LINE_LOG: Final = "Replaying line %d/%d"
+    REPLAY_COMPLETE_LOG: Final = "Replay complete; accepted hash %s at line %d, byte %d"
+    REPLAY_VERIFY_LOG: Final = (
+        "Verifying replay log: stored hash %s at line %d byte %d; config hash %s; %d bytes"
+    )
+    REPLAY_VERIFY_PREFIX_LOG: Final = "Verifying prefix: %d lines, %d bytes"
+    REPLAY_PREFIX_HASH_MATCH_LOG: Final = "Prefix hash matches stored anchor"
+    REPLAY_VERIFY_SUFFIX_LINE_LOG: Final = "Verifying suffix line %d"
+    REPLAY_COVERAGE_VERIFIED_LOG: Final = (
+        "DB/log ordinal and byte coverage verified: %d lines, %d bytes"
+    )
+    REPLAY_LINE_INVALID_JSONL_TEMPLATE: Final = "Replay line {ordinal}: invalid JSONL boundary"
+    REPLAY_LINE_DB_RECORD_MISSING_TEMPLATE: Final = (
+        "Replay line {ordinal}: missing or unordered DB record"
+    )
+    REPLAY_LINE_RAW_HASH_MISSING_TEMPLATE: Final = "Replay line {ordinal}: missing raw-line hash"
+    REPLAY_PREFIX_MISMATCH_TEMPLATE: Final = (
+        "Replay prefix mismatch at line {ordinal}, byte {offset}"
+    )
+    REPLAY_LINE_RAW_HASH_MISMATCH_TEMPLATE: Final = (
+        "Replay line {ordinal}: raw-line hash mismatch"
+    )
+    RUN_OUTCOME_MATERIALIZED_SECTIONS_LOG: Final = (
+        "Run outcome %s: materialized %d accepted sections"
+    )
+    RUN_OUTCOME_REPLAY_MISMATCH: Final = 'Recorded run outcome does not match its replay inputs'
+    PUSH_VALIDATION_RECORD_MISSING: Final = 'Processed push has no validation record'
+    PULL_PROCESSING_LOG: Final = 'Pull: validation still running; HTTP 503 with Retry-After'
+    PULL_WORKFLOW_FAILED_LOG: Final = 'Pull: Backend workflow failed'
+    PULL_COMPLETED_GROUND_TRUTH_LOG: Final = 'Pull: completed submission; ground_truth=%s'
+    PULL_INITIAL_TASK_LOG: Final = 'Pull: initial task; namekey=%s; %d JSONL lines'
+    PULL_DURABLE_RESPONSE_MISSING: Final = 'Pull has no durably acknowledged response'
+    PUSH_REQUEST_STATE_LOG: Final = 'Push: lifecycle=%s; session=%s; current_pull=%s'
+    PUSH_NAK_ERROR_MISSING: Final = 'Push NAK without persistence error'
+    PUSH_DURABLY_ACCEPTED_LOG: Final = 'Push %s durably accepted; commit/validation processing'
+    PUSH_RESPONSE_RECORD_MISSING: Final = 'Missing push response record'
+    RUN_OUTCOME_PROJECTION_INCONSISTENT: Final = (
+        'Run-outcome projection is inconsistent'
+    )
+    RUN_OUTCOME_REPLAY_INPUTS_DIFFER: Final = 'Run-outcome replay inputs differ from the projection'
+    RUN_OUTCOME_ROLLOUT_FILENAME_MISSING: Final = 'Outcome rollout has no filename'
+    PULL_VALIDATION_RECORD_MISSING: Final = 'Finished workflow has no validation record'
+    PULL_RETRY_STAGE_LOG: Final = 'Pull: retry instructions; stage=%s'
+    PULL_COMPLETED_RESULT_INVALID: Final = 'Completed workflow has invalid submission/result'
+    PULL_COMPLETED_RESEARCHER_MISSING: Final = 'Completed workflow has no configured researcher'
+    PUSH_SESSION_NOT_READY_LOG: Final = 'Push: workflow/session is not ready'
+    RUN_OUTCOME_NAMEKEY_MISMATCH: Final = (
+        "Run outcome requires NameKey matching the Backend researcher"
+    )
+    RUN_OUTCOME_SESSION_MISMATCH: Final = (
+        "Run outcome requires Session-ID matching the Backend session"
+    )
+    RUN_OUTCOME_ETAG_MISMATCH: Final = (
+        "Completed outcome requires ETag matching the current validation"
+    )
+    INNERDICT_OUTCOME_MISMATCH: Final = "Committed innerdict outcome does not match its commit"
+    AI_AUGMENT_ELIGIBILITY_INCONSISTENT: Final = (
+        "AI augment eligibility classification is inconsistent"
+    )
+    AI_AUGMENT_XLSX_ROWS_MISSING: Final = "AI augment XLSX source rows are missing"
+    AI_AUGMENT_INNERDICT_SECTIONS_DUPLICATED: Final = (
+        "AI augment committed innerdict sections are duplicated"
+    )
+    AI_AUGMENT_INNERDICT_NAMEKEY_MISMATCH: Final = (
+        "AI augment committed innerdict has a different run-outcome NameKey"
+    )
+    CODEX_INNERDICT_TEXT_INVALID: Final = "committed innerdict text value is invalid"
+    CODEX_INNERDICT_REQUIRED_TEXT_MISSING: Final = (
+        "committed innerdict required text value is missing"
+    )
+    RUN_OUTCOME_QUERY_UNEXPECTED: Final = "Run outcome request must have no query parameters"
+    RUN_OUTCOME_HEADERS_INVALID: Final = (
+        "SourceKey is a response header, not a run outcome request header"
+    )
+    RUN_OUTCOME_BODY_UNEXPECTED: Final = "Run outcome request must have no body"
+    RUN_OUTCOME_REJECTED_LOG: Final = "Run outcome %s rejected: %s"
+    RUN_OUTCOME_VALIDATION_LINKAGE_CORRUPT: Final = 'Run-outcome validation linkage is corrupt'
+    RUN_OUTCOME_DURABLE_VALIDATION_MISSING: Final = (
+        'Run-outcome projection has no durable validation request record'
+    )
+    RUN_OUTCOME_PROVIDER_INPUT_CORRUPT: Final = 'Run-outcome provider replay input is corrupt'
+    PULL_RETRY_VALIDATION_INCONSISTENT: Final = 'Inconsistent retry validation'
+    PULL_SUBMISSION_VALUE_INVALID: Final = 'Validated submission value is invalid'
+    HTTP_REQUEST_RECEIVED_LOG: Final = 'Backend received %s %s: %d request bytes'
+    HTTP_RESPONSE_SENT_LOG: Final = 'Backend sent %s %s: HTTP %d; %d response bytes'
+    STORE_STARTUP_CONFIRMATION_REQUIRED: Final = (
+        'Backend startup confirmation required; use --yes to bypass the prompt.'
+    )
+    IPC_PATH_NOT_SOCKET_TEMPLATE: Final = 'dashboard IPC path is not a Unix socket: {path}'
+    IPC_PATH_NOT_ABSOLUTE_TEMPLATE: Final = 'dashboard IPC path is not absolute: {path}'
+    IPC_RUNNING_TEMPLATE: Final = 'Dashboard IPC running on unix://{path}'
+    PULL_PROCESSING_FATAL_LOG: Final = 'Backend pull processing failed fatally'
+    PUSH_PROCESSING_FATAL_LOG: Final = 'Backend push processing failed fatally'
+    PYDANTIC_VALIDATION_DETAILS_LOG: Final = 'Pydantic validation details: %s'
+    IPC_OUTCOME_HANDLER_UNAVAILABLE: Final = 'run-outcome IPC handler is unavailable'
+    IPC_PORT_INVALID: Final = 'IPC request URL must omit a port'
+    IPC_QUERY_FATAL_LOG: Final = 'dashboard query failed fatally'
+    IPC_OUTCOME_FATAL_LOG: Final = 'dashboard run-outcome request failed fatally'
+    IPC_QUERY_STOPPED_UNEXPECTEDLY: Final = 'Backend query server stopped unexpectedly'
+    STORE_DURABLE_APPEND_MISMATCH: Final = 'Durable append differs from its HTTP record'
+    PUSH_COMMIT_PERSISTED_LOG: Final = 'Push %s: commit %s persisted; starting validation'
+    PUSH_SERVER_LOOP_REQUIRED: Final = 'Accepted push requires the Backend server event loop'
+    REPLAY_ACCEPTED_PUSH_OVERLAP: Final = 'A second accepted push precedes validation of the first'
+    REPLAY_COMMIT_PUSH_MISMATCH: Final = 'Commit does not match the current replayed push'
+    REPLAY_VALIDATION_COMMIT_MISMATCH: Final = (
+        'Validation does not match the current replayed commit'
+    )
+    RUN_OUTCOME_BEFORE_VALIDATION: Final = 'Run outcome precedes validation of the accepted push'
+    REPLAY_RECORD_FAILED_LOG: Final = 'Replay failed at line %d'
+    REPLAY_RECORD_FAILED_DETAIL_LOG: Final = 'Replay failed at line %d: %s'
+    PUBLIC_HTTP_EXCHANGE_INVALID: Final = 'Public HTTP exchange has an invalid contour'
+    PULL_RESPONSE_BODY_MISSING: Final = 'Pull response body is missing'
+    PUSH_CAPTURED_LINKAGE_REQUIRED: Final = 'Accepted push requires captured pull/session linkage'
+    QUERY_REQUEST_RECEIPT_TIME_MISSING: Final = "Query request receipt time is missing"
+    QUERY_REQUEST_INVALID: Final = 'Query requires GET /query without parameters or a body'
+    QUERY_RESPONSE_BODY_MISMATCH: Final = 'Query response body does not match its record'
+    PUSH_RESULT_LINKAGE_INVALID: Final = (
+        'Processed push has missing or inconsistent commit/validation'
+    )
+    PUSH_REJECTED_LINKAGE_INVALID: Final = 'Unaccepted push cannot have commit/validation'
+    STORE_PROMISE_COMPLETION_MISSING: Final = 'Response promise has no completion'
+    STORE_RESPONSE_PROCESSING_FAILED_LOG: Final = 'Backend Store response processing failed'
+    RUN_OUTCOME_SELF_ID_INCONSISTENT: Final = 'Run-outcome response self ID is inconsistent'
+    RUN_OUTCOME_VALIDATION_COMMIT_REQUIRED: Final = 'Run-outcome validation requires its commit ID'
+    RUN_OUTCOME_REFERENCE_UUID_INVALID: Final = 'Run-outcome reference IDs must be UUIDv7'
+    UUID7_TIMESTAMP_REQUIRED: Final = "Timestamp extraction requires a UUIDv7"
+
+    API_TITLE: Final = "Highly-Cited Researcher Annotation API"
+    API_DESCRIPTION: Final = (
+        "Pull a JSONL annotation task, submit completed values, and compare the "
+        "submission with ground truth."
+    )
+    PULL_SUMMARY: Final = "Pull the annotation task"
+    PULL_DESCRIPTION: Final = (
+        "Returns the configured JSON Lines annotation task, Markdown resubmission "
+        "instructions, the accepted result, or the current processing state."
+    )
+    PULL_RESPONSE_DESCRIPTION: Final = "JSON Lines annotation task or Markdown retry."
+    PUSH_SUMMARY: Final = "Submit completed annotations"
+    PUSH_DESCRIPTION: Final = (
+        "Accepts the submission before asynchronous validation."
+    )
+    PUSH_RESPONSE_DESCRIPTION: Final = "Submission accepted; poll Location for outcome."
+    EXCERPT_URL_NONBLANK = "excerpt and url must be non-blank"
+    VALUE_NONBLANK = "value must be non-blank"
+    EXCERPT_PAIRS_UNIQUE = "web_search_excerpts must not contain duplicate pairs"
+    EXAMPLE_EXCERPT_TEMPLATE: Final = (
+        "Exact contiguous excerpt from a cited web result supporting {claim}."
+    )
+    EXAMPLE_RESULT_URL: Final = "https://example.test/result"
+    CLI_DESCRIPTION: Final = "Serve the AI augmentation detour API."
+    CONFIGURATION_ERROR_DETAIL: Final = (
+        "API is not properly configured. Contact the human operator."
+    )
+    VALIDATION_ERROR_DETAIL: Final = (
+        "Submission did not pass validation. Recheck every evidence excerpt and URL "
+        "before retrying. Copy each excerpt verbatim as one contiguous span from the "
+        "cited web-tool output, preserving every character—including repeated spaces, "
+        "line breaks, punctuation, capitalization, and Unicode typography—and copy its "
+        "associated URL exactly. Do not paraphrase, normalize, retype, or join separated "
+        "text."
+    )
+    SUBMISSION_ONE_ISSUE_HEADER: Final = "1 submission issue needs correction:"
+    SUBMISSION_ISSUES_HEADER_TEMPLATE: Final = "{count} submission issues need correction:"
+    SUBMISSION_SCHEMA_ROOT: Final = "submission"
+    SUBMISSION_SCHEMA_ITEM_TEMPLATE: Final = "- {location}: {instruction}"
+    SUBMISSION_FIELD_REMOVE: Final = "Remove this field."
+    SUBMISSION_FIELD_REQUIRED: Final = "Supply this required field."
+    SUBMISSION_FIELD_INVALID: Final = "Check this field's format and value."
+    SUBMISSION_RESUBMIT_INSTRUCTION: Final = (
+        "Correct these issues and resubmit the complete payload."
+    )
+    MULTIPLE_MATCH_DETAIL_TEMPLATE: Final = (
+        "Excerpt matched multiple entries. Resubmit with an excerpt unique across "
+        "the searched web pages: {excerpt}"
+    )
+    MULTIPLE_EVIDENCE_MATCHES_TEMPLATE: Final = (
+        "excerpt matched multiple indexed results: {excerpt}"
+    )
+    PYDANTIC_MISSING_INPUT: Final = "<missing>"
+    PYDANTIC_FAILURE: Final = "submission failed Pydantic validation"
+    UNKNOWN_FIELD: Final = "unknown"
+
+    SESSION_METADATA_NONBLANK: Final = "session metadata fields must be non-blank"
+    SESSION_ID_STDIN_INVALID: Final = "Backend stdin session ID is not a canonical UUID"
+    SESSION_ID_STDIN_CONFLICT: Final = "Backend stdin supplied conflicting session IDs"
+    SESSION_ID_STDIN_MISSING: Final = "Backend stdin closed before supplying a session ID"
+    SESSION_ID_STDIN_ACCEPTED_LOG: Final = "Backend stdin accepted Codex session ID %s"
+    SESSION_ID_STDIN_FAILED_LOG: Final = "Backend stdin session-ID reader failed: %s"
+    APPENDWATCH_READABLE_LOG: Final = "proved APPENDWATCH_REPORT readable: %s"
+    CODEX_SESSIONS_READABLE_LOG: Final = "proved Codex sessions directory readable: %s"
+    CODEX_SESSIONS_UNREADABLE: Final = "Codex sessions directory is not readable"
+    WEB_RESULT_REF_ID_NONBLANK: Final = "web result ref_id must be non-blank"
+
+    SETTING_REQUIRED_TEMPLATE: Final = "{setting} is required"
+    SETTING_ABSOLUTE_TEMPLATE: Final = "{setting} must be an absolute path"
+    SETTING_READABLE_FILE_TEMPLATE: Final = (
+        "{setting} is not a readable regular file; rerun deploy.sh or correct .env"
+    )
+    SETTING_GUEST_PATH_TEMPLATE: Final = (
+        "{setting} must be a normalized absolute guest path"
+    )
+    FILES_CONFIG_RESOURCE_MISSING_TEMPLATE: Final = (
+        "files_config is missing required detour resource {resource_key!r}"
+    )
+    CONFIGURED_RESOURCE_INVALID_TEMPLATE: Final = "configured {resource_key} resource is invalid"
+    MAP_COLUMNS_INVALID_TEMPLATE: Final = "{resource_key} must have exactly columns {columns!r}"
+    MAP_ROW_BLANK_TEMPLATE: Final = "{resource_key} row {row_number} has blank values"
+    MAP_DRAW_CONFLICT_TEMPLATE: Final = "{resource_key} has conflicting draw {draw_number!r}"
+    MAP_CSV_UNREADABLE_TEMPLATE: Final = "configured {resource_key} CSV is unreadable or malformed"
+    MAP_CSV_EMPTY_TEMPLATE: Final = "configured {resource_key} CSV is empty"
+    INNERDICTS_NON_TEXT_TEMPLATE: Final = "{table_name} has non-text innerdicts for {namekey}"
+    INNERDICTS_MALFORMED_TEMPLATE: Final = (
+        "{table_name} has malformed JSONL for {namekey} at line {line_number}"
+    )
+    INNERDICTS_NON_OBJECT_TEMPLATE: Final = (
+        "{table_name} has a non-object row for {namekey} at line {line_number}"
+    )
+    SOURCE_DUCKDB_TABLE_MISSING_TEMPLATE: Final = "configured source DuckDB lacks {table_name}"
+    TABLE_NAMEKEY_NON_TEXT_TEMPLATE: Final = "{table_name} contains a non-text name_key"
+    TABLE_NAMEKEY_INVALID_TEMPLATE: Final = "{table_name} contains an invalid name_key"
+    ELIGIBILITY_FLAGS_MISSING_TEMPLATE: Final = (
+        "configured source DuckDB lacks usable {table_name} eligibility flags"
+    )
+    SOURCE_CLASSIFICATIONS_INVALID_TEMPLATE: Final = (
+        "configured {table_name} contains invalid source classifications"
+    )
+    CARD_PARTITION_UNKNOWN_NAMEKEYS: Final = (
+        "card-partition eligibility contains unknown namekeys"
+    )
+    COHORTS_OVERLAP: Final = "ground-truth and no-ground-truth cohorts overlap"
+    GROUND_TRUTH_CARDINALITY_TEMPLATE: Final = (
+        "ground-truth cohort cardinality is invalid: expected {expected}, got {actual}"
+    )
+    NO_GROUND_TRUTH_CARDINALITY_TEMPLATE: Final = (
+        "no-ground-truth cohort cardinality is invalid: expected {expected}, got {actual}"
+    )
+    ELIGIBLE_COHORT_CARDINALITY_INVALID: Final = "eligible cohort union cardinality is invalid"
+    CARD_PARTITION_NAMEKEYS_MISMATCH: Final = (
+        "card-partition namekeys do not match innerdict-owned namekeys"
+    )
+    INELIGIBILITY_CATEGORY_UNKNOWN: Final = "an ineligible namekey has no recognized category"
+    SOURCE_POPULATION_COHORTS_INVALID: Final = "source population cohort cardinalities are invalid"
+    SOURCE_POPULATION_INELIGIBILITY_INVALID: Final = (
+        "source population ineligibility categories are invalid"
+    )
+    SOURCE_POPULATION_CARDINALITY_INVALID: Final = "source population cardinality is invalid"
+    SOURCE_POPULATION_RND_INVALID: Final = "source population rnd values are invalid"
+    SOURCE_POPULATION_MULTIDRAW_INVALID: Final = (
+        "source population contracted-draw count is invalid"
+    )
+    CONFIG_INVALID_TEMPLATE: Final = "--config is invalid or unreadable: {config_path}"
+    SOURCE_DUCKDB_UNREADABLE_TEMPLATE: Final = "configured source DuckDB is not readable: {db_file}"
+
+    TIMEZONE_INVALID_TEMPLATE: Final = "configured timezone is invalid: {timezone}"
+    SOURCE_DUCKDB_VALIDATION_FAILED: Final = "configured source DuckDB could not be validated"
+    API_CONFIG_REQUIRED_TEMPLATE: Final = (
+        "API was not started with required --config {config_filename}"
+    )
+    ROLLOUT_NOT_SET_TEMPLATE: Final = (
+        "{environment_name} is not set; add the active chat rollout path to the "
+        "repository-root .env and restart the API"
+    )
+    ROLLOUT_WHITESPACE_TEMPLATE: Final = (
+        "{environment_name} contains whitespace or control characters; correct .env and "
+        "restart the API"
+    )
+    ROLLOUT_NOT_NORMALIZED_TEMPLATE: Final = (
+        "{environment_name} must be normalized without traversal; correct .env and restart the API"
+    )
+    ROLLOUT_OUTSIDE_ROOT_TEMPLATE: Final = (
+        "{environment_name} must be below {sessions_root}; correct .env and restart the API"
+    )
+    ROLLOUT_FILENAME_INVALID_TEMPLATE: Final = (
+        "{environment_name} must name a rollout-*.jsonl file; correct .env and restart the API"
+    )
+    AIVM_INSTANCE_INVALID: Final = (
+        "FASTAPI_DETOUR_AIVM_INSTANCE is invalid; correct .env and restart the API"
+    )
+    AIVM_AUDIT_USER_INVALID: Final = (
+        "FASTAPI_DETOUR_AIVM_AUDIT_USER is invalid; correct .env and restart the API"
+    )
+    AIVM_SSH_PORT_INVALID: Final = (
+        "FASTAPI_DETOUR_AIVM_SSH_PORT is invalid; correct .env and restart the API"
+    )
+    AUDIT_ROLLOUT_ARCHIVE_INVALID: Final = (
+        "the audit read did not produce a regular rollout archive; verify AIVM deployment"
+    )
+    ROLLOUT_COPY_FAILED: Final = (
+        "rollout audit read failed; verify the configured rollout and AIVM SSH deployment"
+    )
+    ROLLOUT_DISCOVERY_FAILED: Final = "rollout discovery on the Agent Runtime failed"
+    ROLLOUT_DISCOVERY_NOT_UNIQUE: Final = (
+        "Codex session ID did not resolve to exactly one rollout"
+    )
+    APPENDWATCH_ARCHIVE_FAILED: Final = (
+        "appendwatch status could not be read through the AIVM audit principal"
+    )
+    RUN_OUTCOME_SNAPSHOT_FAILED_LOG: Final = "run-outcome snapshot %s was partial: %s"
+    RUN_OUTCOME_SNAPSHOT_APPEND_FATAL_LOG: Final = (
+        "run-outcome snapshot %s could not be durably logged: %s"
+    )
+
+    APPENDWATCH_REPORT_UNREADABLE: Final = "archived appendwatch report is unreadable"
+    APPENDWATCH_REPORT_INCOMPLETE: Final = "archived appendwatch report is incomplete"
+    APPENDWATCH_GLOBAL_DEGRADATION: Final = "appendwatch reports global monitoring degradation"
+    APPENDWATCH_ROOT_MALFORMED: Final = "archived appendwatch report has a malformed root"
+    APPENDWATCH_TREE_LINE_MALFORMED: Final = (
+        "archived appendwatch report contains a malformed tree line"
+    )
+    APPENDWATCH_NESTING_INVALID: Final = "archived appendwatch report contains invalid nesting"
+    APPENDWATCH_PATH_DUPLICATE: Final = "archived appendwatch report contains a duplicate path"
+    APPENDWATCH_DIRECTORY_MALFORMED: Final = (
+        "archived appendwatch report contains a malformed directory"
+    )
+    APPENDWATCH_FILE_ENTRY_MALFORMED: Final = (
+        "archived appendwatch report contains a malformed file entry"
+    )
+    APPENDWATCH_STRAY_BLANK_LINE: Final = "archived appendwatch report has a stray blank line"
+    APPENDWATCH_REMOVED_SECTION_MALFORMED: Final = (
+        "archived appendwatch report has a malformed removed section"
+    )
+    APPENDWATCH_REMOVED_ENTRY_MALFORMED: Final = (
+        "archived appendwatch report has a malformed removed entry"
+    )
+    ROLLOUT_REMOVED_OR_REPLACED: Final = "configured rollout was removed or replaced"
+    ROLLOUT_STATUS_MISSING: Final = "missing"
+    ROLLOUT_STATUS_AMBIGUOUS: Final = "ambiguous"
+    ROLLOUT_STATUS_INVALID_TEMPLATE: Final = (
+        "configured rollout status is {reason} in archived report"
+    )
+    ROLLOUT_NOT_OK: Final = "configured rollout is not OK beneath monitored ancestors"
+    ROLLOUT_UNREADABLE: Final = "archived rollout is unreadable"
+    ROLLOUT_JSONL_MALFORMED_TEMPLATE: Final = (
+        "archived rollout contains malformed JSONL at line {line_number}"
+    )
+    ROLLOUT_LINE_NON_OBJECT_TEMPLATE: Final = (
+        "archived rollout line {line_number} is not a JSON object"
+    )
+    TIMESTAMP_INVALID_TEMPLATE: Final = "{label} has an invalid timestamp"
+    TIMESTAMP_TIMEZONE_MISSING_TEMPLATE: Final = "{label} timestamp must include a timezone"
+    SESSION_META_PAYLOAD_LABEL: Final = "session_meta payload"
+    SESSION_META_RESPONSE_LABEL: Final = "session_meta response"
+    FUNCTION_OUTPUT_LABEL_TEMPLATE: Final = "function output {fco_id}"
+    FUNCTION_CALL_LABEL_TEMPLATE: Final = "function call {fc_id}"
+    WEB_CALL_ID_INVALID_TEMPLATE: Final = (
+        "web call at rollout line {line_number} has an invalid call_id"
+    )
+    WEB_EVENT_CALL_ID_INVALID_TEMPLATE: Final = (
+        "web event at rollout line {line_number} has an invalid call_id"
+    )
+    WEB_CALL_ARGUMENTS_UNSUPPORTED_TEMPLATE: Final = "web call {call_id} has unsupported arguments"
+    WEB_CALL_ARGUMENTS_MALFORMED_TEMPLATE: Final = "web call {call_id} has malformed arguments"
+    WEB_CALL_ARGUMENTS_NON_OBJECT_TEMPLATE: Final = (
+        "web call {call_id} arguments are not a JSON object"
+    )
+    WEB_CALL_EVIDENCE_INELIGIBLE_LOG: Final = (
+        "Excluding web call %s from evidence: unsupported arguments or no nonempty "
+        "supported action; argument keys=%s"
+    )
+    SESSION_META_COUNT_INVALID: Final = "rollout must contain exactly one session_meta record"
+    SESSION_META_PAYLOAD_MALFORMED: Final = "session_meta payload is malformed"
+    SESSION_META_SESSION_ID_INVALID: Final = "session_meta session_id is invalid"
+    SESSION_META_ROLLOUT_MISMATCH: Final = (
+        "session metadata does not match the configured rollout basename"
+    )
+    TURN_CONTEXT_MISSING: Final = "rollout has no valid turn_context metadata"
+    SESSION_META_FIELDS_INCOMPLETE: Final = "rollout session metadata fields are incomplete"
+    CITED_OUTPUT_BLOCK_INVALID_TEMPLATE: Final = (
+        "cited function output at rollout line {line_number} must contain exactly one "
+        "input_text block"
+    )
+    CITED_OUTPUT_IDS_INVALID_TEMPLATE: Final = (
+        "cited function output at rollout line {line_number} has invalid IDs"
+    )
+    CITED_OUTPUT_IDS_DUPLICATE: Final = "cited function output IDs are duplicated"
+    CITED_WEB_CHAIN_COUNT_TEMPLATE: Final = (
+        "cited web chain {call_id} must have one function call and one web_search_end"
+    )
+    CITED_WEB_CHAIN_ORDER_TEMPLATE: Final = "cited web chain {call_id} is out of order"
+    WEB_CALL_FC_ID_INVALID_TEMPLATE: Final = "web call {call_id} has an invalid or duplicate fc_id"
+    WEB_EVENT_RESULTS_UNSUPPORTED_TEMPLATE: Final = "web event {call_id} has unsupported results"
+    CITATION_RESULT_COUNT_TEMPLATE: Final = "citation {ref_id} does not resolve to one event result"
+    CITATION_RESULT_METADATA_UNSUPPORTED_TEMPLATE: Final = (
+        "citation {ref_id} has unsupported result metadata"
+    )
+    CUMULATIVE_ROW_CONFLICT_TEMPLATE: Final = (
+        "conflicting cumulative rollout row in {table_name} for {key_value}"
+    )
+    PROVENANCE_PREFIX_OLDER: Final = (
+        "archived rollout prefix is older than its persisted provenance index"
+    )
+    CITATION_PREFIX_OLDER: Final = (
+        "archived rollout prefix is older than its persisted citation index"
+    )
+    ROLLOUT_LINKAGES_INCOMPLETE: Final = "normalized rollout call linkages are incomplete"
+    PROVENANCE_INTEGRITY_QUERY_FAILED_TEMPLATE: Final = (
+        "normalized provenance integrity query failed for {table_name}"
+    )
+    PROVENANCE_UNIQUENESS_FAILED_TEMPLATE: Final = (
+        "normalized provenance uniqueness failed for {table_name}"
+    )
+    PROVENANCE_LINKAGE_QUERY_FAILED: Final = "normalized provenance linkage query failed"
+    PROVENANCE_RELATIONSHIPS_INCOMPLETE: Final = (
+        "normalized provenance relationships are incomplete"
+    )
+    PROVENANCE_PREFIX_MISMATCH: Final = (
+        "persisted provenance does not match the current archived rollout prefix"
+    )
+    EVIDENCE_NO_MATCH_TEMPLATE: Final = (
+        "{field}: excerpt has no indexed match; excerpt={excerpt!r} url={url!r}"
+    )
+    PINNED_EVIDENCE_REF_MISSING_TEMPLATE: Final = (
+        "{location}: previously selected evidence reference is unavailable"
+    )
+    EVIDENCE_URL_MISMATCH_TEMPLATE: Final = (
+        "{field}: submitted URL does not match; excerpt={excerpt!r} url={url!r}"
+    )
+    EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE: Final = (
+        "evidence withdrawal requires a prior unmatched retry item"
+    )
+    EVIDENCE_PROGRESS_TEMPLATE: Final = (
+        "{exact} of {total} current evidence items exactly match our records."
+    )
+    EVIDENCE_GOOD_PROGRESS_TEMPLATE: Final = (
+        "Good progress: {exact} of {total} current evidence items exactly match "
+        "our records."
+    )
+    EVIDENCE_REVIEW_HEADER: Final = (
+        "Evidence items that do not yet exactly match our records:"
+    )
+    EVIDENCE_RETRY_VIOLATION_HEADER: Final = (
+        "1 retry-contract violation remains; it is independently blocking:"
+    )
+    EVIDENCE_RETRY_VIOLATIONS_HEADER_TEMPLATE: Final = (
+        "{count} retry-contract violations remain; each is independently blocking:"
+    )
+    EVIDENCE_LOCATION_TEMPLATE: Final = "{field}.web_search_excerpts[{index}]"
+    EVIDENCE_NEAR_ITEM_TEMPLATE: Final = (
+        "- {location}; its wording appears close to the cited web result but may "
+        "differ in case, accents, punctuation, whitespace, or line breaks."
+    )
+    # Retry violations receive their "- " prefix in _assessment_public_detail.
+    STANDARDIZED_REPORTED_NEAR_ITEM_TEMPLATE: Final = (
+        "{location}; its wording appears close to the web result but may "
+        "differ in case, accents, punctuation, whitespace, or line breaks."
+    )
+    EVIDENCE_UNMATCHED_ITEM_TEMPLATE: Final = (
+        "- {location}; does not appear to match its cited web result. Verify this "
+        "excerpt and URL against the original web-tool output."
+    )
+    # Retry violations receive their "- " prefix in _assessment_public_detail.
+    STANDARDIZED_REPORTED_NOT_IN_WEB_RESULTS_TEMPLATE: Final = (
+        "{location}; does not appear to match our records. Verify this "
+        "reported value against the original web-tool output."
+    )
+    EVIDENCE_WITHDRAWN_ITEM_TEMPLATE: Final = (
+        "- {location}; was withdrawn as not present in the web results and does "
+        "not count as verified evidence."
+    )
+    EVIDENCE_RETRY_COMPARE_INSTRUCTION: Final = (
+        "Compare any non-exact evidence item character-for-character with the "
+        "originating web-tool output."
+    )
+    EVIDENCE_RETRY_RESOLVE_INSTRUCTION: Final = (
+        "Resolve every retry-contract violation above."
+    )
+    EVIDENCE_RETRY_RESUBMIT_INSTRUCTION: Final = (
+        "Resubmit the complete payload. Change only items that the guidance "
+        "explicitly permits changing."
+    )
+    EVIDENCE_RETRY_STANDARDIZED_VALUES: Final = (
+        "The resubmission must also supply standardized_value for every "
+        "evidence-bearing field. Pydantic schema: "
+        "\n\n```python\n{}\n```\n\n"
+    ).format(PYDANTIC_TO_PASTE_SOURCE)
+    EVIDENCE_RETRY_EXAMPLE_TEMPLATE: Final = (
+        "Complete standardized resubmission example:\n\n```json\n{example}\n```"
+    )
+    EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE: Final = (
+        "{location} changed beyond the permitted correction; restore its prior "
+        "normalized wording and cited URL. Only case, accents, punctuation, whitespace, "
+        "or line breaks may differ."
+    )
+    EVIDENCE_EXACT_IMMUTABLE_TEMPLATE: Final = (
+        "{immutable} was already verified and must be resubmitted unchanged."
+    )
+    EVIDENCE_ACCEPTED_FIELD_IMMUTABLE_TEMPLATE: Final = (
+        EVIDENCE_EXACT_IMMUTABLE_TEMPLATE
+        + " Preserve its value and complete evidence list unchanged."
+    )
+    EVIDENCE_COUNT_DECREASED_TEMPLATE: Final = (
+        "{field} must retain every prior evidence item; use the explicit audited "
+        "withdrawal object only for a previously unmatched item."
+    )
+    EVIDENCE_WITHDRAWAL_NOT_ALLOWED_TEMPLATE: Final = (
+        "{location} cannot be withdrawn because it was already verified or resubmission is pending."
+    )
+    EVIDENCE_WITHDRAWAL_VALUE_UNCHANGED_TEMPLATE: Final = (
+        "{field} withdrew unsupported evidence but did not correct the associated field value."
+    )
+    EVIDENCE_RETRY_IDENTITY_MISMATCH: Final = (
+        "stored retry state does not match the configured namekey/session identity"
+    )
+    EVIDENCE_AUDIT_REPLAY_FAILED: Final = (
+        "stored evidence audit cannot be replayed from its immutable baseline"
+    )
+    EVIDENCE_SUBMISSION_REJECTED: Final = (
+        "submission contains evidence that is not yet exactly verified"
+    )
+    STANDARDIZED_VALUE_RETRY_VIOLATION: Final = (
+        "standardized_value was not accepted; you may revise this field's standardized_value."
+    )
+    AGE_EVIDENCE_AS_OF_MISMATCH_LOG: Final = (
+        "age evidence as_of mismatch: submitted=%s push_utc_date=%s "
+        "push_received_at_unix_usec=%s"
+    )
+    REPLAY_LOG_UNREADABLE: Final = "authoritative replay log is unreadable"
+    REPLAY_LOG_ALREADY_LOCKED: Final = (
+        "another backend process already owns the authoritative replay log"
+    )
+    BACKEND_ALREADY_RUNNING: Final = "another Backend API process is already running"
+    REPLAY_LOG_LINE_INVALID_TEMPLATE: Final = (
+        "authoritative replay log line {line_number} is invalid"
+    )
+    REPLAY_PROJECTION_CONFLICT: Final = (
+        "detour database projection conflicts with the authoritative replay log"
+    )
+    REPLAY_PROJECTION_FAILED: Final = "authoritative replay projection failed"
+    REPLAY_RECORD_CONTOUR_INVALID: Final = "authoritative HTTP record contour is invalid"
+    REPLAY_COMMIT_INVALID: Final = "authoritative private commit is inconsistent"
+    REPLAY_COMMIT_LINK_MISSING: Final = "private commit references a missing HTTP record"
+    REPLAY_COMMIT_LINK_INVALID: Final = "private commit references an invalid HTTP exchange"
+    REPLAY_COMMIT_PULL_INVALID: Final = "private commit references an invalid pull"
+    REPLAY_COMMIT_SOURCE_KEY_INVALID: Final = "private commit SourceKey is invalid"
+    REPLAY_COMMIT_NAME_KEY_INVALID: Final = "private commit NameKey is invalid"
+    REPLAY_PUBLIC_PUSH_INVALID: Final = "authoritative public push audit is inconsistent"
+    REPLAY_DETAIL_TEMPLATE: Final = "{message}: {detail}"
+    REPLAY_LINE_BOUNDARY_DETAIL: Final = "missing newline or empty line"
+    REPLAY_SCHEMA_VERSION_DETAIL: Final = "schema_version is not the supported version"
+    REPLAY_RECORD_ID_DETAIL: Final = "record_id is not UUIDv7"
+    REPLAY_INIT_RECORD_DETAIL_TEMPLATE: Final = "init record: {error}"
+    REPLAY_RUN_OUTCOME_RECORD_DETAIL_TEMPLATE: Final = "run-outcome record: {error}"
+    REPLAY_DURATION_NONNEGATIVE_DETAIL: Final = "duration_usec must be nonnegative"
+    REPLAY_RESPONSE_CODE_MISSING_DETAIL: Final = "response_code is missing"
+    REPLAY_RESPONSE_HEADERS_MISSING_DETAIL: Final = "response_headers are missing"
+    REPLAY_RESPONSE_BODY_MISSING_DETAIL: Final = "response_body is missing"
+    REPLAY_RECEIVED_AT_ABSENT_DETAIL: Final = "received_at_unix_usec must be absent"
+    REPLAY_RECEIVED_AT_MISSING_DETAIL: Final = "received_at_unix_usec is missing"
+    REPLAY_READY_AT_ABSENT_DETAIL: Final = "ready_to_respond_at_unix_usec must be absent"
+    REPLAY_READY_AT_MISSING_DETAIL: Final = "ready_to_respond_at_unix_usec is missing"
+    REPLAY_DURATION_ZERO_DETAIL: Final = "duration_usec must be zero"
+    REPLAY_SCHEME_DETAIL: Final = "scheme is not the synthetic commit scheme"
+    REPLAY_HOST_DETAIL: Final = "host is not the synthetic commit host"
+    REPLAY_PORT_ABSENT_DETAIL: Final = "port must be absent"
+    REPLAY_QUERY_EMPTY_DETAIL: Final = "query must be empty"
+    REPLAY_COMMIT_HEADERS_DETAIL: Final = (
+        "request_headers must contain only SourceKey and NameKey"
+    )
+    REPLAY_REQUEST_BODY_TEXT_DETAIL: Final = "request_body must be text"
+    REPLAY_RESPONSE_CODE_ABSENT_DETAIL: Final = "response_code must be absent"
+    REPLAY_RESPONSE_HEADERS_ABSENT_DETAIL: Final = "response_headers must be absent"
+    REPLAY_RESPONSE_BODY_ABSENT_DETAIL: Final = "response_body must be absent"
+    REPLAY_REQUEST_BODY_ERROR_TEMPLATE: Final = "request_body: {error}"
+    REPLAY_VALIDATION_ERROR_DETAIL_TEMPLATE: Final = "{location}: {error_type}"
+    REPLAY_COMMIT_CURSOR_DETAIL: Final = "no commit at the replay cursor"
+    REPLAY_COMMIT_ID_DETAIL: Final = "commit record_id differs from referenced record"
+    REPLAY_COMMIT_ENVELOPE_DETAIL: Final = (
+        "commit HTTP envelope differs from durable record"
+    )
+    REPLAY_PUSH_CURSOR_DETAIL: Final = "replay cursor is not an accepted push"
+    REPLAY_PUSH_PULL_DETAIL: Final = "push has no linked pull"
+    REPLAY_COMMIT_LINKS_DETAIL: Final = "commit body links differ from the current pull/push"
+    REPLAY_OUTCOME_VALIDATION_ID_DETAIL: Final = (
+        "validation_record_id differs from replay cursor"
+    )
+    REPLAY_COMMIT_PULL_CODE_DETAIL: Final = "linked pull response is not HTTP 200"
+    REPLAY_COMMIT_PULL_TYPE_DETAIL: Final = "linked pull is not NDJSON"
+    REPLAY_COMMIT_PULL_BODY_DETAIL: Final = "linked pull response_body is empty"
+    REPLAY_COMMIT_PULL_PARSE_DETAIL_TEMPLATE: Final = "linked pull identity: {error}"
+    REPLAY_COMMIT_CURSOR_LINK_DETAIL: Final = "commit is not at the replay cursor"
+    REPLAY_COMMIT_ORDINAL_DETAIL: Final = "pull, push and commit ordinals are out of order"
+    REPLAY_COMMIT_PULL_ROUTE_DETAIL: Final = "linked pull is not GET /pull with HTTP 200"
+    REPLAY_COMMIT_PUSH_ROUTE_DETAIL: Final = "linked push is not POST /push with HTTP 202"
+    REPLAY_COMMIT_PUSH_BODY_DETAIL: Final = "linked push request_body is not text"
+    REPLAY_COMMIT_ORIGINAL_PULL_NAMEKEY_DETAIL: Final = (
+        "original pull NameKey differs from commit NameKey"
+    )
+    REPLAY_COMMIT_INIT_MISSING_DETAIL: Final = "init request is missing"
+    REPLAY_COMMIT_INIT_NAMEKEY_DETAIL: Final = "init NameKey differs from commit NameKey"
+    REPLAY_COMMIT_ROLLOUT_MISSING_DETAIL: Final = "commit rollout is missing"
+    REPLAY_COMMIT_SOURCE_LINE_COUNT_DETAIL: Final = (
+        "SourceKey line count differs from rollout line count"
+    )
+    REPLAY_VALIDATION_CURSOR_DETAIL: Final = "commit is not at the replay cursor"
+    REPLAY_VALIDATION_ORDINAL_DETAIL: Final = "commit does not precede validation"
+    REPLAY_VALIDATION_HEADERS_DETAIL: Final = "validation headers differ from commit headers"
+    REPLAY_VALIDATION_COMMIT_ENVELOPE_DETAIL: Final = (
+        "linked commit envelope differs from the durable commit"
+    )
+    REPLAY_VALIDATION_EVALUATION_DETAIL: Final = (
+        "recomputed post-commit validation differs from recorded validation"
+    )
+    REPLAY_VALIDATION_DIFFERENCE_PATH_TEMPLATE: Final = "first difference at {path}"
+    REPLAY_VALIDATION_DIFFERENCE_VALUES_TEMPLATE: Final = (
+        "first difference at {path}: recorded={recorded}, recomputed={recomputed}"
+    )
+    REPLAY_VALIDATION_HTTP_IDS_DETAIL: Final = (
+        "replayed provider HTTP record IDs differ from recorded inputs"
+    )
+    REPLAY_VALIDATION_INDEX_DETAIL: Final = "submission exists without a rollout index"
+    REPLAY_VALIDATION_UNEXPECTED_AUDIT_DETAIL: Final = (
+        "audit fields exist without a submission"
+    )
+    REPLAY_VALIDATION_OUTPUT_UNACCEPTED_DETAIL: Final = (
+        "output row exists for an unaccepted validation"
+    )
+    REPLAY_VALIDATION_OUTPUT_MISSING_DETAIL: Final = (
+        "accepted validation has no output row"
+    )
+    REPLAY_VALIDATION_RETRY_FIELDS_DETAIL: Final = (
+        "retry evidence is missing submission, assessment, applied or accepted"
+    )
+    REPLAY_OUTCOME_VALIDATION_ORDER_DETAIL: Final = (
+        "linked validation does not precede run outcome"
+    )
+    REPLAY_OUTCOME_VALIDATION_LINK_DETAIL: Final = (
+        "linked validation differs from replay cursor or durable record"
+    )
+    REPLAY_OUTCOME_ATTEMPT_DETAIL: Final = (
+        "outcome has an attempt without validation_record_id"
+    )
+    REPLAY_OUTCOME_REJECTION_DETAIL: Final = (
+        "HTTP 400 outcome has no matching request identity error"
+    )
+    REPLAY_OUTCOME_COMMIT_ORDER_DETAIL: Final = (
+        "linked commit does not precede run outcome"
+    )
+    REPLAY_OUTCOME_STATUS_DETAIL: Final = (
+        "response_code differs from replayed outcome status"
+    )
+    REPLAY_DIFFERING_FIELDS_TEMPLATE: Final = "differing fields: {fields}"
+    REPLAY_VALIDATION_COMMIT_CURSOR_DETAIL: Final = (
+        "replay cursor is not a commit request"
+    )
+    REPLAY_OUTCOME_PENDING_ROW_COUNT_TEMPLATE: Final = (
+        "expected one pending output row; found {count}"
+    )
+    REPLAY_OUTCOME_UPDATED_ROW_COUNT_TEMPLATE: Final = (
+        "expected one updated output row; found {count}"
+    )
+    REPLAY_PULL_INITIAL_CURSOR_DETAIL: Final = (
+        "initial NDJSON pull does not follow init or an initial pull"
+    )
+    REPLAY_PULL_RETRY_CURSOR_DETAIL: Final = (
+        "retry Markdown pull has no linked validation"
+    )
+    REPLAY_PULL_RETRY_STATE_DETAIL: Final = (
+        "linked validation is not a rejected submission-validation stage"
+    )
+    REPLAY_PULL_CONTENT_TYPE_DETAIL: Final = (
+        "successful pull has an unsupported Content-Type"
+    )
+    REPLAY_PULL_VALIDATION_LINK_DETAIL: Final = (
+        "pull validation link differs from replay cursor"
+    )
+    REPLAY_PUSH_PULL_LINK_DETAIL: Final = (
+        "push pull link differs from replay cursor"
+    )
+    REPLAY_COMMIT_PREVIOUS_PUSH_DETAIL: Final = (
+        "commit does not follow a push"
+    )
+    REPLAY_COMMIT_PREVIOUS_PULL_DETAIL: Final = (
+        "commit pull link differs from preceding push"
+    )
+    REPLAY_COMMIT_PREVIOUS_PUSH_LINK_DETAIL: Final = (
+        "commit push link differs from preceding push"
+    )
+    REPLAY_VALIDATION_PREVIOUS_COMMIT_DETAIL: Final = (
+        "validation does not follow a commit"
+    )
+    REPLAY_VALIDATION_COMMIT_LINK_DETAIL: Final = (
+        "validation commit link differs from preceding commit"
+    )
+    REPLAY_VALIDATION_INITIAL_LINK_DETAIL: Final = (
+        "validation initial-attempt link differs from replayed history"
+    )
+    REPLAY_OUTCOME_ATTEMPT_LINK_DETAIL: Final = (
+        "run-outcome attempt link differs from replay cursor"
+    )
+    ROLLOUT_CAS_CONFLICT: Final = "rollout content-addressed storage contains a conflict"
+    ROLLOUT_CAS_BLOB_INVALID: Final = "committed rollout snapshot is missing or invalid"
+    INTERNAL_COMMIT_API_TITLE: Final = "AI Augmentation Private Commit API"
+    AUTHORITATIVE_RESPONSE_NOT_UTF8: Final = (
+        "backend push responses must be finite UTF-8 payloads"
+    )
+    AUTHORITATIVE_RESPONSE_INCOMPLETE_LOG: Final = (
+        "authoritative %s %s handler produced an incomplete ASGI response"
+    )
+    AUTHORITATIVE_LOG_NOT_OPEN: Final = "authoritative replay log is not open"
+    AUTHORITATIVE_LOG_APPEND_FAILED: Final = "authoritative replay-log append failed"
+    AUTHORITATIVE_COMMAND_BUSY: Final = (
+        "Another state-changing request is in progress; retry by polling first."
+    )
+    AUTHORITATIVE_PROJECTION_FAILED_LOG: Final = (
+        "authoritative log line %s committed but DuckDB projection failed; "
+        "backend is unhealthy: %s"
+    )
+    AUTHORITATIVE_HANDLER_FAILED_LOG: Final = "authoritative %s %s handler failed"
+    AUTHORITATIVE_LOG_APPEND_FAILED_LOG: Final = (
+        "authoritative %s %s response could not be committed to the replay log: %s"
+    )
+    AUTHORITATIVE_BACKEND_UNHEALTHY_LOG: Final = (
+        "rejecting authoritative %s %s because an earlier committed record is not projected"
+    )
+    POST_COMMIT_VALIDATION_FAILED_LOG: Final = (
+        "post-commit validation commit=%s stage=%s failed: %s"
+    )
+    PUSH_LINKAGE_MISSING: Final = "accepted push has no current pull or Codex session"
+    POST_ACCEPT_PROCESSING_FAILED_LOG: Final = "accepted push post-processing failed: %s"
+    COMMIT_APPEND_FATAL_LOG: Final = "private commit append failed fatally: %s"
+
+    OPENALEX_API_KEY_MISSING: Final = (
+        "OPENALEX_API_KEY is required to validate an OpenAlex institution"
+    )
+    OPENALEX_INSTITUTION_UNKNOWN_TEMPLATE: Final = (
+        "OpenAlex institution was not found: {openalex_id}"
+    )
+    OPENALEX_INSTITUTION_NAME_MISMATCH_TEMPLATE: Final = (
+        "OpenAlex institution name {actual!r} does not match submitted name {submitted!r}"
+    )
+    OPENALEX_INSTITUTION_ROR_MISMATCH_TEMPLATE: Final = (
+        "OpenAlex institution ROR {actual!r} does not match submitted ROR {submitted!r}"
+    )
+    ROR_INSTITUTION_UNKNOWN_TEMPLATE: Final = "ROR institution was not found: {ror}"
+    ROR_INSTITUTION_NAME_MISMATCH_TEMPLATE: Final = (
+        "ROR institution name {actual!r} does not match submitted name {submitted!r}"
+    )
+
+    SOURCE_OPEN_FAILED_TEMPLATE: Final = "cannot open {source_file}: {error}"
+    SOURCE_JSON_INVALID_TEMPLATE: Final = "invalid JSON in {source_file} at line {line_number}"
+    SOURCE_ROW_NON_OBJECT_TEMPLATE: Final = (
+        "expected an object in {source_file} at line {line_number}"
+    )
+    TARGET_ROW_KEYS_MISSING_TEMPLATE: Final = "target row is missing keys: {keys}"
+    TARGET_ROW_IDENTITY_MISSING: Final = "target row is missing researcher identity"
+    TARGET_GROUND_TRUTH_MISSING: Final = "target draw ground truth was not found"
+    TASK_IDENTITY_INCOMPLETE: Final = "selected task identity is incomplete"
+    TASK_IDENTITY_MISSING: Final = "selected task identity was not found"
+    SOURCE_DUCKDB_OPEN_FAILED: Final = "configured source DuckDB could not be opened read-only"
+    DETOUR_DUCKDB_OPEN_FAILED: Final = (
+        "detour DuckDB could not be opened in read/write mode"
+    )
+    DETOUR_DUCKDB_READ_ONLY_OPEN_FAILED: Final = (
+        "detour DuckDB could not be opened read-only"
+    )
+    CONFIGURED_ROWS_DUPLICATE_TEMPLATE: Final = (
+        "{table_name} contains duplicate rows for configured namekey"
+    )
+    CONFIGURED_NAMEKEY_INELIGIBLE: Final = "configured namekey is not eligible for this detour"
+    CONFIGURED_NAMEKEY_INELIGIBLE_TEMPLATE: Final = (
+        "configured namekey is ineligible for this detour: {category}"
+    )
+    CONFIGURED_NAMEKEY_MALFORMED: Final = "configured namekey is malformed"
+    CONFIGURED_NAMEKEY_NONCANONICAL: Final = "configured namekey is not canonical"
+    CONFIGURED_NAMEKEY_NOT_FOUND: Final = "configured namekey was not found"
+    CONFIGURED_NAMEKEY_NOT_FOUND_SUGGESTIONS_TEMPLATE: Final = (
+        "configured namekey was not found; did you mean {suggestions}?"
+    )
+    NAMEKEY_NOT_SET_TEMPLATE: Final = "namekey is not set in {environment_name}"
+    CONFIGURED_XLSX_CONTEXT_MISSING: Final = "configured namekey has no xlsx innerdict context"
+    CONFIGURED_DRAW_MISSING: Final = "configured namekey has no innerdict-owned draw"
+    GROUND_TRUTH_DOCX_INCOMPLETE: Final = "ground-truth researcher has no complete docx innerdict"
+    RESEARCHER_NOT_UNIQUE: Final = "selected researcher did not resolve uniquely"
+    ACCEPTED_IDENTITY_DUPLICATE: Final = (
+        "commit request record ID or rollout filename/line-count fragment is already accepted"
+    )
+    CAPTURE_HTTP_LOG_EXISTS: Final = "capture HTTP request log already exists"
+    ARCHIVED_CAPTURE_PATH_INVALID: Final = "archived capture path is invalid"
+    ARCHIVED_CAPTURE_MANIFEST_INVALID: Final = "archived capture manifest is invalid"
+    ARCHIVED_CAPTURE_ARTIFACT_INVALID_TEMPLATE: Final = (
+        "archived capture artifact is invalid: {artifact}"
+    )
+    ARCHIVED_CAPTURE_HTTP_INVALID: Final = "archived capture HTTP request log is invalid"
+    ARCHIVED_CAPTURE_OUTCOME_MISMATCH: Final = "archived capture result does not match replay"
+    RESEARCHER_CARD_COUNT_INVALID: Final = "selected researcher did not produce exactly one card"
+    REQUEST_CONTENT_TYPE_INVALID: Final = "request Content-Type must be application/json"
+    REQUEST_CONTENT_LENGTH_INVALID: Final = "request Content-Length is invalid"
+    REQUEST_BODY_TOO_LARGE: Final = "request body exceeds the configured size limit"
+    CONFIGURED_SESSION_MISMATCH: Final = "configured session does not match archived rollout"
+    CARD_INTRO_DATE_FORMAT: Final = "%B %d, %Y"
+
+    API_LIFESPAN_FAILED_LOG: Final = "API lifespan failed: %s"
+    ROUTES_DISABLED_LOG: Final = "pull and push are disabled: %s"
+    PUSH_RECORD_FAILED_LOG: Final = "push_record_id=%s could not record stage=%s result=%s"
+    PULL_FAILED_LOG: Final = "pull failed configuration validation: %s"
+    PUSH_ACCEPTED_LOG: Final = "push_record_id=%s accepted"
+    PUSH_CURRENT_PULL_REQUIRED_LOG: Final = (
+        "push rejected before acceptance: no current persisted pull record; "
+        "client must GET /pull before submitting"
+    )
+    PUSH_CONFIGURATION_FAILED_LOG: Final = "push_record_id=%s failed stage=%s: %s"
+    PUSH_MULTIPLE_MATCHES_LOG: Final = (
+        "push_record_id=%s failed stage=%s: excerpt matched multiple rows excerpt=%r"
+    )
+    PUSH_VALIDATION_FAILED_LOG: Final = "push_record_id=%s failed stage=%s: %s"
+    EVIDENCE_ITEM_ASSESSMENT_LOG: Final = (
+        "commit_record_id={commit_record_id} evidence field={field} index={index} "
+        "outcome={outcome} excerpt={excerpt!r} raw_submitted_url={raw_submitted_url!r} "
+        "decoded_submitted_url={decoded_submitted_url!r} candidates=[{candidates}]"
+    )
+    STANDARDIZED_EVIDENCE_REPORTED_NOT_FOUND_LOG: Final = (
+        "standardized evidence field={field} outcome={outcome} reported={reported!r} "
+        "candidates=[{candidates}]"
+    )
+    EVIDENCE_CANDIDATE_ASSESSMENT_LOG: Final = (
+        "{{ref_id={ref_id!r} call_id={call_id!r} cite_text={cite_text!r} "
+        "excerpt_position={excerpt_position!r} raw_cited_url={raw_cited_url!r} "
+        "decoded_cited_url={decoded_cited_url!r} raw_url_equal={raw_url_equal} "
+        "decoded_url_equal={decoded_url_equal} selected={selected}}}"
+    )
+    PUSH_PYDANTIC_FAILED_LOG: Final = (
+        "push_record_id=%s failed stage=%s field=%s value=%r: %s; pydantic=%s"
+    )
+    PUSH_UNEXPECTED_FAILED_LOG: Final = "push_record_id=%s failed stage=%s: %s"
+    CODEX_ROLLOUT_SUMMARY_BLANK: Final = "Codex rollout summary values must be nonblank"
+    APPENDWATCH_BASE64_INVALID: Final = "appendwatch report is not valid base64"
+    APPENDWATCH_BASE64_NONCANONICAL: Final = "appendwatch report is not canonical base64"
+    COMMIT_SESSION_INCOMPLETE: Final = "commit requires a complete Codex session record"
+    COMMIT_HTTP_CONTOUR_INVALID: Final = "commit HTTP record has an invalid contour"
+    COMMIT_BODY_RECORDS_MISMATCH: Final = "commit request body does not match its records"
+    COMMIT_REFERENCES_REQUIRED: Final = (
+        "commit HTTP record requires referenced pull/push records"
+    )
+    COMMIT_BODY_MISSING: Final = "commit request body is missing"
+    MODEL_HTTP_INPUT_REQUIRED: Final = "Model HTTP input must be recorded"
+    MODEL_HTTP_REQUEST_TEXT_REQUIRED: Final = "Model HTTP logging requires a text request body"
+    MODEL_HTTP_REQUEST_INCOMPLETE: Final = "Prepared HTTP request is incomplete"
+    MODEL_HTTP_RESPONSE_MISMATCH: Final = "Recorded response does not match its request"
+    MODEL_HTTP_RESPONSE_AMBIGUOUS: Final = "Ambiguous model HTTP response references"
+    MODEL_HTTP_RESPONSE_REFERENCE_MISSING: Final = "Missing referenced model HTTP response"
+    DETOUR_DB_ALREADY_OPEN: Final = "AiAugmentDetourDB is already open"
+    DETOUR_DB_CONTEXT_REQUIRED: Final = "AiAugmentDetourDB must be used inside a 'with' block"
+    REPLAY_LOG_FRAGMENT_INVALID: Final = "replay-log fragment type must be line_number"
+    REPLAY_LOG_ALREADY_OPEN: Final = "ReplayLogRegisteredResource is already open"
+    REPLAY_LOG_READ_ONLY: Final = "Replay log is read-only"
+    WEB_CITATION_MARKERS_MALFORMED: Final = "web output contains malformed citation markers"
+    WEB_CITATION_REF_REPEATED_TEMPLATE: Final = "web output repeats citation ref_id {ref_id}"
+    WEB_CITATION_SECTION_MISSING_TEMPLATE: Final = (
+        "could not isolate citation section for {ref_id}"
+    )
+    CITE_CURRENT_REF_MARKER_MISSING: Final = "cite text does not contain one current-ref marker"
+    CITE_EXCERPT_OVERLAPS_REF: Final = "excerpt overlaps its current-ref marker"
+    WEB_ARGUMENTS_NOT_OBJECT: Final = "web arguments must be a JSON object"
+    BACKEND_BACKGROUND_WORK_FAILED: Final = "Backend background work failed"
+    PUSH_CURRENT_PULL_REQUIRED_DESCRIPTION: Final = (
+        "The current pull must be retrieved before submitting."
+    )
+    BACKEND_IPC_WAIT_HTTP_LOG: Final = "IPC waiting for %d active HTTP exchanges"
+    BACKEND_IPC_WAIT_WORK_LOG: Final = "IPC waiting for %d authoritative background tasks"
+    BACKEND_IPC_ADMITTED_LOG: Final = (
+        "IPC admitted after HTTP persistence and authoritative work"
+    )
+    BACKEND_STORE_OPEN_WRITABLE_LOG: Final = "Opening writable Backend Store: new=%s"
+    BACKEND_STORE_READY_LOG: Final = "Writable Backend Store ready"
+    BACKEND_STORE_CLOSED_LOG: Final = "Writable Backend Store closed cleanly"
+    BACKEND_CONFIG_LOADING_LOG: Final = (
+        "Loading Backend configuration/resources: %s; verify_hashes=%s"
+    )
+    BACKEND_CONFIG_VALIDATED_LOG: Final = (
+        "Backend configuration and source validated: %d researchers"
+    )
+    BACKEND_STARTING_LOG: Final = (
+        "Starting Backend: config=%s; ipc_only=%s; new=%s; resume=%s"
+    )
+    BACKEND_STORE_OPEN_READ_ONLY_LOG: Final = "Opening read-only Backend Store"
+    BACKEND_STORE_READ_ONLY_READY_LOG: Final = (
+        "Read-only Backend Store ready; starting query-only IPC"
+    )
+    BACKEND_STORE_READ_ONLY_CLOSED_LOG: Final = (
+        "Query-only IPC stopped; read-only Backend Store closed cleanly"
+    )
+    BACKEND_HTTP_STARTING_LOG: Final = "Starting Backend HTTP API at %s:%s"
+    BACKEND_FAILED_LOG: Final = "Backend failed; exiting without recovery"
+    BACKEND_LOCK_RELEASED_LOG: Final = "Backend process lock released"
+    PUSH_CAPTURE_START_LOG: Final = (
+        "Push %s: capturing rollout and appendwatch evidence for session %s"
+    )
+    PUSH_CAPTURE_COMPLETE_LOG: Final = (
+        "Push %s: captured rollout sha256=%s, bytes=%d, lines=%d; report bytes=%d"
+    )
+    RUN_OUTCOME_REQUEST_PATH_INVALID: Final = "run-outcome HTTP request path is invalid"
+    RUN_OUTCOME_REQUEST_CONTOUR_INVALID: Final = (
+        "run-outcome HTTP request has an invalid contour"
+    )
+    RUN_OUTCOME_RECORD_INCOMPLETE: Final = "run-outcome HTTP record is incomplete"
+    RUN_OUTCOME_REQUEST_RECEIPT_MISSING: Final = (
+        "run-outcome HTTP request receipt time is missing"
+    )
+    RUN_OUTCOME_SOURCE_KEY_MISSING: Final = (
+        "run-outcome SourceKey response header is missing"
+    )
+    RUN_OUTCOME_SOURCE_KEY_LINE_COUNT_INVALID: Final = (
+        "run-outcome SourceKey line count is inconsistent"
+    )
+    RUN_OUTCOME_RECORD_CONTOUR_INVALID: Final = (
+        "run-outcome HTTP record has an invalid contour"
+    )
+    RUN_OUTCOME_ATTEMPT_LINK_INVALID: Final = "run-outcome attempt linkage is invalid"
+    BACKEND_START_FLAGS_REQUIRED: Final = (
+        "Full Backend requires exactly one of --new or --resume/--continue"
+    )
+    BACKEND_RECREATE_PROMPT: Final = (
+        "Recreate the AI augment detour database from the replay log? [y/N] "
+    )
+    BACKEND_RESUME_PROMPT: Final = (
+        "Resume the AI augment detour database without rebuilding? [y/N] "
+    )
+    BACKEND_NONEMPTY_REPLAY_PROMPT: Final = (
+        "Registered a nonempty replay log. Replay it into the new database? [y/N] "
+    )
+    SOURCE_RESEARCHERS_LOADING_LOG: Final = (
+        "Loading researchers from read-only source DB: %s"
+    )
+    PULL_ACCEPTED_DESCRIPTION: Final = (
+        "Accepted submission, followed by ground truth if available."
+    )
+    PUSH_PROCESSING_DESCRIPTION: Final = (
+        "Accepted submission is still being processed; retry after one second."
+    )

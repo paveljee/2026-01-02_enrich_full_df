@@ -34,6 +34,21 @@ detour-mode0-econ-stats = [
   "kaleido==0.2.1",
   "plotly==6.6.0",
 ]
+detour-ai-augment = [
+  "fastapi==0.140.0",
+  "flask==3.1.2",
+  "uvicorn==0.51.0",
+  "pydantic==2.13.4",
+  "httpx2==2.12.0",  # for starlette
+  "nicegui==3.13.0",
+  "playwright==1.62.0",
+  "pytest-bdd==8.1.0",
+  "pydantic-extra-types==2.11.1",
+  "pycountry==24.6.1",
+  "pandas-stubs==3.0.5.260730",
+  "types-psutil==7.2.2.20260906",
+  "types-lxml==2026.2.16",
+]
 
 # ============
 # Tool configs
@@ -46,6 +61,12 @@ norecursedirs = [
     "tmp",  # retained runtime/test artifacts, not test sources
     "logs",  # includes copied diagnostic/test artifact bundles
     "tests/test_detours",  # can run via `pixi run test tests/test_detours`
+    "src/detours/detour_ai_augment/tests",
+    "src/detours/detour_ai_augment/protected/tests",
+    # never testing sample deploy here as it's not part of codebase
+    "src/detours/detour_ai_augment/protected/src/llm_inference_api/sample_deploy",
+    # bdd is on pause now and stale and not actively worked on
+    "src/detours/detour_ai_augment/protected/tests/bdd",
 ]
 markers = [
     "slow: long-running integration tests against real config/data",
@@ -56,12 +77,26 @@ markers = [
 line-length = 100
 target-version = "py314"
 preview = true
+# simple exclude would drop ruff defaults
+extend-exclude = [
+  # see exclusion reasons under pytest above
+  "src/detours/detour_ai_augment/protected/src/llm_inference_api/sample_deploy",
+  "src/detours/detour_ai_augment/protected/tests/bdd",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 ignore = [
   "E731",  # allows to assign a `lambda` expressions instead of using a `def`,
            # which may be neat for defining a global executable rule
+]
+
+[tool.ruff.lint.per-file-ignores]
+# This source is embedded verbatim in client instructions; keep its formatting intact.
+"src/detours/detour_ai_augment/protected/src/backend/helpers/data_models/pydantic_to_paste.py" = [
+  "E302",  # Expected 2 blank lines
+  "E305",  # Top-level functions and classes must be separated by 2 blank lines
+  "E501",  # Line too long
 ]
 
 [tool.mypy]
@@ -73,6 +108,10 @@ python_version = "3.14"
 ignore_missing_imports = true
 plugins = ["pydantic.mypy"]
 warn_unused_ignores = true
+# AI augment detour has its own strict mypy config
+exclude = [
+    "src/detours/detour_ai_augment/",
+]
 
 # ==================
 # Pixi Environments
@@ -88,6 +127,11 @@ features = []
 no-default-feature = false
 features = [
   "detour-mode0-econ-stats",
+]
+[tool.pixi.environments.detour-ai-augment]
+no-default-feature = false
+features = [
+  "detour-ai-augment",
 ]
 
 # =======================
@@ -105,6 +149,17 @@ python = "==3.14.2"
 duckdb = "==1.5.1"
 pandoc = "==3.7.0.2"
 bun = "==1.4.2"
+
+[tool.pixi.feature.detour-ai-augment.target.linux.dependencies]
+alsa-lib = "*"
+at-spi2-atk = "*"
+at-spi2-core = "*"
+"atk-1.0" = "*"
+mesalib = "*"
+xorg-libxcomposite = "*"
+xorg-libxdamage = "*"
+xorg-libxfixes = "*"
+xorg-libxrandr = "*"
 
 # ======================
 # Default: Generic tasks
@@ -149,10 +204,15 @@ args = [
 cmd = "mypy {{ module_names }}"
 cwd = "."
 
+[tool.pixi.tasks.mypy-detour-ai-augment]
+cmd = "mypy --config-file src/detours/detour_ai_augment/mypy.ini src/detours/detour_ai_augment"
+cwd = "."
+
 [tool.pixi.tasks.lint]
 depends-on = [
   { task = "ruff", environment = "default" },
   { task = "mypy", environment = "default" },
+  { task = "mypy-detour-ai-augment", environment = "detour-ai-augment" },
 ]
 
 # ====================================
@@ -239,7 +299,7 @@ args = [
   { arg = "html_diff_path" },
 ]
 cmd = """
-bun install --frozen-lockfile --silent && diff -u -- "{{ old_file_path }}" "{{ new_file_path }}" | bunx --bun diff2html-cli -i stdin -s line -d char --lm words -F "{{ html_diff_path }}" && python -c '
+bun install --frozen-lockfile --silent && diff -U 999999 -- "{{ old_file_path }}" "{{ new_file_path }}" | bunx --bun diff2html-cli -i stdin -s line -d char --lm words -F "{{ html_diff_path }}" && python -c '
 from pathlib import Path
 from sys import argv
 out = Path(argv[1])
@@ -269,6 +329,7 @@ depends-on = [
   { task = "test-detour-step4-breakdown", environment = "default" },
   { task = "test-detour-mode3-pgf-stats", environment = "default" },
   { task = "test-detour-mode0-econ-stats", environment = "detour-mode0-econ-stats" },
+  { task = "test-detour-ai-augment", environment = "detour-ai-augment" },
 ]
 
 [tool.pixi.tasks.pre-commit]
@@ -304,7 +365,72 @@ depends-on = [
 [tool.pixi.tasks.pre-commit-extra]
 depends-on = [
   { task = "test-repl-extra", environment = "default" },
+  { task = "test-detour-ai-augment-root", environment = "detour-ai-augment" },
+  { task = "test-detour-ai-augment-operator", environment = "detour-ai-augment" },
 ]
+
+[tool.pixi.tasks.pre-commit-extra-operator]
+cwd = "."
+# run all in lima except operator tests.
+# using bash -c so that pixi does not
+# exit on first failed command.
+cmd = """
+bash -c '
+  if [ "$(uname -s)" != Darwin ]; then
+    echo "ERROR: run on a macOS host; it dispatches guest checks to Lima" >&2
+    exit 1
+  fi
+  limactl shell aicode -- bash -c '"'"'
+    export PATH="$HOME/.pixi/bin:$PATH"
+    script -e -c "
+      {
+        pixi run test-repl-extra &&
+        pixi run test-detour-ai-augment-root
+      } 2>&1
+    " logs/pre-commit-extra.log &&
+    ! grep -q "FAILED" logs/pre-commit-extra.log &&
+    echo "grep: no FAILED"
+  '"'"'
+  # note the use of BSD-style script on macOS
+  script -a \
+    logs/pre-commit-extra.log \
+    bash -c '"'"'pixi run test-detour-ai-augment-operator 2>&1'"'"'
+'
+"""
+
+[tool.pixi.tasks.pre-commit-operator]
+cwd = "."
+# run all in lima except operator tests and
+# except test_ui_e2e.py (because it intends
+# to test real prod macos chrome).
+# using bash -c so that pixi does not
+# exit on first failed command.
+cmd = """
+bash -c '
+  if [ "$(uname -s)" != Darwin ]; then
+    echo "ERROR: run on a macOS host; it dispatches guest checks to Lima" >&2
+    exit 1
+  fi
+  limactl shell aicode -- bash -c '"'"'
+    export PATH="$HOME/.pixi/bin:$PATH"
+    # exclude test_ui_e2e.py from lima
+    export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+$PYTEST_ADDOPTS }--ignore=src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py"
+    script -e -c "
+      {
+        pixi run pre-commit
+      } 2>&1
+    " logs/pre-commit.log &&
+    ! grep -q "FAILED" logs/pre-commit.log &&
+    echo "grep: no FAILED"
+  '"'"'
+  # run test_ui_e2e.py on a real macos chrome
+  script -a \
+    logs/pre-commit.log \
+    bash -c '"'"'pixi run -e detour-ai-augment python -m pytest -vv -srA \
+      src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py 2>&1'"'"'
+  pixi run pre-commit-extra-operator
+'
+"""
 
 # =======================
 # Default: Test coverage
@@ -342,3 +468,988 @@ depends-on = [
 test-detour-mode0-econ-stats = [
   { task = "test", args = ["tests/test_detours/test_detour_mode0_econ_stats.py"], environment = "detour-mode0-econ-stats" },
 ]
+
+# ==================
+# Detour: AI Augment
+# ==================
+
+# Feature tasks auto execute in its dedicated environment;
+# above this didn't apply because we were using the "test"
+# task defined within the default feature, and so we needed
+# to specify the environment to use.
+
+[tool.pixi.feature.detour-ai-augment.tasks]
+serve = """
+bash -c '
+  set -e
+  MODE_OR_NAMEKEY="$1"
+  test -n "$MODE_OR_NAMEKEY" || {
+    echo "ERROR: namekey argument or --ipc-only is required" >&2
+    echo "Usage: pixi run -e detour-ai-augment serve --ipc-only OR serve <namekey> (--new|--resume|--continue) [--yes]" >&2
+    exit 1
+  }
+
+  case "$MODE_OR_NAMEKEY" in
+    --new|--resume|--continue)
+      echo "ERROR: namekey must be passed before $MODE_OR_NAMEKEY" >&2
+      echo "Usage: pixi run -e detour-ai-augment serve <namekey> (--new|--resume|--continue) [--yes]" >&2
+      exit 1
+      ;;
+  esac
+
+  shift
+  export FASTAPI_DETOUR_DASHBOARD_SOCKET="/tmp/detour-manual-${UID}.sock"
+
+  if test "$MODE_OR_NAMEKEY" = "--ipc-only"; then
+    pixi run -e detour-ai-augment \
+      python -m src.detours.detour_ai_augment.protected.src.backend.server \
+      --config config_ai_augment.json \
+      --ipc-only "$@"
+    exit
+  fi
+
+  NAMEKEY="$MODE_OR_NAMEKEY"
+
+  ARGS=()
+  for arg in "$@"; do
+    if test "$arg" = "--continue"; then
+      ARGS+=(--resume)
+    else
+      ARGS+=("$arg")
+    fi
+  done
+
+  export OPENALEX_API_KEY="$(
+    pixi run -e detour-ai-augment python -c '"'"'
+  import os
+  from dotenv import dotenv_values
+  path = os.path.join(os.environ["PIXI_PROJECT_ROOT"], ".env")
+  print(dotenv_values(path).get("OPENALEX_API_KEY", ""), end="")
+  '"'"'
+  )"
+
+  test -n "$OPENALEX_API_KEY" || {
+    echo "ERROR: OPENALEX_API_KEY is missing from .env" >&2
+    exit 1
+  }
+
+  export FASTAPI_DETOUR_NAMEKEY="$NAMEKEY"
+  export FASTAPI_DETOUR_APPENDWATCH_REPORT='"'"'/Volumes/home/aicode/aivm/home/ai/.aivm-control/appendwatch/appendwatch-tree.txt'"'"'
+  export FASTAPI_DETOUR_CODEX_SESSIONS_DIR='"'"'/home/ai/.codex/sessions'"'"'
+  export FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519"
+
+  pixi run -e detour-ai-augment \
+    python -m src.detours.detour_ai_augment.protected.src.backend.server \
+    --config config_ai_augment.json "${ARGS[@]}"
+' --
+"""
+dashboard = """
+FASTAPI_DETOUR_DASHBOARD_SOCKET="/tmp/detour-manual-$(id -u).sock" \
+FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519" \
+OPENALEX_API_KEY="$(python -c '
+import os
+from dotenv import dotenv_values
+
+env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
+print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
+')" python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui \
+  --config config_ai_augment.json
+"""
+# provision a worktree first:
+# git worktree add --detach /tmp/detour-api-9a187d3 9a187d3fc497bef6d1568b885b33f0a834607d22
+# cp ./.env /tmp/detour-api-9a187d3; mkdir -p /tmp/detour-api-9a187d3/tmp && cp ./tmp/sheikh.jsonl /tmp/detour-api-9a187d3/tmp/sheikh.jsonl
+#serve = "cd /tmp/detour-api-9a187d3 && python -m src.detours.detour_ai_augment.protected.src.backend.server --config config_ai_augment.json"
+# don't forget to clean up afterwards:
+# rm -f /tmp/detour-api-9a187d3
+test-detour-ai-augment = """
+bash -c '
+export APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/protected/src/control_centre/appendwatch/appendwatch.py"
+export APPENDWATCH_PYTHON="$CONDA_PREFIX/bin/python"
+export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
+"$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m "not needs_sudo" \
+  src/detours/detour_ai_augment/tests \
+  src/detours/detour_ai_augment/protected/tests/backend \
+  src/detours/detour_ai_augment/protected/tests/operator/test_operator_e2e_preflight.py && \
+"$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m real_api \
+  src/detours/detour_ai_augment/protected/tests/backend/pydantic_to_paste/test_pydantic_to_paste.py::test_academic_institution_round_trips_against_real_apis
+status=$?
+echo "NOTE: root tests need to be run separately with test-detour-ai-augment-root"
+echo "NOTE: operator tests need to be run separately with test-detour-ai-augment-operator"
+exit "$status"
+'
+"""
+elevate = """
+bash -c 'LOG_PATH="$PIXI_PROJECT_ROOT/logs/from_operator/elevate.log"
+script -q -e -c '"'"'task_status=0
+echo "Nothing to elevate" || task_status=1
+exit "$task_status"
+'"'"' "$LOG_PATH"
+task_status=$?
+grep -n -- "FAILED" "$LOG_PATH"
+grep_status=$?
+case "$grep_status" in
+  0) echo "grep: FAILED matches shown above ($LOG_PATH)" ;;
+  1) echo "grep: no FAILED ($LOG_PATH)" ;;
+  *) echo "grep: could not inspect $LOG_PATH" >&2; task_status=1 ;;
+esac
+echo "Test output: $LOG_PATH"
+exit "$task_status"
+'
+"""
+test-detour-ai-augment-root = """
+sudo -k env \
+  APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/protected/src/control_centre/appendwatch/appendwatch.py" \
+  APPENDWATCH_PYTHON="$CONDA_PREFIX/bin/python" \
+  PATH="$CONDA_PREFIX/bin:$PATH" \
+  PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" \
+  "$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m needs_sudo \
+  src/detours/detour_ai_augment/protected/tests/backend
+"""
+test-detour-ai-augment-operator = """
+FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519" \
+OPENALEX_API_KEY="$(python -c '
+import os
+from dotenv import dotenv_values
+
+env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
+print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
+')" "$CONDA_PREFIX/bin/python" -m pytest -vv -srA --capture=tee-sys -m operator \
+  src/detours/detour_ai_augment/protected/tests/operator/test_operator_e2e.py
+"""
+# test-detour-ai-augment-bdd-hermetic = """
+# "$CONDA_PREFIX/bin/python" -m pytest -vv -srA \
+#   -m "not needs_sudo and not operator" \
+#   src/detours/detour_ai_augment/tests/test_detour_ai_augment_bdd.py
+# """
+# test-detour-ai-augment-bdd-root = """
+# sudo env \
+#   APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/src/control_centre/appendwatch/appendwatch.py" \
+#   APPENDWATCH_PYTHON="/usr/bin/python3" \
+#   PATH="$CONDA_PREFIX/bin:$PATH" \
+#   "$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m needs_sudo \
+#   src/detours/detour_ai_augment/tests/test_detour_ai_augment_bdd.py
+# """
+# test-detour-ai-augment-bdd-operator = """
+# FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519" \
+# OPENALEX_API_KEY="$(python -c '
+# import os
+# from dotenv import dotenv_values
+
+# env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
+# print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
+# ')" "$CONDA_PREFIX/bin/python" -m pytest -vv -srA --capture=tee-sys -m operator \
+#   src/detours/detour_ai_augment/tests/test_detour_ai_augment_bdd.py
+# """
+# test-detour-ai-augment-bdd = """
+# bash -c '
+# set -e
+# limactl shell aicode -- bash -c '"'"'
+#   set -e
+#   export PATH="$HOME/.pixi/bin:$PATH"
+#   pixi run -e detour-ai-augment test-detour-ai-augment-bdd-hermetic
+#   pixi run -e detour-ai-augment test-detour-ai-augment-bdd-root
+# '"'"'
+# pixi run -e detour-ai-augment test-detour-ai-augment-bdd-operator
+# '
+# """
+
+[tool.pixi.feature.detour-ai-augment.tasks.duckdb-export]
+args = [
+  { arg = "input_path", default = "data/scisci_process__detour_ai-augment.duckdb" },
+  { arg = "output_path", default = "data/scisci_process__detour_ai-augment.export" },
+  { arg = "config_path", default = "config_ai_augment.json" },
+]
+cmd = """
+python -c '
+import sys, duckdb
+from pathlib import Path
+from src.helpers.duckdb_extensions import load_duckdb_extension_from_config_path
+
+input_path = sys.argv[1]
+output_path = Path(sys.argv[2])
+config_path = Path(sys.argv[3])
+
+if output_path.exists():
+    sys.exit(f"Export path already exists: {output_path}")
+
+# using chr(39) to avoid conflict with outer single quote
+output_path_str = str(output_path)
+output_path_safe = (
+    chr(39)
+    + output_path_str.replace(chr(39), chr(39) + chr(39))
+    + chr(39)
+)
+
+con = duckdb.connect(input_path, read_only=True)
+try:
+    load_duckdb_extension_from_config_path(con, "splink_udfs", config_path)
+    con.sql(f"EXPORT DATABASE {output_path_safe} (FORMAT csv)")
+finally:
+    con.close()
+
+print(f"Exported {input_path!r} to {str(output_path)!r}")
+' "{{ input_path }}" "{{ output_path }}" "{{ config_path }}"
+"""
+cwd = "."
+
+[tool.pixi.feature.detour-ai-augment.tasks.preview-publish]
+description = '''Usage: pixi run -e detour-ai-augment preview-publish tmp/test.ujpfoijf '{"ktp.first_name":"Antoine","ktp.last_name":"Guisan"}' (uses copied retained NiceGUI storage)'''
+cmd = '''
+python -c '
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+from src.detours.detour_ai_augment.protected.tests.pytest_plugin import nicegui_test_environment
+
+run_dir = Path(sys.argv[1]).resolve()
+with tempfile.TemporaryDirectory(prefix="preview-publish-", dir="tmp") as directory:
+    storage_path = Path(directory) / "nicegui"
+    storage_path.mkdir()
+    shutil.copy2(run_dir / "nicegui" / "storage-general.json", storage_path)
+    script = r"""
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import CARD_EXCLUDED_COLUMNS
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
+    Locale,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
+    selected_card_outer_dict,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.ai_augment_dashboard_storage import (  # noqa: E501
+    AiAugmentDashboardStorage,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.render import (
+    ai_augment_field_renderer,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.ui import _ResearcherCardView
+from src.helpers.cards import build_cards
+from src.helpers.data_models import NameKey
+from src.helpers.vars import CARD_INTRODUCTION
+
+SNAPSHOT_MISSING_ERROR = "Dashboard has no query snapshot"
+COMPLETED_AI_RUN_REQUIRED_ERROR = "Researcher needs a completed AI run"
+TASK_SUFFIX = "_preview"
+
+namekey = NameKey.from_json_key(sys.argv[1])
+config = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+snapshot = AiAugmentDashboardStorage().load_query_snapshot()
+if snapshot is None:
+    raise ValueError(SNAPSHOT_MISSING_ERROR)
+researcher = snapshot.researchers_by_namekey[namekey.to_json_key()]
+if not researcher.codex_innerdicts:
+    raise ValueError(COMPLETED_AI_RUN_REQUIRED_ERROR)
+
+cards = build_cards(
+    selected_card_outer_dict(researcher),
+    total_draws=config["total_draws"],
+    intro=CARD_INTRODUCTION.format(
+        datetime.now(ZoneInfo(config["timezone"])).strftime(
+            Locale.CARD_INTRO_DATE_FORMAT
+        )
+    ),
+    excluded_cols=CARD_EXCLUDED_COLUMNS,
+    field_renderer=ai_augment_field_renderer(researcher),
+)
+if len(cards) != 1:
+    raise RuntimeError(Locale.BACKEND_CARD_MISSING)
+card = _ResearcherCardView(
+    researcher=researcher,
+    card_markdown=next(iter(cards.values())),
+)
+
+markdown_path = Path("tmp") / f"{card.filename_stem}{TASK_SUFFIX}.md"
+docx_path = markdown_path.with_suffix(".docx")
+markdown_path.write_text(card.card_markdown, encoding="utf-8", newline="\n")
+docx_path.write_bytes(card.render_docx(Path(config["pandoc_reference_docx"])))
+print(markdown_path.resolve())
+print(docx_path.resolve())
+"""
+    subprocess.run(
+        [sys.executable, "-c", script, sys.argv[2], str(run_dir / "config.operator.json")],
+        check=True,
+        env=nicegui_test_environment(storage_path),
+    )
+'
+'''
+cwd = "."
+
+
+# This takes in small diagnostic partition artifacts
+# together with full unzipped "txt" outputs across
+# two main pipeline runs and interprets the diff
+# in partition counts and, ultimately, eligibility
+# cohorts for the AI augmentation detour.
+# It is needed if source files change and the main
+# pipeline rearranges namekeys between partitions.
+[tool.pixi.feature.detour-ai-augment.tasks.cohort-migration-calculator]
+description = '''Usage: pixi run -e detour-ai-augment cohort-migration-calculator tmp/20261020_134940_mode0_run_from_reconciled_ai_augment/step_artifacts/10_build_cards_card_partitions_df.csv tmp/20261028_142639_mode0_run_post_detour_ai_augment_rc1/step_artifacts/10_build_cards_card_partitions_df.csv tmp/hcr_cards_subset0_20261020T1749Z_run_from_reconciled_ai_augment tmp/hcr_cards_subset0_20261028T1826Z_run_post_detour_ai_augment_rc1 --config config_ai_augment.json'''
+args = [{ arg = "before_csv" }, { arg = "after_csv" }, { arg = "before_cards_dir" }, { arg = "after_cards_dir" }, { arg = "config_flag" }, { arg = "config_path" }]
+cmd = """
+python -B -c '
+import csv
+import json
+import os
+import sys
+import tempfile
+from collections import Counter
+from pathlib import Path
+from types import SimpleNamespace
+from typing import NamedTuple
+
+OPEN_TEXT = {"mode": "r", "encoding": "utf-8"}
+OPEN_CSV = {**OPEN_TEXT, "newline": ""}
+CONFIG_FILES_KEY = "files_config"
+CONFIG_PATH_KEY = "path"
+CONFIG_FLAG = "--config"
+CARD_GLOB = "*.txt"
+CARD_TITLE_PREFIX = "### Draw #"
+CARD_TITLE_DELIMITERS = (": ", ", ")
+REPORT_DATE_PREFIX = "Date of report: "
+IGNORED_REPORT_DATE = "Date of report: <ignored>"
+CSV_TRUE, CSV_FALSE = "True", "False"
+POLICY_GLOBAL_NAMES = (
+    "NO_GROUND_TRUTH_PARTITION",
+    "NO_GROUND_TRUTH_SSN_COUNT",
+)
+EXPECTED_COUNT_GLOBAL_NAMES = (
+    "EXPECTED_GROUND_TRUTH_RESEARCHERS",
+    "EXPECTED_NO_GROUND_TRUTH_RESEARCHERS",
+    "EXPECTED_ELIGIBLE_RESEARCHERS",
+    "EXPECTED_INELIGIBLE_RESEARCHERS",
+    "EXPECTED_SOURCE_RESEARCHERS",
+)
+cohort_label = lambda cohort: cohort.value.replace("_", " ")
+
+TEXT = SimpleNamespace(
+    MAP_COLUMNS="Unexpected release-map columns: {path}",
+    MAP_BLANK="Blank release-map entry: {path}",
+    MAP_CONFLICT="Conflicting release batch for draw {draw}",
+    MAP_EMPTY="Empty release map: {path}",
+    DUPLICATE_NAMEKEY="Duplicate namekey in {path}",
+    CARD_FORMAT="Unexpected card format: {path}",
+    CARD_TITLE="Unexpected card title: {path}",
+    DUPLICATE_CARD="Duplicate card namekey: {key}",
+    CARD_DRAWS="Card has no draw numbers: {path}",
+    COHORT_OVERLAP="Ground-truth and no-ground-truth cohorts overlap for {key}",
+    CLI_USAGE="Supply before/after partition CSVs, before/after card directories, and --config PATH",
+    POPULATION="The CSVs must contain the same expected researcher population",
+    COLUMNS="The CSVs must have the same columns",
+    CARD_NAMEKEYS="Card directories and partition CSVs have different namekeys",
+    DRAW_MISSING="Step 10 draw number is absent from a card",
+    EXCLUDED_DUPLICATE="excluded duplicate namekey",
+    EXCLUDED_RELEASE_BATCH="excluded release batch",
+    SSN_RESOLUTION="SSN resolution required",
+    XLSX_NON_EXACT="non-exact XLSX match",
+    MULTIPLE_SSN="{count} SSN matches",
+    UNCLASSIFIED_REASON="no configured ineligibility category; backend would reject",
+    NOT_APPLICABLE="not applicable",
+    UNCLASSIFIED="unclassified",
+    YES="yes",
+    NO="no",
+    ELIGIBLE="eligible",
+    NOT_ELIGIBLE="not eligible",
+    CHANGED="changed",
+    NO_TRANSITION="no transition",
+    TRANSITION="{old} → {new}",
+    UNCHANGED="no transition ({value})",
+    INELIGIBILITY_DETAIL="{category}: {reason}",
+    CURRENT_GLOBALS="Current globals:",
+    CURRENT_GLOBAL="  {name} = {value}",
+    CURRENT_CATEGORIES="  EXPECTED_INELIGIBILITY_COUNTS:",
+    CURRENT_CATEGORY="    {category}: {count}",
+    BASELINE_NO_GT="Before snapshot has {actual} no-ground-truth researchers; the current global expects {expected}.",
+    BASELINE_GT="Before snapshot has {actual} ground-truth researchers; the current global expects {expected}.",
+    PARTITION_SIZES="Partition sizes:",
+    PARTITION_SIZE="  {partition}: {movement}",
+    MODE_COUNTS="Mode eligibility counts:",
+    MODE_COUNT="  Mode {mode}: {movement}",
+    PARTITION_MOVES="Partition moves:",
+    EMPTY_MOVES="  no transition",
+    PARTITION_MOVE="  {movement}: {count} researchers",
+    AFFECTED="Affected researchers: {total} ({cards} changed cards, {rows} changed Step 10 rows)",
+    CARD_HEADING="  Draw {draw} — {first} {last}",
+    CARD_STATUS="    {label}: {value}",
+    PARTITION="Partition",
+    GROUND_TRUTH_MEMBERSHIP="Ground-truth membership",
+    NO_GROUND_TRUTH_MEMBERSHIP="No-ground-truth membership",
+    ELIGIBILITY_CATEGORY="Eligibility category",
+    INELIGIBILITY_REASON="Ineligibility reason",
+    MODE_ELIGIBILITY="Mode {mode} eligibility",
+    CARD_TEXT="Card text",
+    OTHER_FIELDS="Other Step 10 fields",
+    COHORT_TRANSITIONS="Eligibility-category transitions among affected researchers:",
+    COHORT_MOVE="  {movement}: {count}",
+    SUMMARY_COUNT="{label}: {count}",
+    CARD_ONLY="Card-only changes",
+    STEP10_ONLY="Step 10-only changes",
+    MEMBERSHIP_COUNT="{label}: {movement} ({entered} entered, {left} left)",
+    PROJECTED_GLOBALS="Projected globals using the configured release-batch map:",
+    PROJECTED_COUNT="  {name}: {movement}",
+    CATEGORY_COUNTS="Ineligibility categories, before → after:",
+    CATEGORY_COUNT="  {category}: {movement}",
+)
+
+# The globals import calls gettempdir(); bypass its write-based directory probe.
+tempfile.tempdir = os.environ.get("TMPDIR") or "/tmp"
+from src.detours.detour_ai_augment.protected.src.backend.helpers import vars as v
+from src.helpers.vars import (
+    CARD_BUILD_SUBSET_DESCRIPTIONS,
+    DRAW_LABEL,
+    KTP_FIRST_NAME_COL,
+    KTP_LAST_NAME_COL,
+    KTP_NAMEKEY_COL,
+    KTP_PARTITION_COL,
+    KTP_PARTITION_DOCX_VALUE,
+    KTP_PARTITION_NO_RESOLUTION_VALUE,
+    KTP_PARTITION_FLAG_DOCX_ANY_COL,
+    KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL,
+    KTP_PARTITION_FLAG_SSN_COUNT_COL,
+    KTP_PARTITION_FLAG_XLSX_ANY_COL,
+    KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
+    KTP_PARTITION_SSN_VALUE,
+    KTP_PARTITION_XLSX_VALUE,
+)
+from src.steps.step_10_build_cards import _mode_matches
+
+MODES = tuple(sorted(CARD_BUILD_SUBSET_DESCRIPTIONS))
+CARD_DRAW_PREFIX = f"**`{DRAW_LABEL}`**: "
+
+def release_batches(config_path):
+    with Path(config_path).open(**OPEN_TEXT) as source:
+        config = json.load(source)
+    map_path = Path(config[CONFIG_FILES_KEY][v.MAP_SUBSET_0_TO_BATCH_KEY][CONFIG_PATH_KEY])
+    with map_path.open(**OPEN_CSV) as source:
+        reader = csv.DictReader(source)
+        if tuple(reader.fieldnames or ()) != v.MAP_COLUMNS:
+            raise ValueError(TEXT.MAP_COLUMNS.format(path=map_path))
+        draw_column, batch_column = v.MAP_COLUMNS
+        batches = {}
+        for row in reader:
+            draw, batch = row[draw_column], row[batch_column]
+            if not v.VALID_NONBLANK(draw) or not v.VALID_NONBLANK(batch):
+                raise ValueError(TEXT.MAP_BLANK.format(path=map_path))
+            if draw in batches and batches[draw] != batch:
+                raise ValueError(TEXT.MAP_CONFLICT.format(draw=draw))
+            batches[draw] = batch
+    if not batches:
+        raise ValueError(TEXT.MAP_EMPTY.format(path=map_path))
+    return batches
+
+def load(path):
+    with Path(path).open(**OPEN_CSV) as source:
+        records = list(csv.DictReader(source))
+    rows = {record[KTP_NAMEKEY_COL]: record for record in records}
+    if len(rows) != len(records):
+        raise ValueError(TEXT.DUPLICATE_NAMEKEY.format(path=path))
+    return rows
+
+def cards(directory):
+    result = {}
+    draws_by_key = {}
+    for path in Path(directory).glob(CARD_GLOB):
+        with path.open(**OPEN_TEXT) as source:
+            lines = source.read().splitlines()
+        title = next((line for line in lines[:16] if line.startswith(CARD_TITLE_PREFIX)), None)
+        dates = [i for i, line in enumerate(lines[:16]) if line.startswith(REPORT_DATE_PREFIX)]
+        if title is None or len(dates) != 1:
+            raise ValueError(TEXT.CARD_FORMAT.format(path=path))
+        try:
+            last, first = title.split(CARD_TITLE_DELIMITERS[0], 1)[1].rsplit(CARD_TITLE_DELIMITERS[1], 1)
+        except ValueError as exc:
+            raise ValueError(TEXT.CARD_TITLE.format(path=path)) from exc
+        key = json.dumps({KTP_FIRST_NAME_COL: first, KTP_LAST_NAME_COL: last}, sort_keys=True)
+        if key in result:
+            raise ValueError(TEXT.DUPLICATE_CARD.format(key=key))
+        draws = {line.removeprefix(CARD_DRAW_PREFIX).strip() for line in lines if line.startswith(CARD_DRAW_PREFIX)}
+        if not draws:
+            raise ValueError(TEXT.CARD_DRAWS.format(path=path))
+        draws_by_key[key] = tuple(sorted(draws))
+        lines[dates[0]] = IGNORED_REPORT_DATE
+        result[key] = tuple(lines)
+    return result, draws_by_key
+
+def no_ground_truth(rows):
+    return {
+        key
+        for key, row in rows.items()
+        if v.NO_GROUND_TRUTH_DEF(
+            int(row[KTP_PARTITION_COL]),
+            row[KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL] == CSV_TRUE,
+            int(row[KTP_PARTITION_FLAG_SSN_COUNT_COL]),
+        )
+    }
+
+def mode_eligibility(row):
+    sciscinet_exactly_one_ok = int(row[KTP_PARTITION_FLAG_SSN_COUNT_COL]) == 1
+    xlsx_exact_ok = row[KTP_PARTITION_FLAG_XLSX_ANY_COL] == CSV_TRUE and row[KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL] == CSV_FALSE
+    docx_complete_ok = row[KTP_PARTITION_FLAG_DOCX_ANY_COL] == CSV_TRUE and row[KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL] == CSV_TRUE
+    return {
+        mode: _mode_matches(
+            mode,
+            sciscinet_exactly_one_ok=sciscinet_exactly_one_ok,
+            xlsx_exact_ok=xlsx_exact_ok,
+            docx_complete_ok=docx_complete_ok,
+        )
+        for mode in MODES
+    }
+
+class Eligibility(NamedTuple):
+    cohort: v.AiAugmentCohort
+    category: v.AiAugmentIneligibilityCategory | None
+    reason: str | None
+
+def assess(key, row, draws, batches, ground_truth, no_ground_truth):
+    if key in ground_truth and key in no_ground_truth:
+        raise ValueError(TEXT.COHORT_OVERLAP.format(key=key))
+    if key in ground_truth:
+        return Eligibility(v.AiAugmentCohort.GROUND_TRUTH, None, None)
+    if key in no_ground_truth:
+        return Eligibility(v.AiAugmentCohort.NO_GROUND_TRUTH, None, None)
+    category = v.AiAugmentIneligibilityCategory
+    partition = int(row[KTP_PARTITION_COL])
+    ssn_count = int(row[KTP_PARTITION_FLAG_SSN_COUNT_COL])
+    if key == v.EXCLUDED_NAMEKEY:
+        return Eligibility(v.AiAugmentCohort.INELIGIBLE, category.EXCLUDED_DUPLICATE_NAMEKEY, TEXT.EXCLUDED_DUPLICATE)
+    if any(batches.get(draw) == v.INELIGIBLE_RELEASE_BATCH for draw in draws):
+        return Eligibility(v.AiAugmentCohort.INELIGIBLE, category.RELEASE_BATCH_SUBSET_8, TEXT.EXCLUDED_RELEASE_BATCH)
+    if partition == KTP_PARTITION_SSN_VALUE:
+        return Eligibility(v.AiAugmentCohort.INELIGIBLE, category.STAGING_PARTITION_2, TEXT.SSN_RESOLUTION)
+    if partition == KTP_PARTITION_DOCX_VALUE and row[KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL] == CSV_TRUE:
+        return Eligibility(v.AiAugmentCohort.INELIGIBLE, category.STAGING_PARTITION_4_XLSX_NON_EXACT, TEXT.XLSX_NON_EXACT)
+    if partition == KTP_PARTITION_DOCX_VALUE and ssn_count > v.NO_GROUND_TRUTH_SSN_COUNT:
+        return Eligibility(v.AiAugmentCohort.INELIGIBLE, category.STAGING_PARTITION_4_MULTIPLE_SSN, TEXT.MULTIPLE_SSN.format(count=ssn_count))
+    return Eligibility(v.AiAugmentCohort.INELIGIBLE, None, TEXT.UNCLASSIFIED_REASON)
+
+def ineligibility_detail(assessment):
+    if assessment.cohort != v.AiAugmentCohort.INELIGIBLE:
+        return TEXT.NOT_APPLICABLE
+    category = assessment.category.value if assessment.category is not None else TEXT.UNCLASSIFIED
+    return TEXT.INELIGIBILITY_DETAIL.format(category=category, reason=assessment.reason)
+
+yes_no = lambda value: TEXT.YES if value else TEXT.NO
+mode_label = lambda eligible: TEXT.ELIGIBLE if eligible else TEXT.NOT_ELIGIBLE
+transition = lambda old, new: TEXT.TRANSITION.format(old=old, new=new) if old != new else TEXT.UNCHANGED.format(value=old)
+
+if len(sys.argv) != 7 or sys.argv[5] != CONFIG_FLAG:
+    raise ValueError(TEXT.CLI_USAGE)
+before, after = map(load, sys.argv[1:3])
+if before.keys() != after.keys() or len(before) != v.EXPECTED_SOURCE_RESEARCHERS:
+    raise ValueError(TEXT.POPULATION)
+if next(iter(before.values())).keys() != next(iter(after.values())).keys():
+    raise ValueError(TEXT.COLUMNS)
+before_cards, before_draws = cards(sys.argv[3])
+after_cards, after_draws = cards(sys.argv[4])
+if before_cards.keys() != before.keys() or after_cards.keys() != after.keys():
+    raise ValueError(TEXT.CARD_NAMEKEYS)
+if any(before[key][DRAW_LABEL] not in before_draws[key] or after[key][DRAW_LABEL] not in after_draws[key] for key in before):
+    raise ValueError(TEXT.DRAW_MISSING)
+changed_cards = {key for key in before if before_cards[key] != after_cards[key]}
+
+changes = {
+    key: tuple(column for column in before[key] if before[key][column] != after[key][column])
+    for key in before
+    if before[key] != after[key]
+}
+old_no_gt, new_no_gt = no_ground_truth(before), no_ground_truth(after)
+batches = release_batches(sys.argv[6])
+old_gt = {key for key, draws in before_draws.items() if v.GROUND_TRUTH_DEF(key, batches, draws)}
+new_gt = {key for key, draws in after_draws.items() if v.GROUND_TRUTH_DEF(key, batches, draws)}
+old_status = {key: assess(key, before[key], before_draws[key], batches, old_gt, old_no_gt) for key in before}
+new_status = {key: assess(key, after[key], after_draws[key], batches, new_gt, new_no_gt) for key in after}
+
+print(TEXT.CURRENT_GLOBALS)
+for name in (*POLICY_GLOBAL_NAMES, *EXPECTED_COUNT_GLOBAL_NAMES):
+    print(TEXT.CURRENT_GLOBAL.format(name=name, value=getattr(v, name)))
+print(TEXT.CURRENT_CATEGORIES)
+for category, count in v.EXPECTED_INELIGIBILITY_COUNTS.items():
+    print(TEXT.CURRENT_CATEGORY.format(category=category.value, count=count))
+print(TEXT.BASELINE_NO_GT.format(actual=len(old_no_gt), expected=v.EXPECTED_NO_GROUND_TRUTH_RESEARCHERS))
+print(TEXT.BASELINE_GT.format(actual=len(old_gt), expected=v.EXPECTED_GROUND_TRUTH_RESEARCHERS))
+
+old_partitions = Counter(int(row[KTP_PARTITION_COL]) for row in before.values())
+new_partitions = Counter(int(row[KTP_PARTITION_COL]) for row in after.values())
+print(TEXT.PARTITION_SIZES)
+for partition in sorted(old_partitions.keys() | new_partitions.keys() | {
+    KTP_PARTITION_NO_RESOLUTION_VALUE,
+    KTP_PARTITION_XLSX_VALUE,
+    KTP_PARTITION_SSN_VALUE,
+    KTP_PARTITION_DOCX_VALUE,
+}):
+    old_count, new_count = old_partitions[partition], new_partitions[partition]
+    print(TEXT.PARTITION_SIZE.format(partition=partition, movement=transition(old_count, new_count)))
+
+old_modes = Counter(mode for row in before.values() for mode, eligible in mode_eligibility(row).items() if eligible)
+new_modes = Counter(mode for row in after.values() for mode, eligible in mode_eligibility(row).items() if eligible)
+print(TEXT.MODE_COUNTS)
+for mode in MODES:
+    print(TEXT.MODE_COUNT.format(mode=mode, movement=transition(old_modes[mode], new_modes[mode])))
+
+moves = Counter(
+    (before[key][KTP_PARTITION_COL], after[key][KTP_PARTITION_COL])
+    for key in changes
+    if before[key][KTP_PARTITION_COL] != after[key][KTP_PARTITION_COL]
+)
+print(TEXT.PARTITION_MOVES)
+if not moves:
+    print(TEXT.EMPTY_MOVES)
+for (old_partition, new_partition), count in sorted(
+    moves.items(), key=lambda item: tuple(map(int, item[0]))
+):
+    print(TEXT.PARTITION_MOVE.format(movement=transition(old_partition, new_partition), count=count))
+
+affected = changed_cards | changes.keys()
+print(TEXT.AFFECTED.format(total=len(affected), cards=len(changed_cards), rows=len(changes)))
+if not affected:
+    print(TEXT.EMPTY_MOVES)
+for key in sorted(affected, key=lambda key: (int(before[key][DRAW_LABEL]), key)):
+    old, new = before[key], after[key]
+    first_name, last_name = old[KTP_FIRST_NAME_COL], old[KTP_LAST_NAME_COL]
+    draw = old[DRAW_LABEL]
+    print(TEXT.CARD_HEADING.format(draw=draw, first=first_name, last=last_name))
+    old_partition, new_partition = old[KTP_PARTITION_COL], new[KTP_PARTITION_COL]
+    old_cohort, new_cohort = cohort_label(old_status[key].cohort), cohort_label(new_status[key].cohort)
+    print(TEXT.CARD_STATUS.format(label=TEXT.PARTITION, value=transition(old_partition, new_partition)))
+    print(TEXT.CARD_STATUS.format(label=TEXT.GROUND_TRUTH_MEMBERSHIP, value=transition(yes_no(key in old_gt), yes_no(key in new_gt))))
+    print(TEXT.CARD_STATUS.format(label=TEXT.NO_GROUND_TRUTH_MEMBERSHIP, value=transition(yes_no(key in old_no_gt), yes_no(key in new_no_gt))))
+    print(TEXT.CARD_STATUS.format(label=TEXT.ELIGIBILITY_CATEGORY, value=transition(old_cohort, new_cohort)))
+    print(TEXT.CARD_STATUS.format(label=TEXT.INELIGIBILITY_REASON, value=transition(ineligibility_detail(old_status[key]), ineligibility_detail(new_status[key]))))
+    old_modes_for_card, new_modes_for_card = mode_eligibility(old), mode_eligibility(new)
+    for mode in MODES:
+        print(TEXT.CARD_STATUS.format(label=TEXT.MODE_ELIGIBILITY.format(mode=mode), value=transition(mode_label(old_modes_for_card[mode]), mode_label(new_modes_for_card[mode]))))
+    card_text_status = TEXT.CHANGED if key in changed_cards else TEXT.NO_TRANSITION
+    print(TEXT.CARD_STATUS.format(label=TEXT.CARD_TEXT, value=card_text_status))
+    changed_fields = tuple(column for column in changes.get(key, ()) if column != KTP_PARTITION_COL)
+    print(TEXT.CARD_STATUS.format(label=TEXT.OTHER_FIELDS, value=TEXT.CHANGED if changed_fields else TEXT.NO_TRANSITION))
+    for column in changed_fields:
+        print(TEXT.CARD_STATUS.format(label=column, value=transition(old[column], new[column])))
+
+cohort_moves = Counter((old_status[key].cohort, new_status[key].cohort) for key in affected)
+print(TEXT.COHORT_TRANSITIONS)
+if not cohort_moves:
+    print(TEXT.EMPTY_MOVES)
+for (old_cohort, new_cohort), count in sorted(cohort_moves.items()):
+    old_label, new_label = cohort_label(old_cohort), cohort_label(new_cohort)
+    print(TEXT.COHORT_MOVE.format(movement=transition(old_label, new_label), count=count))
+print(TEXT.SUMMARY_COUNT.format(label=TEXT.CARD_ONLY, count=len(changed_cards - changes.keys())))
+print(TEXT.SUMMARY_COUNT.format(label=TEXT.STEP10_ONLY, count=len(changes.keys() - changed_cards)))
+print(TEXT.MEMBERSHIP_COUNT.format(label=TEXT.GROUND_TRUTH_MEMBERSHIP, movement=transition(len(old_gt), len(new_gt)), entered=len(new_gt - old_gt), left=len(old_gt - new_gt)))
+print(TEXT.MEMBERSHIP_COUNT.format(label=TEXT.NO_GROUND_TRUTH_MEMBERSHIP, movement=transition(len(old_no_gt), len(new_no_gt)), entered=len(new_no_gt - old_no_gt), left=len(old_no_gt - new_no_gt)))
+
+old_eligible = len(old_gt | old_no_gt)
+new_eligible = len(new_gt | new_no_gt)
+new_ineligible = len(after) - new_eligible
+print(TEXT.PROJECTED_GLOBALS)
+for name, (old_count, new_count) in zip(EXPECTED_COUNT_GLOBAL_NAMES, (
+    (len(old_gt), len(new_gt)),
+    (len(old_no_gt), len(new_no_gt)),
+    (old_eligible, new_eligible),
+    (len(before) - old_eligible, new_ineligible),
+    (len(before), len(after)),
+), strict=True):
+    print(TEXT.PROJECTED_COUNT.format(name=name, movement=transition(old_count, new_count)))
+
+def ineligibility_counts(assessments):
+    return Counter(
+        assessment.category.value if assessment.category is not None else TEXT.UNCLASSIFIED
+        for assessment in assessments.values()
+        if assessment.cohort == v.AiAugmentCohort.INELIGIBLE
+    )
+
+old_categories = ineligibility_counts(old_status)
+new_categories = ineligibility_counts(new_status)
+print(TEXT.CATEGORY_COUNTS)
+for category in sorted(old_categories.keys() | new_categories.keys() | {item.value for item in v.AiAugmentIneligibilityCategory} | {TEXT.UNCLASSIFIED}):
+    print(TEXT.CATEGORY_COUNT.format(category=category, movement=transition(old_categories[category], new_categories[category])))
+' "{{ before_csv }}" "{{ after_csv }}" "{{ before_cards_dir }}" "{{ after_cards_dir }}" "{{ config_flag }}" "{{ config_path }}"
+"""
+cwd = "."
+
+
+# Set OPENALEX_API_KEY if you need it:
+# ~~~
+# OPENALEX_API_KEY="$(pixi run python -c '
+# import os
+# from dotenv import dotenv_values
+
+# env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
+# print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
+# ')"
+# ~~~
+
+# ========================================
+# Experimental humandiff-based renders;
+# discontinued because did not look good.
+# ========================================
+#
+# [tool.pixi.feature.detour-ai-augment.tasks.eval-docx]
+# description = '''Usage: pixi run -e detour-ai-augment eval-docx '{"ktp.first_name":"Antoine","ktp.last_name":"Guisan"}' (uses current Dashboard storage)'''
+# cmd = """
+# python -c '
+# import json
+# import os
+# import re
+# import runpy
+# import sys
+# from datetime import datetime
+# from difflib import SequenceMatcher
+# from io import BytesIO
+# from pathlib import Path
+# from zoneinfo import ZoneInfo
+
+# from docx import Document
+# from docx.enum.text import WD_COLOR_INDEX
+# from docx.shared import RGBColor
+
+# from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+#     CARD_EXCLUDED_COLUMNS,
+#     DOCX_TO_AI_AUGMENT_COLUMNS,
+#     KTP_AI_AUGMENT_COMMENTS_COL,
+# )
+# from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
+#     Locale,
+# )
+# from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
+#     ai_augment_singular_outer_dict,
+# )
+# from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
+#     ai_augment_dashboard_storage,
+# )
+# from src.helpers.cards import build_cards, render_docx_bytes
+# from src.helpers.data_models import NameKey
+# from src.helpers.vars import CARD_INTRODUCTION
+
+# humandiff = runpy.run_path("tmp/humandiff_diff_helpers.py")
+# format_change = humandiff["format_change"]
+# preprocess = humandiff["preprocess"]
+# namekey = NameKey.from_json_key(sys.argv[1])
+# snapshot = ai_augment_dashboard_storage.AiAugmentDashboardStorage().load_query_snapshot()
+# if snapshot is None:
+#     raise ValueError("Dashboard has no query snapshot")
+# researcher = snapshot.researchers_by_namekey[namekey.to_json_key()]
+# ground_truth = snapshot.ground_truth_by_namekey.get(namekey.to_json_key())
+# if ground_truth is None or not researcher.codex_innerdicts:
+#     raise ValueError("Researcher needs both a completed AI run and DOCX ground truth")
+
+# config_path = Path(os.environ.get("AI_AUGMENT_EVAL_CONFIG", "config_ai_augment.json"))
+# config = json.loads(config_path.read_text(encoding="utf-8"))
+# intro = CARD_INTRODUCTION.format(
+#     datetime.now(ZoneInfo(config["timezone"])).strftime(Locale.CARD_INTRO_DATE_FORMAT)
+# )
+# original_cards = build_cards(
+#     ai_augment_singular_outer_dict.selected_card_outer_dict(researcher),
+#     total_draws=config["total_draws"],
+#     intro=intro,
+#     excluded_cols=CARD_EXCLUDED_COLUMNS,
+# )
+# original_card_markdown = next(iter(original_cards.values()))
+# codepoint = 0xE000
+# while codepoint <= 0xF8FF and chr(codepoint) in original_card_markdown:
+#     codepoint += 1
+# if codepoint > 0xF8FF:
+#     raise ValueError("No unused private-use character in card")
+# sentinel = chr(codepoint)
+
+
+# def overlay(ai_value, ground_truth_value):
+#     old = str(ai_value)
+#     if ground_truth_value is None or not str(ground_truth_value).strip():
+#         return old
+#     new = str(ground_truth_value)
+#     if old == new:
+#         return old
+#     old, new = preprocess(old), preprocess(new)
+#     old_words = old.replace(chr(10), f" {sentinel} ").split()
+#     new_words = new.replace(chr(10), f" {sentinel} ").split()
+#     pieces = []
+#     for tag, i1, i2, j1, j2 in SequenceMatcher(
+#         None, old_words, new_words, autojunk=False
+#     ).get_opcodes():
+#         if tag == "equal":
+#             pieces.append(" ".join(old_words[i1:i2]))
+#         else:
+#             pieces.append(
+#                 format_change(tag, old_words, new_words, i1, i2, j1, j2, 0).strip()
+#             )
+#     return (" ".join(pieces)
+#         .replace("`r red`", "<span custom-style=" + json.dumps("Red Text") + ">")
+#         .replace("`r highlight`", "<span custom-style=" + json.dumps("Highlighted Text") + ">")
+#         .replace("`r span`", "</span>"))
+
+
+# def annotated(innerdict, ground_truth):
+#     values = dict(innerdict.data)
+#     for docx_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS:
+#         if ai_column != KTP_AI_AUGMENT_COMMENTS_COL and ai_column in values:
+#             values[ai_column] = overlay(values[ai_column], ground_truth.get(docx_column))
+#     return innerdict.model_copy(update={"data": values})
+
+
+# researcher = researcher.model_copy(update={"codex_innerdicts": tuple(
+#     item.model_copy(update={"innerdict": annotated(item.innerdict, ground_truth.data)})
+#     for item in researcher.codex_innerdicts
+# )})
+
+# cards = build_cards(
+#     ai_augment_singular_outer_dict.selected_card_outer_dict(researcher),
+#     total_draws=config["total_draws"],
+#     intro=intro,
+#     excluded_cols=CARD_EXCLUDED_COLUMNS,
+# )
+# filename, markdown = next(iter(cards.items()))
+# document = Document(BytesIO(render_docx_bytes(markdown, Path(config["pandoc_reference_docx"]))))
+# for paragraph in document.paragraphs:
+#     for run in paragraph.runs:
+#         if sentinel in run.text:
+#             run.text = re.sub(rf" *{re.escape(sentinel)} *", chr(10), run.text)
+# for style_name, color, highlight, strike in (
+#     ("Red Text", RGBColor(0xC0, 0x00, 0x00), None, True),
+#     ("Highlighted Text", RGBColor(0x00, 0x70, 0x3C), WD_COLOR_INDEX.YELLOW, False),
+# ):
+#     if style_name in document.styles:
+#         style = document.styles[style_name]
+#         style.font.color.rgb = color
+#         style.font.highlight_color = highlight
+#         style.font.strike = strike
+# output = Path("tmp") / f"{filename}_eval.docx"
+# document.save(output)
+# print(output.resolve())
+# '
+# """
+# cwd = "."
+
+# [tool.pixi.feature.detour-ai-augment.tasks.test-eval-docx]
+# description = '''Usage: pixi run -e detour-ai-augment test-eval-docx tmp/test.ujpfoijf '{"ktp.first_name":"Antoine","ktp.last_name":"Guisan"}' (uses copied retained NiceGUI storage)'''
+# cmd = """
+# python -c '
+# import shutil
+# import subprocess
+# import sys
+# import tempfile
+# from pathlib import Path
+
+# from src.detours.detour_ai_augment.protected.tests.pytest_plugin import nicegui_test_environment
+
+# run_dir = Path(sys.argv[1]).resolve()
+# with tempfile.TemporaryDirectory(prefix="test-eval-docx-", dir="tmp") as directory:
+#     storage_path = Path(directory) / "nicegui"
+#     storage_path.mkdir()
+#     shutil.copy2(run_dir / "nicegui" / "storage-general.json", storage_path)
+#     environment = nicegui_test_environment(storage_path)
+#     environment["AI_AUGMENT_EVAL_CONFIG"] = str(run_dir / "config.operator.json")
+#     subprocess.run(
+#         ["pixi", "run", "-e", "detour-ai-augment", "eval-docx", sys.argv[2]],
+#         check=True,
+#         env=environment,
+#     )
+# '
+# """
+# cwd = "."
+#
+# # # tmp/humandiff_diff_helpers.py
+# # import sys, difflib, re
+# # COMMENT_CODE_REGEX = r'[A-Za-z]{1,3}\d+(?:R\d+)?'
+# # def preprocess(text: str) -> str:
+# #     # Remove Markdown comments and R tags
+# #     text = re.sub(r'<!---.*?--->', ' ', text, flags=re.DOTALL)
+# #     text = re.sub(r'`r [a-z]+`', ' ', text, flags=re.IGNORECASE)
+# #     # Preserve comment refs that appear as markdown links, e.g. [LP23](Aim 3) -> [LP23]
+# #     text = re.sub(rf'\[({COMMENT_CODE_REGEX})\]\([^)]+\)', r'[\1]', text)
+# #     # Now safely remove markdown formatting
+# #     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # Bold **text**
+# #     text = re.sub(r'\*(.*?)\*', r'\1', text)      # Italic *text*
+# #     text = re.sub(r'__(.*?)__', r'\1', text)      # Bold __text__
+# #     # Only remove italic underscores that are surrounded by spaces or punctuation (not within words)
+# #     text = re.sub(r'(?<!\w)_([^_]+?)_(?!\w)', r'\1', text)        # Italic _text_
+# #     text = re.sub(r'`(.*?)`', r'\1', text)        # Inline code
+# #     text = re.sub(r'```.*?```', '', text, flags=re.S)  # Code blocks
+# #     text = re.sub(r'#{1,6}\s+', '', text)         # Headers
+# #     text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)  # Links [text](url)
+# #     text = re.sub(r'!\[([^\]]*)\]\([^\)]+\)', r'\1', text)  # Images ![alt](url)
+# #     text = re.sub(r'^>\s+', '', text, flags=re.M)  # Blockquotes
+# #     text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.M)  # Unordered lists
+# #     text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.M)  # Ordered lists
+# #     text = re.sub(r'^\s*\|.*\|.*$', '', text, flags=re.M)  # Table rows
+# #     text = re.sub(r'^\s*[-:|\s]+$', '', text, flags=re.M)  # Table separators
+# #     return text
+# # def format_change(tag: str, old_words: list, new_words: list, i1: int, i2: int, j1: int, j2: int, ctx: int) -> str:
+# #     """Format a single change with context"""
+# #     def escape_special_chars(text):
+# #         # For R markdown, we need to escape characters that could break the inline R code
+# #         # Use double escaping for backslashes since they get processed twice
+# #         return (text.replace('\\', '\\\\\\\\')  # Four backslashes become one
+# #                     .replace('`', "'")          # Replace backticks with single quotes
+# #                     .replace('"', '\\"')        # Escape double quotes
+# #                     .replace('\n', '\\n')       # Escape newlines
+# #                     .replace('\r', '\\r')       # Escape carriage returns
+# #                     .replace('\t', '\\t'))      # Escape tabs
+# #     before = escape_special_chars(' '.join(old_words[max(i1-ctx, 0):i1]))
+# #     after_old = escape_special_chars(' '.join(old_words[i2:min(i2+ctx, len(old_words))]))
+# #     after_new = escape_special_chars(' '.join(new_words[j2:min(j2+ctx, len(new_words))]))
+# #     if tag == 'delete':
+# #         deleted = escape_special_chars(' '.join(old_words[i1:i2]))
+# #         return f"{before} `r red`~~**{deleted}**~~`r span` {after_old}"
+# #     elif tag == 'insert':
+# #         inserted = escape_special_chars(' '.join(new_words[j1:j2]))
+# #         return f"{before} `r highlight`**{inserted}**`r span` {after_new}"
+# #     elif tag == 'replace':
+# #         deleted = escape_special_chars(' '.join(old_words[i1:i2]))
+# #         inserted = escape_special_chars(' '.join(new_words[j1:j2]))
+# #         return f"{before} `r red`~~**{deleted}**~~`r span` → `r highlight`**{inserted}**`r span` {after_new}"
+# #     return ""
+#
+# =================================================
+# End discontinued experimental humandiff renders
+# =================================================
+
+# # ===============================================
+# # Sample script to copy CAS out of a merged log.
+# # May be helpful, for example, if dashboard runs
+# # were run into a merged log and one would like
+# # to isolate them. For the replay log itself, this
+# # is as easy as identifying the first corresponding
+# # `/init` record and the last corresponding
+# # `/completed` one and then doing something like:
+# # ```
+# # sed -n '175,289p' \
+# #   ./tmp/test_merged_mqvjqjkk_onwards/merged-mqvjqjkk-onwards-backend-replay.jsonl \
+# #   > ./tmp/dashboard_runs_20261031T0214Z/replay.jsonl
+# # ```
+# # But then CAS records need to be isolated also.
+# # This is what the script below does.
+# # ===============================================
+# pixi run python - <<'PY'
+# from pathlib import Path
+# import re
+# import shutil
+# base = Path("/Volumes/home/aicode/2026-01-02_enrich_full_df/tmp")
+# src = base / "test_merged_mqvjqjkk_onwards/merged-mqvjqjkk-onwards-cas"
+# run = base / "dashboard_runs_20261031T0214Z"
+# dst = run / "cas"
+# text = (run / "replay.jsonl").read_text()
+# hashes = sorted(set(re.findall(r'\\"codex_rollout_record\\":\{\\"sha256\\":\\"([a-fA-F0-9]{64})\\"', text)))
+# for i, h in enumerate(hashes, 1):
+#     rel = Path(h[:2]) / h[2:4] / h
+#     source = src / rel
+#     target = dst / rel
+#     if not source.is_file():
+#         status = "MISSING"
+#     else:
+#         try:
+#             target.parent.mkdir(parents=True, exist_ok=True)
+#             with source.open("rb") as inp, target.open("xb") as out:
+#                 shutil.copyfileobj(inp, out)
+#             status = "COPIED"
+#         except FileExistsError:
+#             status = "EXISTS"
+#         except OSError as e:
+#             status = f"ERROR: {e}"
+#     print(f"{i:04d} {status}: {rel}", flush=True)
+# PY

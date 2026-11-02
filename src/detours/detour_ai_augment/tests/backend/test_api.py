@@ -1,0 +1,8067 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import fcntl
+import hashlib
+import json
+import logging
+import os
+import signal
+import subprocess
+import sys
+import time
+from collections.abc import Callable, Generator, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from copy import deepcopy
+from datetime import date, datetime, timedelta, timezone
+from http import HTTPStatus
+from importlib.metadata import version
+from io import StringIO
+from pathlib import Path, PurePosixPath
+from threading import Barrier, Event, Lock
+from types import SimpleNamespace
+from typing import Any, Literal, Self, cast, get_args
+from urllib.parse import urlsplit
+from uuid import UUID, uuid7
+from zipfile import ZipFile
+
+import duckdb
+import httpx
+import pytest
+import requests
+import uvicorn
+from fastapi import FastAPI, status
+from pydantic import AnyUrl, JsonValue, ValidationError
+from rich.console import Console
+from starlette.types import Message, Scope
+
+from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
+from src.detours.detour_ai_augment.protected.src.backend import server
+from src.detours.detour_ai_augment.protected.src.backend.helpers import (
+    aivm_audit,
+    api,
+    codex_parse,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (
+    ai_augment_detour_db,
+    post_commit_validation,
+    pydantic_to_paste,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
+    AiAugmentDetourConfig,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_detour_db import (  # noqa: E501
+    AiAugmentDetourDB,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_registered_resource import (  # noqa: E501
+    RESOURCE_DESCRIPTION_KEY,
+    RESOURCE_PATH_KEY,
+    RESOURCE_SHA256_KEY,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.cas import (  # noqa: E501
+    AiAugmentCAS,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.codex_rollout_record import (  # noqa: E501
+    CodexRolloutRecord,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
+    EducationRecord,
+    EvidenceWithdrawal,
+    FieldSubmission,
+    GenderSubmission,
+    RaceEthnicityLanguageCultureStandardized,
+    StandardizedFieldSubmission,
+    StandardizedSubmission,
+    WebSearchExcerpt,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.replay_log import (  # noqa: E501
+    ReplayLogRegisteredResource,
+    _ReplayProjectionConflictError,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store import (  # noqa: E501
+    AiAugmentBackendStore,
+    AiAugmentQueryBackendStore,
+    _ReplayCommitInvalidError,
+    _ReplayLogLineInvalidError,
+    initialize_backend_store,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_fixture import (  # noqa: E501
+    AGE_EXAMPLE_AS_OF,
+    L_FEI_FEI_INITIAL_FIXTURE,
+    L_FEI_FEI_RETRY_FIXTURE,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E501
+    Submission,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AI_AUGMENT_COLUMNS,
+    AI_AUGMENT_EVIDENCE_COLUMNS,
+    AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
+    AI_AUGMENT_REDACTED_REPORT_VALUE_COLUMNS,
+    AI_AUGMENT_STANDARDIZED_COLUMNS,
+    AIVM_AUDIT_USER,
+    AIVM_IDENTITY_FILE_ENV_NAME,
+    AIVM_INSTANCE,
+    APPENDWATCH_COMPROMISED_PREFIX,
+    APPENDWATCH_OK_PREFIX,
+    ARCHIVE_HASH_CHUNK_BYTES,
+    ASGI_BODY_KEY,
+    ASGI_HEADERS_KEY,
+    ASGI_HTTP_REQUEST_MESSAGE_TYPE,
+    ASGI_HTTP_RESPONSE_START_MESSAGE_TYPE,
+    ASGI_HTTP_SCOPE_TYPE,
+    ASGI_METHOD_KEY,
+    ASGI_MORE_BODY_KEY,
+    ASGI_PATH_KEY,
+    ASGI_TYPE_KEY,
+    AUDIT_FIND_ROLLOUT_COMMAND,
+    AUDIT_PROBE_COMMAND,
+    AUDIT_READ_APPENDWATCH_REPORT_COMMAND,
+    AUDIT_READ_ROLLOUT_COMMAND,
+    AUTHORITATIVE_RECORD_ORDINAL_COLUMN,
+    AUTHORITATIVE_RECORDS_TABLE,
+    BACKEND_STORE_CLOSED_CLEANLY,
+    BASE64_TEXT_ENCODING,
+    CARD_EXCLUDED_COLUMNS,
+    CODEX_CALLS_TABLE,
+    CODEX_CITE_MARKER_PREFIX,
+    CODEX_CITE_MARKER_SUFFIX,
+    CODEX_FC_TABLE,
+    CODEX_FCO_TABLE,
+    CODEX_INNERDICT_TABLE,
+    CODEX_OUTPUT_ROWS_TABLE,
+    CODEX_OUTPUT_SCHEMA,
+    CODEX_PAYLOAD_KEY,
+    CODEX_REF_DOMAIN_COL,
+    CODEX_REF_SNIPPET_COL,
+    CODEX_REF_THUMBNAIL_URL_COL,
+    CODEX_REF_TITLE_COL,
+    CODEX_REF_URL_COL,
+    CODEX_SESSIONS_ROOT,
+    CODEX_TURN_REF_TABLE,
+    CODEX_TYPE_KEY,
+    COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE,
+    CONFIG_FILENAME,
+    DASHBOARD_QUERY_PATH,
+    DOCX_COLUMNS,
+    ETAG_HEADER,
+    EVIDENCE_OUTCOME_UNMATCHED,
+    EVIDENCE_OUTCOME_V1_EXACT,
+    EVIDENCE_OUTCOME_V2_NEAR,
+    EVIDENCE_OUTCOME_WITHDRAWN,
+    EXCLUDED_NAMEKEY,
+    HTTP_CONTENT_LENGTH_HEADER,
+    HTTP_CONTENT_TYPE_HEADER,
+    HTTP_GET_METHOD,
+    HTTP_POST_METHOD,
+    INIT_PATH,
+    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
+    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
+    KTP_AI_AUGMENT_COMMENTS_COL,
+    KTP_AI_AUGMENT_EDUCATION_COL,
+    KTP_AI_AUGMENT_GENDER_COL,
+    KTP_AI_AUGMENT_LINKS_COL,
+    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
+    KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
+    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
+    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
+    KTP_AI_AUGMENT_SESSION_METADATA_COL,
+    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
+    LOCATION_HEADER,
+    MAP_SUBSET_0_TO_BATCH_KEY,
+    MICROSECONDS_PER_SECOND,
+    MILLISECONDS_PER_SECOND,
+    NAME_KEY_HEADER,
+    NAMEKEY_ENV_NAME,
+    NANOSECONDS_PER_MICROSECOND,
+    NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+    NOT_REPORTED_VALUE,
+    POST_COMMIT_VALIDATION_AUDIT_ID_COL,
+    POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL,
+    POST_COMMIT_VALIDATION_FIELD_AUDIT_COL,
+    POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE,
+    POST_COMMIT_VALIDATION_FIELD_COL,
+    POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL,
+    PULL_PATH,
+    PUSH_PATH,
+    PYDANTIC_TO_PASTE_SOURCE,
+    REPLAY_LOG_KEY,
+    RETRY_AFTER_HEADER,
+    RETRY_AFTER_SECONDS,
+    ROLLOUT_ENV_NAME,
+    ROLLOUT_FILENAME_PREFIX,
+    ROLLOUT_FILENAME_SUFFIX,
+    ROLLOUT_LINE_FRAGMENT_TYPE,
+    SERVER_HOST,
+    SERVER_PORT,
+    SESSION_ID_HEADER,
+    SOURCE_KEY_HEADER,
+    SSH_EXECUTABLE,
+    STANDARDIZED_SUBMISSION_TYPE,
+    SUBMISSION_TYPE,
+    SYNTHETIC_COMMIT_HOST,
+    SYNTHETIC_COMMIT_SCHEME,
+    TEXT_ENCODING,
+    AiAugmentCohort,
+    AiAugmentIneligibilityCategory,
+    ContentType,
+)
+from src.detours.detour_ai_augment.protected.src.shared import (
+    AppendwatchReportError,
+    name_key_from_header_value,
+    name_key_header_value,
+    parse_appendwatch_report,
+    source_key_from_header_value,
+    source_key_header_value,
+    unix_usec_from_uuidv7,
+    utc_datetime_from_unix_usec,
+)
+from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (  # noqa: E501
+    StartupFiles,
+    init_request_record,
+    source_population,
+)
+from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
+    PythonProcess,
+    backend_lock_holder_process,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
+    AiAugmentBackendContext,
+    _source_innerdicts_by_namekey,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
+    AiAugmentSingularOuterDict,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.codex_innerdict import (
+    _CodexInnerDictProcedure,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
+    COMMIT_PATH,
+    AppendwatchReportEncoding,
+    AppendwatchReportRecord,
+    BackendCommitRequestRecord,
+    CodexSessionRecord,
+    CommitRequestBody,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.init_request import (
+    BackendInitRequestRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
+    BackendLifecycle,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.model_http_interceptor import (  # noqa: E501
+    ReplayInputMissing,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event import (
+    PullResponseRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.push_event import (
+    PushResponseRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.response_record_promise import (
+    BackendStoreAcknowledgment,
+    BackendStoreException,
+    ResponseRecordPromise,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (  # noqa: E501
+    VALIDATE_PATH,
+    BackendValidationRequestRecord,
+    ValidationRequestBody,
+    _ValidationRequestBodyJson,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
+    run_outcome_event as run_outcome_models,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.dashboard_query_snapshot import (  # noqa: E501
+    DashboardQuerySnapshot,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome_event import (  # noqa: E501
+    RunOutcomeResponseRecord,
+)
+from src.helpers.architecture import FrozenStrictModel, nameof
+from src.helpers.cards import MARKDOWN_CODE_DELIMITER, build_cards
+from src.helpers.config import PipelineConfig
+from src.helpers.data_models import (
+    FragmentType,
+    InnerDict,
+    NameKey,
+    OuterDict,
+    ResourceGroup,
+)
+from src.helpers.data_models.http_request_log import (
+    HttpRequestLogRecord,
+)
+from src.helpers.duckdb_extensions import load_duckdb_extension_from_config_path
+from src.helpers.duckdb_utils import duckdb_quote_identifier
+from src.helpers.procedures import (
+    DocxMatchProcedure,
+    ParquetMatchProcedure,
+    XlsxMatchProcedure,
+)
+from src.helpers.schema import (
+    DOCX_INNERDICT_TABLE,
+    PARQUET_INNERDICT_TABLE,
+    XLSX_INNERDICT_TABLE,
+)
+from src.helpers.vars import (
+    DRAW_LABEL,
+    KTP_FILENAME_COL,
+    KTP_FIRST_NAME_COL,
+    KTP_FRAGMENT_COL,
+    KTP_FRAGMENT_TYPE_COL,
+    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+    KTP_INNERDICT_JSONLINES_COL,
+    KTP_LAST_NAME_COL,
+    KTP_NAMEKEY_COL,
+)
+
+
+class BackendTestPaths(FrozenStrictModel):
+    config: Path
+    ai_augment_config: Path
+    source_database: Path
+    reference_docx: Path
+    pydantic_to_paste: Path
+    july_rollout: Path
+    haanen_rejected_rollout: Path
+    haanen_accepted_rollout: Path
+
+
+JULY_ROLLOUT_RELATIVE_PATH = PurePosixPath(
+    "2026/07/27/rollout-2026-07-27T12-10-36-019fa457-aac5-7652-8669-9d571206e7cb.jsonl"
+)
+JULY_ROLLOUT_GUEST_PATH = f"{CODEX_SESSIONS_ROOT}/{JULY_ROLLOUT_RELATIVE_PATH}"
+JULY_ROLLOUT_FILENAME = JULY_ROLLOUT_RELATIVE_PATH.name
+JULY_ROLLOUT_LINE_COUNT = 107
+JULY_SESSION_ID = "019fa457-aac5-7652-8669-9d571206e7cb"
+JULY_FC_COUNT = 9
+JULY_FCO_COUNT = 9
+JULY_CALL_COUNT = 9
+JULY_REF_COUNT = 155
+TEST_DRAW_NUMBER = "146"
+JULY_THUMBNAIL_REF_IDS = (
+    "turn0search3",
+    "turn0search17",
+    "turn0search18",
+    "turn0search20",
+    "turn0search24",
+)
+MARKDOWN_LITERAL_FIELD_TEMPLATE = "**`{field}`**"
+FIELD_VALUE_FIELD, FIELD_EVIDENCE_FIELD = FieldSubmission.model_fields
+(FIELD_STANDARDIZED_VALUE_FIELD,) = (
+    StandardizedFieldSubmission.model_fields.keys() - FieldSubmission.model_fields.keys()
+)
+EVIDENCE_EXCERPT_FIELD, EVIDENCE_URL_FIELD = WebSearchExcerpt.model_fields
+(
+    EVIDENCE_WITHDRAWAL_ACTION_FIELD,
+    EVIDENCE_WITHDRAWAL_REASON_FIELD,
+    EVIDENCE_WITHDRAWAL_ATTESTED_FIELD,
+) = EvidenceWithdrawal.model_fields
+EVIDENCE_WITHDRAWAL_ACTION = get_args(
+    EvidenceWithdrawal.model_fields[EVIDENCE_WITHDRAWAL_ACTION_FIELD].annotation
+)[0]
+EVIDENCE_WITHDRAWAL_REASON = get_args(
+    EvidenceWithdrawal.model_fields[EVIDENCE_WITHDRAWAL_REASON_FIELD].annotation
+)[0]
+
+TEST_ROLLOUT_GUEST_PATH = "/home/ai/.codex/sessions/2026/07/31/rollout-chat.jsonl"
+TEST_ROLLOUT_RELATIVE_PATH = PurePosixPath("2026/07/31/rollout-chat.jsonl")
+TEST_TIMEZONE = "America/Toronto"
+MATCH_V1_CONFIG_FACTS = post_commit_validation._CommitConfigFacts(
+    timezone_name=TEST_TIMEZONE,
+    sample_seed=17,
+    codex_match_version=1,
+)
+MATCH_V2_CONFIG_FACTS = post_commit_validation._CommitConfigFacts(
+    timezone_name=TEST_TIMEZONE,
+    sample_seed=17,
+    codex_match_version=2,
+)
+TEST_SESSION_ID = UUID("019d0000-0000-7000-8000-000000000001")
+TEST_SESSION_TIMESTAMP = "2026-07-31T16:10:36.000Z"
+TEST_ROLLOUT_FILENAME = f"rollout-2026-07-31T12-10-36-{TEST_SESSION_ID}.jsonl"
+TEST_CALL_ID = "call_test"
+TEST_FC_ID = "fc_test"
+TEST_FCO_ID = "fco_test"
+TEST_REF_ID = "turn0search0"
+TEST_VIEW_CALL_ID = "call_view"
+TEST_VIEW_FC_ID = "fc_view"
+TEST_VIEW_FCO_ID = "fco_view"
+TEST_VIEW_REF_ID = "turn1view0"
+TEST_VIEW_ARGUMENTS = '{"open":[{"ref_id":"turn0search0"}]}'
+TEST_NO_URL_REF_ID = "turn0view1"
+TEST_EXCERPT = "Professor Example holds the Example Chair."
+TEST_URL = "https://example.test/profile"
+V2_CITE_TEXT = "Profile: José García — Senior\nResearcher"
+V2_EXACT_EXCERPT = "José García — Senior\nResearcher"
+TEST_NAMEKEY = '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
+TEST_NAMEKEY_MODEL = NameKey.from_json_key(TEST_NAMEKEY)
+TEST_ORIGINAL_PULL_RECORD_ID = UUID("019fa457-aac5-7652-8669-9d571206e7cb")
+TEST_SECOND_ORIGINAL_PULL_RECORD_ID = UUID("019fa457-aac5-7652-8669-9d571206e7cc")
+TEST_COMMIT_REQUEST_TIMESTAMP = datetime(2026, 8, 14, tzinfo=timezone.utc)
+TEST_AUTHORITATIVE_REQUEST_BODY = b'{"probe":true}'
+TEST_AUTHORITATIVE_RESPONSE_BODY = {"accepted": True}
+TEST_AUTHORITATIVE_RESPONSE_HEADER = "X-Authoritative-Probe"
+TEST_AUTHORITATIVE_RESPONSE_HEADER_VALUE = "preserved"
+TEST_AUTHORITATIVE_LOG_FILENAME = "authoritative.jsonl"
+TEST_DETOUR_DB_FILENAME = "detour.duckdb"
+TEST_ROLLOUT_CAS_DIRECTORY = "rollout-cas"
+OPERATOR_ACCEPTED_PUSH_FIXTURE = "operator_accepted_aziz_sheikh_push.json"
+OPERATOR_CAPTURED_SESSION_ID = "01a068a7-1179-7d62-8dde-4720457e3808"
+OPERATOR_CAPTURED_SESSION_TIMESTAMP = "2026-09-03T19:16:00.000Z"
+
+
+def persisted_http_record(
+    *,
+    record_id: UUID,
+    method: str,
+    path: str,
+    response_code: int,
+    request_body: str | None = None,
+    response_body: str = "",
+    response_headers: dict[str, str] | None = None,
+    ready_to_respond_at_unix_usec: int = 2,
+) -> HttpRequestLogRecord:
+    if (
+        response_headers is None
+        and method == HTTP_GET_METHOD
+        and path == PULL_PATH
+        and response_code == HTTPStatus.OK
+    ):
+        response_headers = {HTTP_CONTENT_TYPE_HEADER: ContentType.NDJSON_UTF8}
+    return HttpRequestLogRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        record_id=record_id,
+        method=method,
+        scheme="http",
+        host="testserver",
+        port=None,
+        ready_to_respond_at_unix_usec=ready_to_respond_at_unix_usec,
+        path=path,
+        query="",
+        request_headers={},
+        request_body=request_body,
+        response_code=response_code,
+        response_headers=response_headers or {},
+        response_body=response_body,
+        received_at_unix_usec=None,
+        duration_usec=1,
+    )
+
+
+def guidance_pull_response_record(pull_date: date) -> PullResponseRecord:
+    return PullResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+            method=HTTP_GET_METHOD,
+            path=PULL_PATH,
+            response_code=HTTPStatus.OK,
+            ready_to_respond_at_unix_usec=int(
+                datetime(
+                    pull_date.year, pull_date.month, pull_date.day,
+                    tzinfo=timezone.utc,
+                ).timestamp() * MICROSECONDS_PER_SECOND
+            ),
+        )
+    )
+
+
+def deterministic_uuid7(value: str) -> UUID:
+    timestamp_msec = int(
+        TEST_COMMIT_REQUEST_TIMESTAMP.timestamp() * MILLISECONDS_PER_SECOND
+    )
+    entropy = hashlib.sha256(value.encode(TEXT_ENCODING)).digest()[:10]
+    return UUID(bytes=timestamp_msec.to_bytes(6, "big") + entropy, version=7)
+
+
+def test_deterministic_uuid7_has_valid_timestamp() -> None:
+    record_id = deterministic_uuid7("synthetic-commit")
+    assert record_id == deterministic_uuid7("synthetic-commit")
+    assert record_id != deterministic_uuid7("another-synthetic-commit")
+    assert utc_datetime_from_unix_usec(unix_usec_from_uuidv7(record_id)) == (
+        TEST_COMMIT_REQUEST_TIMESTAMP
+    )
+
+
+def retry_commit_records(
+    *,
+    original_pull_record_id: UUID,
+    init_request_record: BackendInitRequestRecord,
+    session_id: UUID,
+    synthetic_record_id_seed: str,
+) -> tuple[PullResponseRecord, BackendCommitRequestRecord]:
+    pull_record = PullResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=original_pull_record_id,
+            method=HTTP_GET_METHOD,
+            path=PULL_PATH,
+            response_code=status.HTTP_200_OK,
+        )
+    )
+    push_record = PushResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=deterministic_uuid7(synthetic_record_id_seed + "-push"),
+            method=HTTP_POST_METHOD,
+            path=PUSH_PATH,
+            response_code=status.HTTP_202_ACCEPTED,
+            request_body="{}",
+        ),
+        pull_response_record=pull_record,
+    )
+    rollout = CodexRolloutRecord(
+        size=3,
+        sha256=hashlib.sha256(b"{}\n").hexdigest(),
+        line_count=1,
+    )
+    report = b".\n"
+    body = CommitRequestBody(
+        pull_response_record=pull_record,
+        push_response_record=push_record,
+        codex_session_record=CodexSessionRecord(
+            session_id=session_id,
+            codex_rollout_record=rollout,
+            appendwatch_report_record=AppendwatchReportRecord(
+                encoding=AppendwatchReportEncoding.BASE64,
+                data=base64.b64encode(report).decode(BASE64_TEXT_ENCODING),
+            ),
+        ),
+    )
+    commit_request_record = BackendCommitRequestRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        record_id=deterministic_uuid7(synthetic_record_id_seed),
+        method=HTTP_POST_METHOD,
+        scheme=SYNTHETIC_COMMIT_SCHEME,
+        host=SYNTHETIC_COMMIT_HOST,
+        port=None,
+        path=COMMIT_PATH,
+        query="",
+        request_headers={
+            SOURCE_KEY_HEADER: source_key_header_value(
+                f"{ROLLOUT_FILENAME_PREFIX}{session_id}{ROLLOUT_FILENAME_SUFFIX}",
+                rollout.line_count,
+            ),
+            NAME_KEY_HEADER: name_key_header_value(init_request_record.namekey),
+        },
+        request_body=body.model_dump_json(),
+        response_code=None,
+        response_headers=None,
+        response_body=None,
+        received_at_unix_usec=None,
+        ready_to_respond_at_unix_usec=(
+            time.time_ns() // NANOSECONDS_PER_MICROSECOND
+        ),
+        duration_usec=0,
+        commit_request_body=body,
+    )
+    return pull_record, commit_request_record
+
+
+def evaluate_retry_submission_for_test(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    original_pull_record_id: UUID,
+    init_request_record: BackendInitRequestRecord,
+    session_id: UUID,
+    synthetic_record_id_seed: str,
+    submission_payload: Submission | StandardizedSubmission,
+    rollout_index: post_commit_validation._RolloutIndex,
+    assessment: post_commit_validation._EvidenceAssessment,
+) -> tuple[str, ...]:
+    original_pull, commit_request_record = retry_commit_records(
+        original_pull_record_id=original_pull_record_id,
+        init_request_record=init_request_record,
+        session_id=session_id,
+        synthetic_record_id_seed=synthetic_record_id_seed,
+    )
+    store = store_for_connection(conn)
+    previous = {
+        audit.submission_column: audit.state
+        for audit in store._field_audits(
+            commit_request_record,
+            original_pull_response_record=original_pull,
+            init_request_record=init_request_record,
+        )
+    }
+    audits = []
+    for column, field_submission in submission_payload.evidence_items():
+        field = post_commit_validation._EvidenceSubmissionColumn(column)
+        field_assessment = post_commit_validation._EvidenceAssessment(items=tuple(
+            item for item in assessment.items if item.field == column
+        ))
+        audits.append(post_commit_validation._transition_field(
+            field,
+            field_submission,
+            field_submission if isinstance(field_submission, StandardizedFieldSubmission)
+            else None,
+            previous.get(field, post_commit_validation._FieldPinState()),
+            assessment=field_assessment,
+            rollout_index=rollout_index,
+            push_response_record=commit_request_record.commit_request_body.push_response_record,
+        ))
+    store._project_field_audits(
+        commit_request_record,
+        tuple(audits),
+        original_pull_response_record=original_pull,
+    )
+    return tuple(
+        violation.message for audit in audits for violation in audit.violations
+    )
+
+
+def test_age_evidence_validation_uses_push_utc_date_and_logs_privately(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    age_field = L_FEI_FEI_RETRY_FIXTURE.submission.age_first_publication
+    age_value = age_field.standardized_value
+    assert isinstance(age_value, pydantic_to_paste.AgeFromBirth)
+    as_of = age_value.age.computed.as_of
+    push_usec = int(
+        datetime(as_of.year, as_of.month, as_of.day, 23, 59, 59, tzinfo=timezone.utc)
+        .timestamp()
+    ) * MICROSECONDS_PER_SECOND
+    _, commit = retry_commit_records(
+        original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+        init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+        session_id=TEST_SESSION_ID,
+        synthetic_record_id_seed="age-evidence-push",
+    )
+    push = commit.commit_request_body.push_response_record.model_copy(update={
+        "ready_to_respond_at_unix_usec": push_usec + MICROSECONDS_PER_SECOND,
+        "duration_usec": MICROSECONDS_PER_SECOND,
+    })
+
+    assert not post_commit_validation._age_evidence_violations(
+        age_field,
+        rollout_index=build_citation_index(((TEST_URL, "1976"),)),
+        push_response_record=push,
+    )
+    with caplog.at_level(logging.WARNING):
+        assert post_commit_validation._age_evidence_violations(
+            age_field,
+            rollout_index=build_citation_index(((TEST_URL, "1976"),)),
+            push_response_record=push.model_copy(update={
+                "ready_to_respond_at_unix_usec": (
+                    push.ready_to_respond_at_unix_usec + 2 * MICROSECONDS_PER_SECOND
+                ),
+            }),
+        )
+    assert "age evidence as_of mismatch" in caplog.text
+    assert str(push_usec + 2 * MICROSECONDS_PER_SECOND) in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert post_commit_validation._age_evidence_violations(
+            age_field,
+            rollout_index=build_citation_index(((TEST_URL, "No date stated"),)),
+            push_response_record=push,
+        )
+    assert "reported='1976'" in caplog.text
+    assert (
+        f"field={KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL}."
+        f"{FIELD_STANDARDIZED_VALUE_FIELD}.age.computed.birth.reported"
+    ) in caplog.text
+
+    verbatim_age = age_field.model_copy(update={
+        "standardized_value": age_value.model_copy(update={
+            "age": age_value.age.model_copy(update={
+                "computed": age_value.age.computed.model_copy(update={
+                    "birth": age_value.age.computed.birth.model_copy(update={
+                        "reported": "nineteen seventy-six",
+                    }),
+                }),
+            }),
+        }),
+        "web_search_excerpts": [WebSearchExcerpt(
+            excerpt="born in nineteen seventy-six", url=TEST_URL,
+        )],
+    })
+    assert not post_commit_validation._age_evidence_violations(
+        verbatim_age,
+        rollout_index=build_citation_index(((TEST_URL, "born in nineteen seventy-six"),)),
+        push_response_record=push,
+    )
+    assert post_commit_validation._age_evidence_violations(
+        verbatim_age,
+        rollout_index=build_citation_index(((TEST_URL, "1976"),)),
+        push_response_record=push,
+    )
+
+
+def test_rejected_age_evidence_edit_cannot_launder_standardized_pin() -> None:
+    """A rejected excerpt edit must not make an unsupported age immutable."""
+    age = L_FEI_FEI_RETRY_FIXTURE.submission.age_first_publication
+    assert isinstance(age.standardized_value, pydantic_to_paste.AgeFromBirth)
+    as_of = age.standardized_value.age.computed.as_of
+    push_time = datetime.combine(as_of, datetime.min.time(), timezone.utc)
+    push_usec = int(push_time.timestamp()) * MICROSECONDS_PER_SECOND
+    _, commit = retry_commit_records(
+        original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+        init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+        session_id=TEST_SESSION_ID,
+        synthetic_record_id_seed="age-pin-laundering",
+    )
+    push = commit.commit_request_body.push_response_record.model_copy(update={
+        "ready_to_respond_at_unix_usec": push_usec + MICROSECONDS_PER_SECOND,
+        "duration_usec": MICROSECONDS_PER_SECOND,
+    })
+    field = post_commit_validation._EvidenceSubmissionColumn.AGE_FIRST_PUBLICATION
+    undated = WebSearchExcerpt(excerpt="The source gives no birth year", url=TEST_URL)
+    prior = post_commit_validation._FieldPinState(
+        pins=(
+            post_commit_validation._FieldPin.NARRATIVE
+            | post_commit_validation._FieldPin.EVIDENCE
+        ),
+        narrative_value=age.value,
+        evidence_obligations=(
+            post_commit_validation._EvidenceObligation(
+                outcome=EVIDENCE_OUTCOME_V1_EXACT, submission=undated,
+            ),
+            post_commit_validation._EvidenceObligation(
+                outcome=EVIDENCE_OUTCOME_V1_EXACT,
+                submission=age.web_search_excerpts[1],
+            ),
+        ),
+    )
+    raw = L_FEI_FEI_RETRY_FIXTURE.submission.model_dump(mode="json", by_alias=True)
+    raw[field.value]["standardized_value"] = {"invalid": True}
+    _, standardized_submissions, payload, schema_issues = (
+        post_commit_validation._validate_submission_fields(
+            json.dumps(raw),
+            standardized_required=True,
+            standardized_evidence_eligible=lambda column, submission: (
+                post_commit_validation._standardized_evidence_eligible(
+                    column, submission, prior,
+                )
+            ),
+        )
+    )
+    assert field not in standardized_submissions
+    assert payload is None
+    assert not any(
+        location[:1] == (field.value,) for location, _ in schema_issues
+    )
+
+    def assess(
+        current: pydantic_to_paste.AgeFirstPublicationSubmission,
+        *,
+        first_outcome: post_commit_validation.EvidenceOutcome,
+    ) -> post_commit_validation._EvidenceAssessment:
+        return post_commit_validation._EvidenceAssessment(items=tuple(
+            post_commit_validation._EvidenceItemAssessment(
+                field=field.value,
+                index=index,
+                evidence_number=index + 1,
+                submission=item,
+                outcome=first_outcome if index == 0 else EVIDENCE_OUTCOME_V1_EXACT,
+                match=None,
+            )
+            for index, item in enumerate(current.web_search_excerpts)
+        ))
+
+    rejected = post_commit_validation._transition_field(
+        field, age, age, prior,
+        assessment=assess(age, first_outcome=EVIDENCE_OUTCOME_UNMATCHED),
+        rollout_index=build_citation_index(((TEST_URL, undated.excerpt),)),
+        push_response_record=push,
+    )
+    assert rejected.violations
+    assert rejected.state == prior
+    restored = age.model_copy(update={
+        "web_search_excerpts": [undated, *age.web_search_excerpts[1:]],
+    })
+    restored_audit = post_commit_validation._transition_field(
+        field, restored, restored, rejected.state,
+        assessment=assess(restored, first_outcome=EVIDENCE_OUTCOME_V1_EXACT),
+        rollout_index=build_citation_index(((TEST_URL, undated.excerpt),)),
+        push_response_record=push,
+    )
+    assert [violation.message for violation in restored_audit.violations] == [
+        Locale.STANDARDIZED_REPORTED_NOT_IN_WEB_RESULTS_TEMPLATE.format(
+            location=f"{field.value}.standardized_value.age.computed.birth.reported"
+        )
+    ]
+    assert restored_audit.state == prior
+
+
+HAANEN_REJECTED_CAPTURE_ID = "20260813T141344_678596Z_8ef1f6372b4a48d9a3b1279736356363"
+HAANEN_ACCEPTED_CAPTURE_ID = "20260813T141450_027429Z_044215aac8c44200882531b10a2acfa6"
+HAANEN_ROLLOUT_FILENAME = "rollout-2026-08-13T10-08-12-019ffb73-b72c-7812-9fc4-d56fdf3ea1a2.jsonl"
+HAANEN_SESSION_ID = UUID("019ffb73-b72c-7812-9fc4-d56fdf3ea1a2")
+HAANEN_ORIGINAL_PULL_RECORD_ID = UUID("019ffb73-b72c-7812-9fc4-d56fdf3ea1a3")
+HAANEN_NAMEKEY = '{"ktp.first_name": "J. B.", "ktp.last_name": "Haanen"}'
+HAANEN_NAMEKEY_MODEL = NameKey.from_json_key(HAANEN_NAMEKEY)
+HAANEN_TOOL_CALL_TYPE = "custom_tool_call"
+HAANEN_TOOL_INPUT_KEY = "input"
+HAANEN_COMMAND_START = "{cmd:"
+HAANEN_HEREDOC_START = "--data-binary @- <<'JSON'\n"
+HAANEN_HEREDOC_END = "\nJSON"
+HAANEN_PATCH_ASSIGNMENT_START = "const patch = "
+HAANEN_PATCH_FILE_START = "*** Add File: haanen_submission.json\n"
+HAANEN_PATCH_END = "*** End Patch"
+HAANEN_CORRECTED_NEAR_EXCERPT = (
+    "He co-authored over 500 peer-reviewed articles, is currently \nEditor-in-Chief of ESMO IOTECH."
+)
+HAANEN_ORIGINAL_GENDER_EXCERPT = "Geslacht\n\nMan"
+HAANEN_RETRY_GENDER_EXCERPT = "Man"
+HAANEN_ORIGINAL_EVIDENCE_COUNT = 22
+HAANEN_RETRY_EVIDENCE_COUNT = 9
+HAANEN_ARCHIVED_EVIDENCE_COLUMNS = tuple(
+    column
+    for column in AI_AUGMENT_EVIDENCE_COLUMNS
+    if column != KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
+)
+HAANEN_JSON_DECODER = json.JSONDecoder()
+TEST_STANDARDIZED_VALUES = {
+    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL: {
+        "first_name": "NR",
+        "last_name": "NR",
+        "orcid": "NR",
+        "openalex_id": "NR",
+    },
+    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL: {
+        "type": "private_residence",
+        "place": "NR",
+        "location": "NR",
+    },
+    KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL: {
+        "race": "NA",
+        "ethnicity": "NA",
+        "language": "NR",
+        "culture": "NA",
+    },
+    KTP_AI_AUGMENT_GENDER_COL: "NR",
+    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL: "NR",
+    KTP_AI_AUGMENT_EDUCATION_COL: "NR",
+    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL: "NR",
+    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL: "NR",
+    KTP_AI_AUGMENT_LINKS_COL: "NR",
+}
+
+
+@pytest.fixture(scope="session")
+def backend_test_paths(
+    pytestconfig: pytest.Config,
+) -> BackendTestPaths:
+    repository_root = pytestconfig.rootpath
+    detour_root = repository_root / "src" / "detours" / "detour_ai_augment"
+    haanen_rejected_capture_dir = repository_root / "tmp" / HAANEN_REJECTED_CAPTURE_ID
+    haanen_accepted_capture_dir = repository_root / "tmp" / HAANEN_ACCEPTED_CAPTURE_ID
+    return BackendTestPaths(
+        config=repository_root / "config.repl.json",
+        ai_augment_config=repository_root / CONFIG_FILENAME,
+        source_database=repository_root / "data" / "scisci_process.duckdb",
+        reference_docx=repository_root / "resources" / "pandoc-custom-reference.docx",
+        pydantic_to_paste=(
+            detour_root
+            / "protected"
+            / "src"
+            / "backend"
+            / "helpers"
+            / "data_models"
+            / "pydantic_to_paste.py"
+        ),
+        july_rollout=(
+            detour_root
+            / "data"
+            / "sample_run"
+            / ".codex"
+            / "sessions"
+            / Path(*JULY_ROLLOUT_RELATIVE_PATH.parts)
+        ),
+        haanen_rejected_rollout=(
+            haanen_rejected_capture_dir / f"rollout.{HAANEN_REJECTED_CAPTURE_ID}.jsonl"
+        ),
+        haanen_accepted_rollout=(
+            haanen_accepted_capture_dir / f"rollout.{HAANEN_ACCEPTED_CAPTURE_ID}.jsonl"
+        ),
+    )
+
+
+@pytest.fixture(autouse=True)
+def isolated_backend_detour_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    monkeypatch.setattr(api, "BACKEND_PROCESS_LOCK_PATH", tmp_path / "backend.lock")
+    api._release_backend_process_lock()
+    yield
+    api._release_backend_process_lock()
+
+
+OFFICERS_URL = (
+    "https://find-and-update.company-information.service.gov.uk/company/SC621293/officers"
+)
+COMPANY_URL = "https://find-and-update.company-information.service.gov.uk/company/SC621293"
+COMMONWEALTH_URL = "https://www.commonwealthfund.org/person/aziz-sheikh"
+OXFORD_BDI_URL = "https://www.bdi.ox.ac.uk/Team/aziz-sheikh"
+NIHR_URL = (
+    "https://www.spcr.nihr.ac.uk/news/congratulations-to-the-new-nihr-senior-investigators-2026"
+)
+
+CALL_ARGUMENTS_TURN_2 = (
+    '{"search_query":[{"q":"\\"Aziz Sheikh\\" \\"born\\" professor Edinburgh"},'
+    '{"q":"\\"Aziz Sheikh\\" \\"1968\\" professor"},'
+    '{"q":"\\"Aziz Sheikh\\" \\"1967\\" Edinburgh professor"},'
+    '{"q":"\\"Aziz Sheikh\\" age professor Oxford"}],"response_length":"long"}'
+)
+CALL_ARGUMENTS_TURN_4 = (
+    '{"search_query":[{"q":"\\"Aziz Sheikh\\" \\"Master\'s in Epidemiology\\""},'
+    '{"q":"\\"Aziz Sheikh\\" \\"Masters in Epidemiology\\""},'
+    '{"q":"\\"Aziz Sheikh\\" \\"University College London\\" '
+    '\\"London School of Hygiene\\" MD"},'
+    '{"q":"\\"Aziz Sheikh\\" BSc MBBS MSc MD education"}],'
+    '"response_length":"long"}'
+)
+CALL_ARGUMENTS_TURN_6 = '{"open":[{"ref_id":"turn5search0"}],"response_length":"long"}'
+CALL_ARGUMENTS_TURN_7 = '{"click":[{"ref_id":"turn6view0","id":10}],"response_length":"long"}'
+DISPLAY_ARGUMENTS_TURN_6 = (
+    f'{{"open":[{{"ref_id":"turn5search0","url":"{COMPANY_URL}"}}],"response_length":"long"}}'
+)
+DISPLAY_ARGUMENTS_TURN_7 = (
+    f'{{"click":[{{"ref_id":"turn6view0","url":"{COMPANY_URL}","id":10}}],'
+    '"response_length":"long"}'
+)
+CALL_ARGUMENTS_TURN_8 = (
+    '{"search_query":[{"q":"site:nam.edu \\"Aziz Sheikh\\" elected National '
+    'Academy of Medicine 2024"},{"q":"site:ed.ac.uk \\"Aziz Sheikh\\" '
+    'National Academy of Medicine 2024"},{"q":"site:nihr.ac.uk '
+    '\\"Aziz Sheikh\\" Senior Investigator"},{"q":"site:hdr.uk '
+    '\\"Aziz Sheikh\\" Strategic Adviser Health Care Policy"}],'
+    '"response_length":"long"}'
+)
+
+
+class ExpectedEvidence(FrozenStrictModel):
+    column: str
+    value: str
+    excerpt: str
+    url: str
+    ref_id: str
+    call_id: str
+    fc_id: str
+    fco_id: str
+    fco_timestamp: str
+    arguments_json: str
+    display_arguments_json: str
+
+
+EXPECTED_EVIDENCE = (
+    ExpectedEvidence(
+        column=KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
+        value="Aziz Sheikh",
+        excerpt="SHEIKH, Aziz Ul Haque",
+        url=OFFICERS_URL,
+        ref_id="turn7view0",
+        call_id="call_SzOsv4AVuruWWBbM0oy5i4M0",
+        fc_id="fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        fco_id="fco_019fa459-883b-7480-b82c-b775520d1401",
+        fco_timestamp="2026-07-27T16:12:38.843Z",
+        arguments_json=CALL_ARGUMENTS_TURN_7,
+        display_arguments_json=DISPLAY_ARGUMENTS_TURN_7,
+    ),
+    ExpectedEvidence(
+        column=KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
+        value="Scotland",
+        excerpt="Country of residence\nL75:      Scotland",
+        url=OFFICERS_URL,
+        ref_id="turn7view0",
+        call_id="call_SzOsv4AVuruWWBbM0oy5i4M0",
+        fc_id="fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        fco_id="fco_019fa459-883b-7480-b82c-b775520d1401",
+        fco_timestamp="2026-07-27T16:12:38.843Z",
+        arguments_json=CALL_ARGUMENTS_TURN_7,
+        display_arguments_json=DISPLAY_ARGUMENTS_TURN_7,
+    ),
+    ExpectedEvidence(
+        column=KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
+        value="British nationality; race, ethnicity, language, and culture not reported",
+        excerpt="Nationality\nL72:      British",
+        url=OFFICERS_URL,
+        ref_id="turn7view0",
+        call_id="call_SzOsv4AVuruWWBbM0oy5i4M0",
+        fc_id="fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        fco_id="fco_019fa459-883b-7480-b82c-b775520d1401",
+        fco_timestamp="2026-07-27T16:12:38.843Z",
+        arguments_json=CALL_ARGUMENTS_TURN_7,
+        display_arguments_json=DISPLAY_ARGUMENTS_TURN_7,
+    ),
+    ExpectedEvidence(
+        column=KTP_AI_AUGMENT_GENDER_COL,
+        value="Male",
+        excerpt="Nationality\nL72:      British",
+        url=OFFICERS_URL,
+        ref_id="turn7view0",
+        call_id="call_SzOsv4AVuruWWBbM0oy5i4M0",
+        fc_id="fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        fco_id="fco_019fa459-883b-7480-b82c-b775520d1401",
+        fco_timestamp="2026-07-27T16:12:38.843Z",
+        arguments_json=CALL_ARGUMENTS_TURN_7,
+        display_arguments_json=DISPLAY_ARGUMENTS_TURN_7,
+    ),
+    ExpectedEvidence(
+        column=KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
+        value="Age derived from a December 1968 birth date",
+        excerpt="Date of birth\nL66:      December 1968",
+        url=OFFICERS_URL,
+        ref_id="turn7view0",
+        call_id="call_SzOsv4AVuruWWBbM0oy5i4M0",
+        fc_id="fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        fco_id="fco_019fa459-883b-7480-b82c-b775520d1401",
+        fco_timestamp="2026-07-27T16:12:38.843Z",
+        arguments_json=CALL_ARGUMENTS_TURN_7,
+        display_arguments_json=DISPLAY_ARGUMENTS_TURN_7,
+    ),
+    ExpectedEvidence(
+        column=KTP_AI_AUGMENT_EDUCATION_COL,
+        value="MSc epidemiology and MD",
+        excerpt=(
+            "Sheikh holds a master's of science in epidemiology from the London "
+            "School of Hygiene & Tropical Medicine, and a M.D. from the University "
+            "of London."
+        ),
+        url=COMMONWEALTH_URL,
+        ref_id="turn4search0",
+        call_id="call_S7SrLlbSPHIujjScm4LXYt2X",
+        fc_id="fc_03938c1e0667a7cc016a67836064b081958a409fea02229e26",
+        fco_id="fco_019fa459-3dda-7ea0-8d5c-2351036f67f5",
+        fco_timestamp="2026-07-27T16:12:19.802Z",
+        arguments_json=CALL_ARGUMENTS_TURN_4,
+        display_arguments_json=CALL_ARGUMENTS_TURN_4,
+    ),
+    ExpectedEvidence(
+        column=KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
+        value="Oxford Big Data Institute",
+        excerpt="Aziz Sheikh — Oxford Big Data Institute (https://www.bdi.ox.ac.uk/Team/aziz-sheikh)",
+        url=OXFORD_BDI_URL,
+        ref_id="turn2search0",
+        call_id="call_Tv7D3tbhKCOUBdz2xfruMIIY",
+        fc_id="fc_03938c1e0667a7cc016a678326af18819587231df3dd08c37d",
+        fco_id="fco_019fa458-5973-77a1-93a4-0c27355f8eb8",
+        fco_timestamp="2026-07-27T16:11:21.331Z",
+        arguments_json=CALL_ARGUMENTS_TURN_2,
+        display_arguments_json=CALL_ARGUMENTS_TURN_2,
+    ),
+    ExpectedEvidence(
+        column=KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
+        value="NIHR Senior Investigator",
+        excerpt=(
+            "The NIHR has announced its 2026 cohort of Senior Investigators, "
+            "recognising outstanding leaders in health and care research."
+        ),
+        url=NIHR_URL,
+        ref_id="turn8search0",
+        call_id="call_KLTzFeZeazG7AjjhDp42wUtj",
+        fc_id="fc_03938c1e0667a7cc016a67837ae26881958bb5e280a116e970",
+        fco_id="fco_019fa459-b0f8-79e1-88f4-535744154d8e",
+        fco_timestamp="2026-07-27T16:12:49.272Z",
+        arguments_json=CALL_ARGUMENTS_TURN_8,
+        display_arguments_json=CALL_ARGUMENTS_TURN_8,
+    ),
+    ExpectedEvidence(
+        column=KTP_AI_AUGMENT_LINKS_COL,
+        value=COMPANY_URL,
+        excerpt='Source: open({"ref_id":"turn5search0","lineno":null}); Total lines: 92',
+        url=COMPANY_URL,
+        ref_id="turn6view0",
+        call_id="call_dWCc1wam5TvIfxwvI1o6RPEL",
+        fc_id="fc_03938c1e0667a7cc016a678370815881958bcee4380dc8ed61",
+        fco_id="fco_019fa459-750e-7920-b0cf-ef211333113f",
+        fco_timestamp="2026-07-27T16:12:33.934Z",
+        arguments_json=CALL_ARGUMENTS_TURN_6,
+        display_arguments_json=DISPLAY_ARGUMENTS_TURN_6,
+    ),
+)
+EXPECTED_COMMENT = "OpenAlex records may contain identity conflation."
+
+EXPECTED_CALL_LINKS = (
+    (
+        "call_JrCO9EEdFFwnncEyo0Tky0N3",
+        "fc_03938c1e0667a7cc016a67831675848195b35c40d330cd04b2",
+        "fco_019fa458-1fef-7a43-9f53-7d987861ad64",
+    ),
+    (
+        "call_C9nCCxE2YU5zrv9kI6ewtswG",
+        "fc_03938c1e0667a7cc016a67831c12b08195ae364f3f129f750c",
+        "fco_019fa458-3b72-7a83-8874-2b9e174b5aed",
+    ),
+    (
+        "call_Tv7D3tbhKCOUBdz2xfruMIIY",
+        "fc_03938c1e0667a7cc016a678326af18819587231df3dd08c37d",
+        "fco_019fa458-5973-77a1-93a4-0c27355f8eb8",
+    ),
+    (
+        "call_YxDU7O0lAHezJU2HMRaJAd0O",
+        "fc_03938c1e0667a7cc016a678352e1c88195bee04fa6259f5b3c",
+        "fco_019fa459-06a6-7a73-9cb5-9e75d35f47c0",
+    ),
+    (
+        "call_S7SrLlbSPHIujjScm4LXYt2X",
+        "fc_03938c1e0667a7cc016a67836064b081958a409fea02229e26",
+        "fco_019fa459-3dda-7ea0-8d5c-2351036f67f5",
+    ),
+    (
+        "call_3OgJqG5RIvAQxxZZmTZc7puu",
+        "fc_03938c1e0667a7cc016a67836ab04081958d8880d3cb1990a0",
+        "fco_019fa459-6641-7d53-9347-4c7d663d5003",
+    ),
+    (
+        "call_dWCc1wam5TvIfxwvI1o6RPEL",
+        "fc_03938c1e0667a7cc016a678370815881958bcee4380dc8ed61",
+        "fco_019fa459-750e-7920-b0cf-ef211333113f",
+    ),
+    (
+        "call_SzOsv4AVuruWWBbM0oy5i4M0",
+        "fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        "fco_019fa459-883b-7480-b82c-b775520d1401",
+    ),
+    (
+        "call_KLTzFeZeazG7AjjhDp42wUtj",
+        "fc_03938c1e0667a7cc016a67837ae26881958bb5e280a116e970",
+        "fco_019fa459-b0f8-79e1-88f4-535744154d8e",
+    ),
+)
+
+EXPECTED_TABLE_COLUMNS = {
+    CODEX_FC_TABLE: (
+        "id",
+        "codex.fc_timestamp",
+        "codex.fc_id",
+        "codex.fc_name",
+        "codex.fc_namespace",
+        "codex.fc_arguments",
+    ),
+    CODEX_FCO_TABLE: ("id", "codex.fco_timestamp", "codex.fco_id"),
+    CODEX_CALLS_TABLE: (
+        "id",
+        "codex.call_id",
+        "codex.fc_id",
+        "codex.fco_id",
+        "codex.rollout_filename",
+    ),
+    CODEX_TURN_REF_TABLE: (
+        "id",
+        "codex.ref_id",
+        "codex.call_id",
+        "codex.ref_domain",
+        "codex.ref_snippet",
+        "codex.ref_thumbnail_url",
+        "codex.ref_title",
+        "codex.ref_url",
+        "codex.cite_text",
+    ),
+}
+OPTIONAL_REF_METADATA_COLUMNS = (
+    CODEX_REF_DOMAIN_COL,
+    CODEX_REF_SNIPPET_COL,
+    CODEX_REF_THUMBNAIL_URL_COL,
+    CODEX_REF_TITLE_COL,
+)
+
+
+# File access helpers are intentionally centralized for fixture auditability.
+def read_bytes(path: Path) -> bytes:
+    return path.read_bytes()
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding=TEXT_ENCODING)
+
+
+def write_bytes(path: Path, value: bytes) -> None:
+    path.write_bytes(value)
+
+
+def write_text(path: Path, value: str) -> None:
+    path.write_text(value, encoding=TEXT_ENCODING)
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    value = json.loads(read_text(path))
+    assert isinstance(value, dict)
+    return value
+
+
+def file_signature(path: Path) -> tuple[int, int, str]:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(ARCHIVE_HASH_CHUNK_BYTES):
+            digest.update(chunk)
+    stat = path.stat()
+    return stat.st_size, stat.st_mtime_ns, digest.hexdigest()
+
+
+def read_zip_text(path: Path) -> str:
+    with ZipFile(path) as archive:
+        names = archive.namelist()
+        assert names
+        return "\n".join(archive.read(name).decode(TEXT_ENCODING) for name in names)
+
+
+def zip_member_names(path: Path) -> tuple[str, ...]:
+    with ZipFile(path) as archive:
+        return tuple(archive.namelist())
+
+
+def open_readonly_database(path: Path) -> duckdb.DuckDBPyConnection:
+    return duckdb.connect(str(path), read_only=True)
+
+
+type DatabaseSnapshot = dict[
+    str, tuple[str, tuple[tuple[object, ...], ...], tuple[tuple[object, ...], ...]]
+]
+
+
+def logical_database_snapshot(path: Path) -> DatabaseSnapshot:
+    connection = open_readonly_database(path)
+    try:
+        return _database_snapshot(
+            lambda sql, parameters: connection.execute(sql, parameters).fetchall()
+        )
+    finally:
+        connection.close()
+
+
+def store_database_snapshot(store: AiAugmentBackendStore) -> DatabaseSnapshot:
+    return _database_snapshot(
+        lambda sql, parameters: store._execute(sql, parameters).fetchall()
+    )
+
+
+def _database_snapshot(
+    rows: Callable[[str, list[object] | None], list[tuple[object, ...]]],
+) -> DatabaseSnapshot:
+    relations = rows(
+        "SELECT table_name, table_type FROM information_schema.tables "
+        "WHERE table_schema = 'main' ORDER BY table_name",
+        None,
+    )
+    return {
+        str(name): (
+            str(relation_type),
+            tuple(rows(
+                "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
+                "WHERE table_schema = 'main' AND table_name = ? ORDER BY ordinal_position",
+                [name],
+            )),
+            tuple(rows(f"SELECT * FROM {duckdb_quote_identifier(str(name))} ORDER BY ALL", None)),
+        )
+        for name, relation_type in relations
+    }
+
+
+def rollout_record(
+    value: dict[str, JsonValue], line_number: int
+) -> post_commit_validation._RolloutRecordLine:
+    raw_line = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
+    return post_commit_validation._RolloutRecordLine(
+        line_number=line_number,
+        line_sha256=hashlib.sha256(raw_line).hexdigest(),
+        line_value=value,
+    )
+
+
+def minimal_rollout_records(
+    action: str = "search_query",
+) -> tuple[post_commit_validation._RolloutRecordLine, ...]:
+    arguments = {
+        "search_query": [{"q": "example"}],
+        "open": [{"ref_id": TEST_REF_ID}],
+        "click": [{"ref_id": TEST_REF_ID, "id": 1}],
+        "find": [{"ref_id": TEST_REF_ID, "pattern": "example"}],
+    }[action]
+    cite_text = (
+        f"Result\n{CODEX_CITE_MARKER_PREFIX}{TEST_REF_ID}"
+        f"{CODEX_CITE_MARKER_SUFFIX}\n{TEST_EXCERPT}"
+    )
+    values: tuple[dict[str, JsonValue], ...] = (
+        {
+            "timestamp": TEST_SESSION_TIMESTAMP,
+            "type": "session_meta",
+            "payload": {
+                "session_id": str(TEST_SESSION_ID),
+                "timestamp": TEST_SESSION_TIMESTAMP,
+                "originator": "codex_vscode",
+                "source": "vscode",
+                "cli_version": "test",
+                "model_provider": "openai",
+            },
+        },
+        {
+            "timestamp": TEST_SESSION_TIMESTAMP,
+            "type": "turn_context",
+            "payload": {"model": "test-model", "effort": "high"},
+        },
+        {
+            "timestamp": "2026-07-31T16:11:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "id": TEST_FC_ID,
+                "name": "run",
+                "namespace": "web",
+                "arguments": json.dumps(
+                    {action: arguments, "response_length": "long"},
+                    separators=(",", ":"),
+                ),
+                "call_id": TEST_CALL_ID,
+            },
+        },
+        {
+            "timestamp": "2026-07-31T16:11:01.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "web_search_end",
+                "call_id": TEST_CALL_ID,
+                "results": [
+                    {
+                        "type": "text_result",
+                        "domain": "example.test",
+                        "ref_id": TEST_REF_ID,
+                        "snippet": "Example snippet",
+                        "thumbnail_url": "https://example.test/thumbnail.png",
+                        "title": "Example title",
+                        "url": TEST_URL,
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-31T16:11:02.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "id": TEST_FCO_ID,
+                "call_id": TEST_CALL_ID,
+                "output": [{"type": "input_text", "text": cite_text}],
+            },
+        },
+    )
+    return tuple(
+        rollout_record(value, line_number) for line_number, value in enumerate(values, start=1)
+    )
+
+
+def build_test_index(action: str = "search_query") -> post_commit_validation._RolloutIndex:
+    return post_commit_validation.build_rollout_index(
+        minimal_rollout_records(action),
+        timezone_name=TEST_TIMEZONE,
+        configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+    )
+
+
+def web_arguments_rollout(
+    *argument_sets: dict[str, object],
+) -> tuple[post_commit_validation._RolloutRecordLine, ...]:
+    records = list(minimal_rollout_records()[:2])
+    for index, arguments in enumerate(argument_sets):
+        for record in minimal_rollout_records()[2:]:
+            value = json.loads(json.dumps(record.line_value))
+            payload = value["payload"]
+            payload["call_id"] = f"call_arguments_{index}"
+            if payload["type"] == "function_call":
+                payload["id"] = f"fc_arguments_{index}"
+                payload["arguments"] = json.dumps(arguments)
+            elif payload["type"] == "function_call_output":
+                payload["id"] = f"fco_arguments_{index}"
+                payload["output"][0]["text"] = payload["output"][0]["text"].replace(
+                    TEST_REF_ID, f"turn{index}search0",
+                )
+            else:
+                payload["results"][0]["ref_id"] = f"turn{index}search0"
+            records.append(rollout_record(value, len(records) + 1))
+    return tuple(records)
+
+
+def build_duplicate_evidence_index() -> post_commit_validation._RolloutIndex:
+    index = build_test_index()
+    return post_commit_validation._RolloutIndex(
+        session=index.session,
+        fc_rows=index.fc_rows
+        + (
+            post_commit_validation._CodexFcRow(
+                timestamp=index.fc_rows[0].timestamp,
+                fc_id=TEST_VIEW_FC_ID,
+                call_id=TEST_VIEW_CALL_ID,
+                name="run",
+                namespace="web",
+                arguments_json=TEST_VIEW_ARGUMENTS,
+            ),
+        ),
+        fco_rows=index.fco_rows
+        + (
+            post_commit_validation._CodexFcoRow(
+                timestamp=index.fco_rows[0].timestamp,
+                fco_id=TEST_VIEW_FCO_ID,
+                call_id=TEST_VIEW_CALL_ID,
+            ),
+        ),
+        turn_ref_rows=index.turn_ref_rows
+        + (
+            post_commit_validation._CodexTurnRefRow(
+                ref_id=TEST_VIEW_REF_ID,
+                call_id=TEST_VIEW_CALL_ID,
+                domain="example.test",
+                snippet="Opened result",
+                thumbnail_url=None,
+                title="Opened title",
+                url=TEST_URL,
+                cite_text=f"Opened result: {TEST_EXCERPT}",
+            ),
+        ),
+    )
+
+
+def build_citation_index(
+    sections: tuple[tuple[str, str], ...],
+) -> post_commit_validation._RolloutIndex:
+    index = build_test_index()
+    return post_commit_validation._RolloutIndex(
+        session=index.session,
+        fc_rows=index.fc_rows,
+        fco_rows=index.fco_rows,
+        turn_ref_rows=tuple(
+            post_commit_validation._CodexTurnRefRow(
+                ref_id=f"turn0search{section_index}",
+                call_id=TEST_CALL_ID,
+                domain="example.test",
+                snippet="Example snippet",
+                thumbnail_url=None,
+                title="Example title",
+                url=url,
+                cite_text=cite_text,
+            )
+            for section_index, (url, cite_text) in enumerate(sections)
+        ),
+    )
+
+
+def submission_body_for_evidence(
+    excerpt: str,
+    *,
+    url: str = TEST_URL,
+) -> dict[str, object]:
+    return {
+        column: {
+            "value": column,
+            "web_search_excerpts": [{"excerpt": excerpt, "url": url}],
+        }
+        for column in AI_AUGMENT_EVIDENCE_COLUMNS
+    }
+
+
+def standardized_submission_body(
+    plain_body: dict[str, object],
+) -> dict[str, object]:
+    standardized_body = deepcopy(plain_body)
+    for column in AI_AUGMENT_EVIDENCE_COLUMNS:
+        field_submission = standardized_body[column]
+        assert isinstance(field_submission, dict)
+        field_submission[FIELD_STANDARDIZED_VALUE_FIELD] = deepcopy(
+            TEST_STANDARDIZED_VALUES[column]
+        )
+    return standardized_body
+
+
+def year_only_1968_age(as_of: date) -> dict[str, object]:
+    birth = pydantic_to_paste.DateOfBirth(
+        year=1968, month=NOT_REPORTED_VALUE, day=NOT_REPORTED_VALUE,
+    )
+    return {
+        "age": {
+            "inferred": birth.infer_age(as_of).model_dump(mode="json"),
+            "provenance": "computed",
+            "computed": {
+                "as_of": as_of.isoformat(),
+                "basis": "birth",
+                "birth": {
+                    "inferred": birth.model_dump(mode="json"),
+                    "provenance": "reported",
+                    "reported": "1968",
+                },
+            },
+        },
+    }
+
+
+def capture_http_record(
+    captured: list[HttpRequestLogRecord], record: HttpRequestLogRecord,
+) -> HttpRequestLogRecord:
+    captured.append(record)
+    return HttpRequestLogRecord.model_validate_json(record.model_dump_json())
+
+
+class _AlgorithmTestDatabase(AiAugmentDetourDB):
+    """Borrow a test-owned connection; production resource ownership is tested separately."""
+
+    @contextmanager
+    def writable(self) -> Generator[Self, None, None]:
+        yield self
+
+    @contextmanager
+    def read_only(self) -> Generator[Self, None, None]:
+        yield self
+
+
+def store_for_connection(
+    connection: duckdb.DuckDBPyConnection, *, transaction_active: bool = True,
+) -> AiAugmentBackendStore:
+    """Exercise domain SQL with an explicitly test-owned in-memory database."""
+    database = _AlgorithmTestDatabase(path=Path(":memory:"))
+    database._conn = connection
+    store = AiAugmentBackendStore(rollout_cas=AiAugmentCAS(path=Path("unused-test-cas")))
+    store._detour_db = database
+    store._mode = "writable"
+    store._transaction_active = transaction_active
+    return store
+
+
+def connect_v2_index(
+    index: post_commit_validation._RolloutIndex,
+    *,
+    config_path: Path,
+    database_path: Path | None = None,
+) -> tuple[duckdb.DuckDBPyConnection, post_commit_validation._RolloutIndex]:
+    connection = duckdb.connect(str(database_path) if database_path is not None else ":memory:")
+    try:
+        load_duckdb_extension_from_config_path(
+            connection,
+            "splink_udfs",
+            config_path,
+            log=None,
+        )
+    except RuntimeError as exc:
+        connection.close()
+        pytest.skip(f"configured DuckDB token extension is unavailable: {exc}")
+    store_for_connection(connection)._persist_rollout_index(
+        index,
+        codex_match_version=2,
+    )
+    return connection, index
+
+
+def historical_haanen_submissions(
+    paths: BackendTestPaths,
+) -> tuple[dict[str, object], dict[str, object]]:
+    if not paths.haanen_rejected_rollout.is_file() or not paths.haanen_accepted_rollout.is_file():
+        pytest.skip("optional historical Haanen rollout fixtures are unavailable")
+    rejected_stream = paths.haanen_rejected_rollout.open("r", encoding=TEXT_ENCODING)
+    accepted_stream = paths.haanen_accepted_rollout.open("r", encoding=TEXT_ENCODING)
+    tool_inputs: list[list[str]] = []
+    for stream in (rejected_stream, accepted_stream):
+        inputs: list[str] = []
+        with stream:
+            for line in stream:
+                value = json.loads(line)
+                payload = value.get(CODEX_PAYLOAD_KEY)
+                if (
+                    isinstance(payload, dict)
+                    and payload.get(CODEX_TYPE_KEY) == HAANEN_TOOL_CALL_TYPE
+                    and isinstance(payload.get(HAANEN_TOOL_INPUT_KEY), str)
+                ):
+                    inputs.append(payload[HAANEN_TOOL_INPUT_KEY])
+        tool_inputs.append(inputs)
+
+    rejected_input = next(
+        value for value in tool_inputs[0] if HAANEN_HEREDOC_START.replace("\n", "\\n") in value
+    )
+    rejected_command, _end = HAANEN_JSON_DECODER.raw_decode(
+        rejected_input.split(HAANEN_COMMAND_START, 1)[1]
+    )
+    rejected_document = rejected_command.split(HAANEN_HEREDOC_START, 1)[1].split(
+        HAANEN_HEREDOC_END,
+        1,
+    )[0]
+
+    accepted_input = next(
+        value for value in tool_inputs[1] if HAANEN_PATCH_FILE_START.replace("\n", "\\n") in value
+    )
+    accepted_patch, _end = HAANEN_JSON_DECODER.raw_decode(
+        accepted_input.split(HAANEN_PATCH_ASSIGNMENT_START, 1)[1]
+    )
+    accepted_lines = accepted_patch.split(HAANEN_PATCH_FILE_START, 1)[1].split(
+        HAANEN_PATCH_END,
+        1,
+    )[0]
+    accepted_document = "\n".join(
+        line[1:] for line in accepted_lines.splitlines() if line.startswith("+")
+    )
+
+    rejected_submission = json.loads(rejected_document)
+    accepted_submission = json.loads(accepted_document)
+    assert isinstance(rejected_submission, dict)
+    assert isinstance(accepted_submission, dict)
+    race_evidence_source = KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL
+    rejected_submission[KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL] = {
+        FIELD_VALUE_FIELD: "Not present in the archived pre-field submission.",
+        FIELD_EVIDENCE_FIELD: deepcopy(
+            rejected_submission[race_evidence_source][FIELD_EVIDENCE_FIELD][:1]
+        ),
+    }
+    accepted_submission[KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL] = deepcopy(
+        rejected_submission[KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL]
+    )
+    accepted_submission = standardized_submission_body(accepted_submission)
+    return rejected_submission, accepted_submission
+
+
+def valid_submission_body(*, include_comments: bool = True) -> dict[str, object]:
+    body: dict[str, object] = {
+        expected.column: {
+            "value": expected.value,
+            "web_search_excerpts": [{"excerpt": expected.excerpt, "url": expected.url}],
+        }
+        for expected in EXPECTED_EVIDENCE
+    }
+    if include_comments:
+        body[KTP_AI_AUGMENT_COMMENTS_COL] = {"value": EXPECTED_COMMENT}
+    return body
+
+
+def report_for_rollout(relative_path: PurePosixPath) -> str:
+    lines = ["."]
+    for depth, part in enumerate(relative_path.parts):
+        prefix = "    " * depth + "└── "
+        lines.append(
+            prefix
+            + (
+                f"{APPENDWATCH_OK_PREFIX}{part}"
+                if part == relative_path.name else f"{part}/"
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def runtime_for_test(
+    tmp_path: Path,
+    paths: BackendTestPaths,
+    *,
+    output_format: str = "txt",
+    source_database: Path | None = None,
+    namekey: str | None = None,
+    codex_match_version: int | None = None,
+) -> AiAugmentBackendContext:
+    output_dir = tmp_path / "output"
+    replay_log_path = tmp_path / "authoritative.jsonl"
+    rollout_cas_dir = tmp_path / "rollout-cas"
+    output_dir.mkdir(exist_ok=True)
+    replay_log_path.write_text("", encoding=TEXT_ENCODING)
+    config_data = json.loads(paths.ai_augment_config.read_text(encoding=TEXT_ENCODING))
+    config_data["files_config"][REPLAY_LOG_KEY] = {
+        "path": str(replay_log_path),
+        "sha256": hashlib.sha256(b"").hexdigest(),
+        "desc": "isolated Backend test replay log",
+    }
+    configured_pipeline = AiAugmentDetourConfig.model_validate_json(
+        json.dumps(config_data),
+        context={"verify_hash_on_init": False},
+    )
+    rollout_cas = AiAugmentCAS(path=rollout_cas_dir)
+    pipeline = configured_pipeline.model_copy(
+        update={
+            "db_file": source_database or paths.source_database,
+            "output_dir": output_dir,
+            "output_format": output_format,
+            "pandoc_reference_docx": paths.reference_docx,
+            "rollout_cas": rollout_cas,
+            "match_rule_version": (
+                configured_pipeline.match_rule_version
+                if codex_match_version is None
+                else configured_pipeline.match_rule_version.model_copy(
+                    update={"codex_match": codex_match_version}
+                )
+            ),
+        }
+    )
+    ai_augment_singular_outerdicts: tuple[AiAugmentSingularOuterDict, ...] = ()
+    configured_namekey: NameKey | None = None
+    if namekey is not None:
+        configured_namekey = NameKey.from_json_key(namekey)
+        source_connection = duckdb.connect(str(pipeline.db_file), read_only=True)
+        try:
+            xlsx = _source_innerdicts_by_namekey(
+                source_connection, table_name=XLSX_INNERDICT_TABLE,
+                procedure=XlsxMatchProcedure(),
+            )
+            ssn = _source_innerdicts_by_namekey(
+                source_connection, table_name=PARQUET_INNERDICT_TABLE,
+                procedure=ParquetMatchProcedure(),
+            )
+            docx = _source_innerdicts_by_namekey(
+                source_connection, table_name=DOCX_INNERDICT_TABLE,
+                procedure=DocxMatchProcedure(),
+            )
+            ai_augment_singular_outerdicts = (
+                AiAugmentSingularOuterDict(
+                    namekey=configured_namekey,
+                    xlsx_innerdicts=xlsx[namekey],
+                    ssn_innerdicts=ssn.get(namekey, ()),
+                    docx_innerdicts=docx.get(namekey, ()),
+                    ai_augment_rnd=1,
+                    ai_augment_cohort=AiAugmentCohort.GROUND_TRUTH,
+                ),
+            )
+        finally:
+            source_connection.close()
+    return AiAugmentBackendContext(
+        pipeline_config=pipeline,
+        ai_augment_singular_outerdict_blueprints=ai_augment_singular_outerdicts,
+    )
+
+
+def backend_store_for_test(runtime: AiAugmentBackendContext) -> AiAugmentBackendStore:
+    config = runtime.pipeline_config
+    return AiAugmentBackendStore._from_resources(
+        replay_log=config.replay_log,
+        detour_db=AiAugmentDetourDB(
+            path=config.output_dir.parent / "detour_ai_augment.duckdb",
+            duckdb_extensions=config.duckdb_extensions,
+        ),
+        rollout_cas=config.rollout_cas,
+    )
+
+
+@contextmanager
+def writable_backend_store(
+    runtime: AiAugmentBackendContext,
+) -> Generator[AiAugmentBackendStore, None, None]:
+    store = backend_store_for_test(runtime)
+    if not store._detour_db_path.exists():
+        store._rebuild_from_log(runtime, reset_confirmed=True)
+    with store._writable(runtime):
+        if store._init_request_record is None:
+            store._append_authoritative_record(init_request_record(
+                runtime.ai_augment_singular_outerdict_blueprints[0].namekey,
+            ))
+        yield store
+
+
+@pytest.fixture
+def api_runtime(tmp_path: Path, backend_test_paths: BackendTestPaths) -> AiAugmentBackendContext:
+    source = tmp_path / "source.duckdb"
+    create_operator_capture_source_database(source, {column: "NR" for column in DOCX_COLUMNS})
+    return runtime_for_test(
+        tmp_path, backend_test_paths, source_database=source,
+        namekey=TEST_NAMEKEY, codex_match_version=1,
+    )
+
+
+@pytest.fixture
+def api_store(api_runtime: AiAugmentBackendContext) -> AiAugmentBackendStore:
+    store = backend_store_for_test(api_runtime)
+    store._rebuild_from_log(api_runtime, reset_confirmed=True)
+    with store._writable(api_runtime):
+        store._append_authoritative_record(init_request_record(TEST_NAMEKEY_MODEL))
+    return store
+
+
+@pytest.fixture
+def api_push_capture(
+    api_runtime: AiAugmentBackendContext,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> tuple[CodexRolloutRecord, aivm_audit._AivmAuditConfiguration]:
+    payload = operator_capture_rollout(valid_submission_body())
+    digest = hashlib.sha256(payload).hexdigest()
+    cas = api_runtime.pipeline_config.rollout_cas
+    cas.initialize()
+    blob = cas.path / digest[:2] / digest[2:4] / digest
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    blob.write_bytes(payload)
+    rollout = CodexRolloutRecord(sha256=digest, size=len(payload), line_count=payload.count(b"\n"))
+    relative = PurePosixPath(
+        f"2026/09/03/rollout-2026-09-03T15-16-00-{OPERATOR_CAPTURED_SESSION_ID}.jsonl"
+    )
+    for path in (tmp_path / "ssh.config", tmp_path / "id", tmp_path / "known-hosts"):
+        write_text(path, "fixture\n")
+    monkeypatch.setattr(aivm_audit, "APPENDWATCH_REPORT", "/report.txt")
+    monkeypatch.setattr(aivm_audit, "LIMA_SSH_CONFIG_PATH", tmp_path / "ssh.config")
+    monkeypatch.setattr(aivm_audit, "AIVM_IDENTITY_FILE", tmp_path / "id")
+    monkeypatch.setattr(aivm_audit, "AIVM_KNOWN_HOSTS_FILE", tmp_path / "known-hosts")
+    configuration = aivm_audit.audit_configuration(f"/home/ai/.codex/sessions/{relative}")
+
+    def guest_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        assert command[0] == SSH_EXECUTABLE
+        assert command[-2] == configuration.ssh_target
+        if command[-1] == f"{AUDIT_FIND_ROLLOUT_COMMAND} {OPERATOR_CAPTURED_SESSION_ID}":
+            return SimpleNamespace(
+                returncode=0, stdout=f"{configuration.rollout_guest_path}\n", stderr="",
+            )
+        if command[-1] == f"{AUDIT_READ_ROLLOUT_COMMAND} {relative}":
+            cast(Any, kwargs["stdout"]).write(payload)
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        assert command[-1] == (
+            f"{AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
+        )
+        return SimpleNamespace(
+            returncode=0, stdout=report_for_rollout(relative).encode(), stderr=b"",
+        )
+
+    # Substitute only the external guest transport; discovery, CAS, and report reading run.
+    monkeypatch.setattr(subprocess, "run", guest_run)
+    monkeypatch.setattr(api, "BACKEND_SESSION_ID", UUID(OPERATOR_CAPTURED_SESSION_ID))
+    monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
+    monkeypatch.setattr(api, "AUTHORITATIVE_BACKGROUND_TASKS", set())
+    return rollout, configuration
+
+
+def prepare_real_sample_push(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    paths: BackendTestPaths,
+    *,
+    output_format: str = "txt",
+) -> SimpleNamespace:
+    deployment_dir = tmp_path / "deployment"
+    deployment_dir.mkdir()
+    report_path = deployment_dir / "appendwatch-tree.txt"
+    identity_path = deployment_dir / "id_ed25519"
+    known_hosts_path = deployment_dir / "known_hosts"
+    lima_config_path = deployment_dir / "ssh.config"
+    write_text(report_path, report_for_rollout(JULY_ROLLOUT_RELATIVE_PATH))
+    for path in (identity_path, known_hosts_path, lima_config_path):
+        write_text(path, "fixture\n")
+
+    runtime = runtime_for_test(tmp_path, paths, output_format=output_format)
+    rendered_cards: list[str] = []
+    monkeypatch.setattr(
+        aivm_audit, "APPENDWATCH_REPORT", "/mounted/appendwatch-tree.txt",
+    )
+    monkeypatch.setattr(aivm_audit, "LIMA_SSH_CONFIG_PATH", lima_config_path)
+    monkeypatch.setattr(aivm_audit, "AIVM_IDENTITY_FILE", identity_path)
+    monkeypatch.setattr(aivm_audit, "AIVM_KNOWN_HOSTS_FILE", known_hosts_path)
+    configuration = aivm_audit.audit_configuration(JULY_ROLLOUT_GUEST_PATH)
+    monkeypatch.setattr(
+        ai_augment_detour_db,
+        "load_duckdb_extension",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def fake_subprocess(
+        command: list[str],
+        **kwargs: object,
+    ) -> SimpleNamespace:
+        if command[0] == SSH_EXECUTABLE:
+            assert command[-2] == configuration.ssh_target
+            if command[-1] == (f"{AUDIT_READ_ROLLOUT_COMMAND} {JULY_ROLLOUT_RELATIVE_PATH}"):
+                cast(Any, kwargs["stdout"]).write(read_bytes(paths.july_rollout))
+                return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+            assert command[-1] == (
+                f"{AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
+            )
+            return SimpleNamespace(
+                returncode=0,
+                stdout=read_bytes(report_path),
+                stderr=b"",
+            )
+        assert command[0] == "pandoc"
+        output_path = Path(command[command.index("-o") + 1])
+        write_bytes(output_path, b"test DOCX renderer output")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess)
+
+    return SimpleNamespace(
+        payload=valid_submission_body(),
+        runtime=runtime,
+        report_path=report_path,
+        configuration=configuration,
+        rendered_cards=rendered_cards,
+    )
+
+
+def operator_capture_fixture(detour_root: Path, filename: str) -> Path:
+    return detour_root / "protected" / "tests" / "fixtures" / filename
+
+
+def operator_retry_baseline(
+    accepted_push: dict[str, object],
+) -> dict[str, object]:
+    baseline = deepcopy(accepted_push)
+    for column in AI_AUGMENT_EVIDENCE_COLUMNS:
+        field = baseline[column]
+        assert isinstance(field, dict)
+        field.pop(FIELD_STANDARDIZED_VALUE_FIELD)
+
+    education = baseline[KTP_AI_AUGMENT_EDUCATION_COL]
+    assert isinstance(education, dict)
+    education[FIELD_VALUE_FIELD] = (
+        "BSc Physiology, University College London (1990); MBBS Medicine, "
+        "University College London (1993); three additional unverified credentials."
+    )
+    evidence = education[FIELD_EVIDENCE_FIELD]
+    assert isinstance(evidence, list)
+    evidence[1:] = [
+        {
+            EVIDENCE_EXCERPT_FIELD: f"Unverified captured credential {index}",
+            EVIDENCE_URL_FIELD: f"https://unverified.invalid/credential-{index}",
+        }
+        for index in range(1, 4)
+    ]
+    return baseline
+
+
+def operator_capture_rollout(
+    accepted_push: dict[str, object], *, session_id: UUID | None = None,
+) -> bytes:
+    session_key = OPERATOR_CAPTURED_SESSION_ID if session_id is None else str(session_id)
+    records: list[dict[str, object]] = [
+        {
+            "timestamp": OPERATOR_CAPTURED_SESSION_TIMESTAMP,
+            "type": "session_meta",
+            "payload": {
+                "session_id": session_key,
+                "timestamp": OPERATOR_CAPTURED_SESSION_TIMESTAMP,
+                "originator": "codex_cli_rs",
+                "source": "exec",
+                "cli_version": "0.146.0-alpha.3.1",
+                "model_provider": "openai",
+            },
+        },
+        {
+            "timestamp": OPERATOR_CAPTURED_SESSION_TIMESTAMP,
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.6-sol", "effort": "xhigh"},
+        },
+    ]
+    evidence_index = 0
+    for column in AI_AUGMENT_EVIDENCE_COLUMNS:
+        field = accepted_push[column]
+        assert isinstance(field, dict)
+        evidence = field[FIELD_EVIDENCE_FIELD]
+        assert isinstance(evidence, list)
+        for item in evidence:
+            assert isinstance(item, dict)
+            if EVIDENCE_WITHDRAWAL_ACTION_FIELD in item:
+                continue
+            excerpt = item[EVIDENCE_EXCERPT_FIELD]
+            url = item[EVIDENCE_URL_FIELD]
+            assert isinstance(excerpt, str)
+            assert isinstance(url, str)
+            call_id = f"call_operator_{session_key}_{evidence_index}"
+            ref_id = f"turn0search{evidence_index}"
+            timestamp = f"2026-09-03T19:16:{evidence_index + 1:02d}.000Z"
+            arguments = {
+                "search_query": [{"q": f"captured operator evidence {evidence_index}"}],
+                "response_length": "long",
+            }
+            records.extend((
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "id": f"fc_operator_{session_key}_{evidence_index}",
+                        "name": "run",
+                        "namespace": "web",
+                        "arguments": json.dumps(arguments, separators=(",", ":")),
+                        "call_id": call_id,
+                    },
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "web_search_end",
+                        "call_id": call_id,
+                        "results": [
+                            {
+                                "type": "text_result",
+                                "domain": "captured.operator.test",
+                                "ref_id": ref_id,
+                                "snippet": excerpt,
+                                "thumbnail_url": None,
+                                "title": f"Captured operator evidence {evidence_index}",
+                                "url": url,
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "id": f"fco_operator_{session_key}_{evidence_index}",
+                        "call_id": call_id,
+                        "output": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "Captured result\n"
+                                    f"{CODEX_CITE_MARKER_PREFIX}{ref_id}"
+                                    f"{CODEX_CITE_MARKER_SUFFIX}\n{excerpt}"
+                                ),
+                            }
+                        ],
+                    },
+                },
+            ))
+            evidence_index += 1
+    return b"".join(
+        json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
+        for record in records
+    )
+
+
+def create_operator_capture_source_database(
+    path: Path,
+    ground_truth: Mapping[str, object],
+) -> None:
+    xlsx_row = {
+        KTP_NAMEKEY_COL: TEST_NAMEKEY,
+        KTP_FILENAME_COL: "operator-capture.xlsx",
+        KTP_FRAGMENT_COL: 148,
+        KTP_FRAGMENT_TYPE_COL: "csv_row",
+        DRAW_LABEL: "146",
+        KTP_FIRST_NAME_COL: "A.",
+        KTP_LAST_NAME_COL: "Sheikh",
+    }
+    docx_row = {
+        KTP_NAMEKEY_COL: TEST_NAMEKEY,
+        KTP_FILENAME_COL: "operator-capture.docx",
+        KTP_FRAGMENT_COL: 1,
+        KTP_FRAGMENT_TYPE_COL: "docx_table",
+        DRAW_LABEL: "146",
+        **ground_truth,
+    }
+    connection = duckdb.connect(str(path))
+    try:
+        for table_name in (
+            XLSX_INNERDICT_TABLE,
+            DOCX_INNERDICT_TABLE,
+            PARQUET_INNERDICT_TABLE,
+        ):
+            connection.execute(
+                f"CREATE TABLE {duckdb_quote_identifier(table_name)} ("
+                f"{duckdb_quote_identifier(KTP_NAMEKEY_COL)} VARCHAR PRIMARY KEY, "
+                f"{duckdb_quote_identifier(KTP_INNERDICT_JSONLINES_COL)} VARCHAR NOT NULL)"
+            )
+        connection.execute(
+            f"INSERT INTO {duckdb_quote_identifier(XLSX_INNERDICT_TABLE)} VALUES (?, ?)",
+            [TEST_NAMEKEY, api.json_line(xlsx_row)],
+        )
+        connection.execute(
+            f"INSERT INTO {duckdb_quote_identifier(DOCX_INNERDICT_TABLE)} VALUES (?, ?)",
+            [TEST_NAMEKEY, api.json_line(docx_row)],
+        )
+    finally:
+        connection.close()
+
+
+def query_snapshot_for_test(
+    store: BackendComponent.QueryOnlyStoreProperty, threaded_loop: asyncio.Runner,
+) -> DashboardQuerySnapshot:
+    app = server.create_dashboard_query_app(
+        store.query_response_record,
+        query_path=DASHBOARD_QUERY_PATH,
+    )
+    response = threaded_loop.run(
+        asyncio.to_thread(app.test_client().get, DASHBOARD_QUERY_PATH)
+    )
+    assert response.status_code == HTTPStatus.OK
+    return DashboardQuerySnapshot.from_serialized_json(response.get_data())
+
+
+def api_application_for_test(
+    runtime: AiAugmentBackendContext, store: AiAugmentBackendStore,
+) -> FastAPI:
+    app = FastAPI()
+    app.state.store = store
+    app.state.request_gate = server._BackendRequestGate()
+    app.get(PULL_PATH)(server.pull)
+    app.post(PUSH_PATH)(server.push)
+    app.add_middleware(server._BackendRequestMiddleware)
+    return app
+
+
+async def authoritative_api_exchange(
+    runtime: AiAugmentBackendContext,
+    store: AiAugmentBackendStore,
+    method: str,
+    path: str,
+    body: bytes = b"",
+) -> tuple[HTTPStatus, bytes]:
+    store._loop = asyncio.get_running_loop()
+    app = api_application_for_test(runtime, store)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+    ) as client:
+        response = await client.request(
+            method, path, content=body,
+            headers={HTTP_CONTENT_TYPE_HEADER.lower(): ContentType.JSON},
+        )
+    # This helper checks final workflow results. Early-202 timing is tested separately.
+    await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+    return HTTPStatus(response.status_code), response.content
+
+
+def assert_captured_operator_push_contour(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
+    detour_root: Path,
+    threaded_loop: asyncio.Runner,
+) -> None:
+    accepted_push_path = operator_capture_fixture(
+        detour_root,
+        OPERATOR_ACCEPTED_PUSH_FIXTURE,
+    )
+    accepted_push = read_json(accepted_push_path)
+    age_field = accepted_push[KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL]
+    assert isinstance(age_field, dict)
+    age_standardized = age_field[FIELD_STANDARDIZED_VALUE_FIELD]
+    assert isinstance(age_standardized, dict)
+    push_date = datetime.now(timezone.utc).date()
+    age_field[FIELD_STANDARDIZED_VALUE_FIELD] = year_only_1968_age(push_date)
+    accepted_push_body = json.dumps(accepted_push, ensure_ascii=False).encode()
+    evidence_accepted = deepcopy(accepted_push)
+    for column in AI_AUGMENT_EVIDENCE_COLUMNS:
+        field = evidence_accepted[column]
+        assert isinstance(field, dict)
+        field.pop(FIELD_STANDARDIZED_VALUE_FIELD)
+    accepted_values: dict[str, object] = {}
+    for column in AI_AUGMENT_COLUMNS:
+        field = accepted_push[column]
+        assert isinstance(field, dict)
+        accepted_values[column] = field[FIELD_VALUE_FIELD]
+    ground_truth = {
+        column: f"synthetic operator ground truth {index}"
+        for index, column in enumerate(DOCX_COLUMNS, start=1)
+    }
+    gone_response_text = api.json_line(accepted_values) + api.json_line(ground_truth)
+
+    source_database = tmp_path / "operator-capture-source.duckdb"
+    create_operator_capture_source_database(source_database, ground_truth)
+    runtime = runtime_for_test(
+        tmp_path,
+        backend_test_paths,
+        source_database=source_database,
+        namekey=TEST_NAMEKEY,
+        codex_match_version=1,
+    )
+    rollout_relative_path = PurePosixPath(
+        f"2026/09/03/rollout-2026-09-03T15-16-00-{OPERATOR_CAPTURED_SESSION_ID}.jsonl"
+    )
+    rollout_path = tmp_path / rollout_relative_path.name
+    write_bytes(rollout_path, operator_capture_rollout(accepted_push))
+    deployment_dir = tmp_path / "operator-capture-deployment"
+    deployment_dir.mkdir()
+    report_path = deployment_dir / "appendwatch-tree.txt"
+    write_text(report_path, report_for_rollout(rollout_relative_path))
+    identity_path = deployment_dir / "id_ed25519"
+    known_hosts_path = deployment_dir / "known_hosts"
+    lima_config_path = deployment_dir / "ssh.config"
+    for path in (identity_path, known_hosts_path, lima_config_path):
+        write_text(path, "fixture\n")
+    monkeypatch.setattr(
+        aivm_audit, "APPENDWATCH_REPORT", "/mounted/appendwatch-tree.txt",
+    )
+    monkeypatch.setattr(aivm_audit, "LIMA_SSH_CONFIG_PATH", lima_config_path)
+    monkeypatch.setattr(aivm_audit, "AIVM_IDENTITY_FILE", identity_path)
+    monkeypatch.setattr(aivm_audit, "AIVM_KNOWN_HOSTS_FILE", known_hosts_path)
+    configuration = aivm_audit.audit_configuration(
+        str(CODEX_SESSIONS_ROOT / rollout_relative_path)
+    )
+
+    institution_names = {
+        "I45129253": ("University College London", "https://ror.org/02jx3x895"),
+        "I40120149": ("University of Oxford", "https://ror.org/052gg0110"),
+        "I98677209": ("University of Edinburgh", "https://ror.org/01nrxwf90"),
+    }
+    ror_names = {
+        "02jx3x895": "University College London",
+        "052gg0110": "University of Oxford",
+        "01nrxwf90": "University of Edinburgh",
+    }
+
+    def fake_institution_send(
+        _session: requests.Session, request: requests.PreparedRequest, **_kwargs: object,
+    ) -> requests.Response:
+        url = request.url or ""
+        identifier = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
+        if url.startswith("https://api.openalex.org/"):
+            organization_name, ror = institution_names[identifier]
+            payload: dict[str, object] = {"display_name": organization_name, "ror": ror}
+        else:
+            payload = {"names": [{"value": ror_names[identifier], "types": ["ror_display"]}]}
+        response = requests.Response()
+        response.status_code = 200
+        response.request = request
+        response._content = json.dumps(payload).encode()
+        return response
+
+    def fake_subprocess_run(
+        command: list[str],
+        **kwargs: object,
+    ) -> SimpleNamespace:
+        assert command[0] == SSH_EXECUTABLE
+        assert command[-2] == configuration.ssh_target
+        if command[-1] == (
+            f"{AUDIT_FIND_ROLLOUT_COMMAND} {OPERATOR_CAPTURED_SESSION_ID}"
+        ):
+            return SimpleNamespace(
+                returncode=0, stdout=f"{configuration.rollout_guest_path}\n", stderr="",
+            )
+        if command[-1] == (
+            f"{AUDIT_READ_ROLLOUT_COMMAND} {configuration.rollout_relative_path}"
+        ):
+            cast(Any, kwargs["stdout"]).write(read_bytes(rollout_path))
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        assert command[-1] == (
+            f"{AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
+        )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=read_bytes(report_path),
+            stderr=b"",
+        )
+
+    monkeypatch.setenv(pydantic_to_paste.EXPORT_OPENALEX_API_KEY, "operator-fixture-key")
+    monkeypatch.setattr(requests.Session, "send", fake_institution_send)
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(api, "BACKEND_SESSION_ID", UUID(OPERATOR_CAPTURED_SESSION_ID))
+    monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
+    with writable_backend_store(runtime) as store:
+
+        async def run_captured_contour() -> tuple[
+            tuple[int, bytes],
+            tuple[int, bytes],
+            tuple[int, bytes],
+            tuple[int, bytes],
+            tuple[int, bytes],
+            tuple[int, bytes],
+            tuple[int, bytes],
+        ]:
+            initial_pull = await authoritative_api_exchange(
+                runtime,
+                store,
+                HTTP_GET_METHOD,
+                PULL_PATH,
+            )
+            baseline_push = await authoritative_api_exchange(
+                runtime,
+                store,
+                HTTP_POST_METHOD,
+                PUSH_PATH,
+                json.dumps(operator_retry_baseline(accepted_push)).encode(),
+            )
+            retry_pull = await authoritative_api_exchange(
+                runtime,
+                store,
+                HTTP_GET_METHOD,
+                PULL_PATH,
+            )
+            evidence_only_push = await authoritative_api_exchange(
+                runtime,
+                store,
+                HTTP_POST_METHOD,
+                PUSH_PATH,
+                json.dumps(evidence_accepted).encode(),
+            )
+            standardized_request_pull = await authoritative_api_exchange(
+                runtime,
+                store,
+                HTTP_GET_METHOD,
+                PULL_PATH,
+            )
+            accepted = await authoritative_api_exchange(
+                runtime,
+                store,
+                HTTP_POST_METHOD,
+                PUSH_PATH,
+                accepted_push_body,
+            )
+            gone_pull = await authoritative_api_exchange(
+                runtime,
+                store,
+                HTTP_GET_METHOD,
+                PULL_PATH,
+            )
+            return (
+                initial_pull, baseline_push, retry_pull, evidence_only_push,
+                standardized_request_pull, accepted, gone_pull,
+            )
+
+        (
+            initial_pull, baseline_push, retry_pull, evidence_only_push,
+            standardized_request_pull, accepted, gone_pull,
+        ) = threaded_loop.run(run_captured_contour())
+        assert initial_pull[0] == status.HTTP_200_OK
+        assert baseline_push[0] == status.HTTP_202_ACCEPTED
+        assert retry_pull[0] == status.HTTP_200_OK
+        assert evidence_only_push[0] == status.HTTP_202_ACCEPTED
+        assert standardized_request_pull[0] == status.HTTP_200_OK
+        assert accepted[0] == status.HTTP_202_ACCEPTED
+        assert gone_pull == (status.HTTP_410_GONE, gone_response_text.encode())
+
+        authoritative_records = tuple(
+            record
+            for record, _byte_offset in AiAugmentBackendStore._authoritative_log_records(
+                Path(runtime.pipeline_config.replay_log).read_bytes()
+            )
+        )
+        pushes = tuple(
+            record
+            for record in authoritative_records
+            if (record.method, record.path) == (HTTP_POST_METHOD, PUSH_PATH)
+        )
+        commits = tuple(
+            record
+            for record in authoritative_records
+            if (record.method, record.path) == (HTTP_POST_METHOD, COMMIT_PATH)
+        )
+        assert len(pushes) == len(commits) == 3
+        assert isinstance(pushes[-1].request_body, str)
+        assert pushes[-1].request_body == accepted_push_body.decode()
+        assert commits[-1].request_body is not None
+        accepted_commit_record, _ = store._cursor_commit_validation()
+        assert accepted_commit_record is not None
+        assert accepted_commit_record.record_id == commits[-1].record_id
+        accepted_commit = accepted_commit_record.commit_request_body
+        assert accepted_commit.push_response_record.record_id == pushes[-1].record_id
+        assert accepted_commit.pull_response_record.record_id == next(
+            record.record_id
+            for record in reversed(authoritative_records)
+            if (record.method, record.path) == (HTTP_GET_METHOD, PULL_PATH)
+            and record.response_code == status.HTTP_200_OK
+        )
+
+        interim = query_snapshot_for_test(store, threaded_loop)
+        assert not interim.ai_augment_singular_outerdicts[0].codex_innerdicts
+        from src.detours.detour_ai_augment.tests.backend.test_http_interceptor import (
+            outcome_for_commit,
+        )
+
+        store._append_authoritative_record(
+            outcome_for_commit(store, store._backend_commit_request_record(commits[-1],
+            )),
+        )
+
+        query = query_snapshot_for_test(store, threaded_loop)
+        validation_records = tuple(
+            record for record in authoritative_records if record.path == VALIDATE_PATH
+        )
+        assert len(validation_records) == 3
+        accepted_validation_http_record = validation_records[-1]
+        assert accepted_validation_http_record.request_body is not None
+        accepted_validation_body_json = _ValidationRequestBodyJson.model_validate_json(
+            accepted_validation_http_record.request_body
+        )
+        assert (
+            accepted_validation_body_json.post_commit_validation.result
+            is BackendLifecycle.ACCEPTED
+        )
+        assert accepted_validation_body_json.commit_request_record_id == commits[-1].record_id
+        assert len(query.ai_augment_singular_outerdicts) == 1
+        selected_singular_outerdict = query.ai_augment_singular_outerdicts[0]
+        assert len(selected_singular_outerdict.codex_innerdicts) == 1
+        committed = selected_singular_outerdict.codex_innerdicts[0]
+        stored_outcome = committed.run_outcome_response_record
+        assert stored_outcome.attempt is not None
+        assert stored_outcome.attempt.record_id == accepted_validation_http_record.record_id
+        assert stored_outcome.attempt is not None
+        assert (
+            stored_outcome.attempt.validation_request_body.commit_request_record
+            .commit_request_body.push_response_record.record_id
+            == pushes[-1].record_id
+        )
+        assert (
+            stored_outcome._body().commit_request_record_id
+            == commits[-1].record_id
+        )
+        cards = build_cards(
+            api.selected_card_outer_dict(selected_singular_outerdict),
+            total_draws=runtime.pipeline_config.total_draws,
+            intro="",
+            excluded_cols=CARD_EXCLUDED_COLUMNS,
+        )
+        assert len(cards) == 1
+        card_markdown = next(iter(cards.values()))
+        assert "Professor Sir Aziz Sheikh OBE" in card_markdown
+        assert KTP_AI_AUGMENT_SESSION_METADATA_COL in card_markdown
+        assert (
+            committed.innerdict.data[KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL]
+            == stored_outcome.response_body
+        )
+        assert card_markdown.index(KTP_LAST_NAME_COL) < card_markdown.index(
+            KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL
+        ) < card_markdown.index(KTP_AI_AUGMENT_SESSION_METADATA_COL)
+
+
+def test_captured_operator_push_generates_commit_and_exact_410_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
+    pytestconfig: pytest.Config,
+    threaded_loop: asyncio.Runner,
+) -> None:
+    detour_root = pytestconfig.rootpath / "src" / "detours" / "detour_ai_augment"
+    assert_captured_operator_push_contour(
+        tmp_path,
+        monkeypatch,
+        backend_test_paths,
+        detour_root,
+        threaded_loop,
+    )
+
+
+@pytest.mark.parametrize(("method", "path", "state", "expected_status", "chunks"), (
+    (HTTP_GET_METHOD, PULL_PATH, BackendLifecycle.READY, HTTPStatus.OK, (b"",)),
+    (HTTP_POST_METHOD, PUSH_PATH, BackendLifecycle.BUSY, HTTPStatus.SERVICE_UNAVAILABLE,
+     (b'{"submission":', b'"private test input"}')),
+))
+def test_http_adapter_persists_complete_exchange_before_sending(
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    threaded_loop: asyncio.Runner,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    method: str,
+    path: str,
+    state: BackendLifecycle,
+    expected_status: HTTPStatus,
+    chunks: tuple[bytes, ...],
+) -> None:
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(api, "BACKEND_LIFECYCLE", state)
+    monkeypatch.setattr(api, "BACKEND_SESSION_ID", TEST_SESSION_ID)
+    monkeypatch.setattr(api, "AUTHORITATIVE_BACKGROUND_TASKS", set())
+    messages: list[Message] = []
+    persisted: list[HttpRequestLogRecord] = []
+
+    async def exchange() -> None:
+        app = api_application_for_test(api_runtime, api_store)
+        pieces = iter(enumerate(chunks))
+
+        async def receive() -> Message:
+            index, chunk = next(pieces)
+            return {
+                ASGI_TYPE_KEY: ASGI_HTTP_REQUEST_MESSAGE_TYPE,
+                ASGI_BODY_KEY: chunk,
+                ASGI_MORE_BODY_KEY: index < len(chunks) - 1,
+            }
+
+        async def send(message: Message) -> None:
+            # Assert real durable log and DB readback BEFORE any response is emitted.
+            records = AiAugmentBackendStore._authoritative_log_records(
+                Path(api_store._replay_log).read_bytes()
+            )
+            assert len(records) == 2
+            assert records[0][0].path == INIT_PATH
+            record = records[-1][0]
+            assert api_store._http_record(record.record_id) == record
+            persisted.append(record)
+            messages.append(message)
+
+        scope: Scope = {
+            ASGI_TYPE_KEY: ASGI_HTTP_SCOPE_TYPE,
+            "asgi": {"version": "3.0"}, "http_version": "1.1",
+            ASGI_METHOD_KEY: method, "scheme": "http",
+            ASGI_PATH_KEY: path, "raw_path": path.encode(),
+            "query_string": b"",
+            ASGI_HEADERS_KEY: [(
+                b"host", SYNTHETIC_COMMIT_HOST.encode(TEXT_ENCODING),
+            )],
+            "client": ("127.0.0.1", 1), "server": (SYNTHETIC_COMMIT_HOST, 80),
+        }
+        await app(scope, receive, send)
+
+    with api_store._writable(api_runtime):
+        threaded_loop.run(asyncio.wait_for(exchange(), timeout=10))
+    assert messages[0]["status"] == expected_status
+    assert messages[-1].get(ASGI_MORE_BODY_KEY, False) is False
+    record = persisted[0]
+    assert record.record_id.version == 7
+    assert all(item == record for item in persisted)
+    assert record.request_body == b"".join(chunks).decode()
+    assert record.response_code == expected_status
+    assert record.response_body is not None
+    assert b"".join(message.get("body", b"") for message in messages) == (
+        record.response_body.encode()
+    )
+    assert f"Backend received {method} {path}:" in caplog.text
+    assert str(record.record_id) in caplog.text
+    assert f"Backend sent {method} {path}:" in caplog.text
+    assert "private test input" not in caplog.text
+
+
+def test_private_metadata_headers_are_canonical_structured_fields() -> None:
+    namekey = NameKey(first_name='A. "Ada"', last_name=r"Back\slash")
+    name_key_header = name_key_header_value(namekey)
+    source_key_header = source_key_header_value("rollout-2xxxx.jsonl", 82)
+
+    assert name_key_header == (
+        r'ktp.first_name="A. \"Ada\"", ktp.last_name="Back\\slash"'
+    )
+    assert name_key_from_header_value(name_key_header) == namekey
+    assert source_key_header == (
+        'ktp.filename="rollout-2xxxx.jsonl", '
+        'ktp.fragment;type="line_number";line_number="82"'
+    )
+    assert source_key_from_header_value(source_key_header) == (
+        "rollout-2xxxx.jsonl",
+        82,
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        (
+            'ktp.filename="rollout.jsonl", '
+            'ktp.fragment;type="line_number";line_number=82'
+        ),
+        (
+            'ktp.filename="rollout.jsonl", '
+            'ktp.fragment;line_number="82";type="line_number"'
+        ),
+        (
+            'ktp.filename="rollout.jsonl", '
+            'ktp.fragment;type="line_number";line_number="082"'
+        ),
+        (
+            'ktp.filename="rollout.jsonl", '
+            'ktp.fragment;type="line_number";line_number="0"'
+        ),
+        (
+            'ktp.filename="nested/rollout.jsonl", '
+            'ktp.fragment;type="line_number";line_number="82"'
+        ),
+        (
+            'ktp.filename="rollout.jsonl", '
+            'ktp.fragment;type="line_number";line_number="82", extra'
+        ),
+    ),
+)
+def test_source_key_header_parser_requires_the_canonical_dictionary(value: str) -> None:
+    with pytest.raises(
+        _ReplayCommitInvalidError,
+        match=Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID,
+    ):
+        AiAugmentBackendStore._parse_source_key_header(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        'ktp.first_name="A.",ktp.last_name="Sheikh"',
+        'ktp.last_name="Sheikh", ktp.first_name="A."',
+        'ktp.first_name="A.", ktp.last_name="Sheikh", extra',
+    ),
+)
+def test_name_key_header_parser_requires_the_canonical_dictionary(value: str) -> None:
+    with pytest.raises(
+        _ReplayCommitInvalidError,
+        match=Locale.REPLAY_COMMIT_NAME_KEY_INVALID,
+    ):
+        AiAugmentBackendStore._parse_name_key_header(value)
+
+
+def test_synthetic_commit_matches_the_readme_contour_exactly(tmp_path: Path) -> None:
+    rollout_path = tmp_path / TEST_ROLLOUT_FILENAME
+    rollout_path.write_bytes(b'{"one":1}\n{"two":2}\n')
+    rollout = AiAugmentCAS._record(rollout_path)
+    pull_record_id = UUID("019d0000-0000-7000-8000-000000000001")
+    push_record_id = UUID("019d0000-0000-7000-8000-000000000002")
+    session_id = UUID("019d0000-0000-7000-8000-000000000003")
+    pull_record = PullResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=pull_record_id,
+            method=HTTP_GET_METHOD,
+            path=PULL_PATH,
+            response_code=status.HTTP_200_OK,
+        ),
+    )
+    push_record = PushResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=push_record_id,
+            method=HTTP_POST_METHOD,
+            path=PUSH_PATH,
+            response_code=status.HTTP_202_ACCEPTED,
+            request_body="{}",
+        ),
+        pull_response_record=pull_record,
+    )
+    report = (
+        b".\n\xe2\x94\x94\xe2\x94\x80\xe2\x94\x80 OK          "
+        + (TEST_ROLLOUT_FILENAME.encode())
+        + b"\n"
+    )
+
+    body = CommitRequestBody(
+        pull_response_record=pull_record,
+        push_response_record=push_record,
+        codex_session_record=CodexSessionRecord(
+            session_id=session_id,
+            codex_rollout_record=rollout,
+            appendwatch_report_record=AppendwatchReportRecord(
+                encoding=AppendwatchReportEncoding.BASE64,
+                data=base64.b64encode(report).decode(BASE64_TEXT_ENCODING),
+            ),
+        ),
+    )
+    before_usec = time.time_ns() // NANOSECONDS_PER_MICROSECOND
+    record = BackendCommitRequestRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        method=HTTP_POST_METHOD,
+        scheme=SYNTHETIC_COMMIT_SCHEME,
+        host=SYNTHETIC_COMMIT_HOST,
+        port=None,
+        path=COMMIT_PATH,
+        query="",
+        request_headers={
+            SOURCE_KEY_HEADER: source_key_header_value(
+                TEST_ROLLOUT_FILENAME, rollout.line_count,
+            ),
+            NAME_KEY_HEADER: name_key_header_value(TEST_NAMEKEY_MODEL),
+        },
+        request_body=body.model_dump_json(),
+        response_code=None,
+        response_headers=None,
+        response_body=None,
+        received_at_unix_usec=None,
+        ready_to_respond_at_unix_usec=(
+            time.time_ns() // NANOSECONDS_PER_MICROSECOND
+        ),
+        duration_usec=0,
+        commit_request_body=body,
+    )
+    after_usec = time.time_ns() // NANOSECONDS_PER_MICROSECOND
+
+    assert record.ready_to_respond_at_unix_usec is not None
+    assert before_usec <= record.ready_to_respond_at_unix_usec <= after_usec
+    assert AiAugmentBackendStore._validated_http_record(record).model_dump() == record.model_dump()
+    assert record.record_id.version == 7
+    serialized_record = record.model_dump(mode="json", exclude={"record_id"})
+    assert serialized_record == {
+        "schema_version": KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        "method": HTTP_POST_METHOD,
+        "scheme": SYNTHETIC_COMMIT_SCHEME,
+        "host": SYNTHETIC_COMMIT_HOST,
+        "port": None,
+        "ready_to_respond_at_unix_usec": record.ready_to_respond_at_unix_usec,
+        "path": "/commit",
+        "query": "",
+        "request_headers": {
+            SOURCE_KEY_HEADER: (
+                f'ktp.filename="{TEST_ROLLOUT_FILENAME}", '
+                'ktp.fragment;type="line_number";line_number="2"'
+            ),
+            NAME_KEY_HEADER: 'ktp.first_name="A.", ktp.last_name="Sheikh"',
+        },
+        "request_body": record.request_body,
+        "response_code": None,
+        "response_headers": None,
+        "response_body": None,
+        "received_at_unix_usec": None,
+        "duration_usec": 0,
+    }
+    assert record.request_body is not None
+    assert json.loads(record.request_body) == {
+        "pull_record_id": str(pull_record_id),
+        "push_record_id": str(push_record_id),
+        "codex_session_record": {
+            "codex_session_id": str(session_id),
+            "codex_rollout_record": {
+                "sha256": rollout.sha256,
+                "size": rollout.size,
+                "line_count": rollout.line_count,
+            },
+            "appendwatch_report_record": {
+                "encoding": "base64",
+                "data": base64.b64encode(report).decode(BASE64_TEXT_ENCODING),
+            },
+        },
+    }
+    assert record.commit_request_body.pull_response_record is pull_record
+    assert record.commit_request_body.push_response_record is push_record
+    assert record.commit_request_body.codex_session_record.session_id == session_id
+
+    invalid_commit = HttpRequestLogRecord.model_validate({
+        **record.http_request_log_record.model_dump(),
+        "request_body": "{}",
+    })
+    with pytest.raises(_ReplayLogLineInvalidError) as exc_info:
+        AiAugmentBackendStore._authoritative_log_records(
+            (invalid_commit.model_dump_json() + "\n").encode(TEXT_ENCODING)
+        )
+    assert Locale.REPLAY_COMMIT_INVALID in str(exc_info.value)
+    assert Locale.REPLAY_REQUEST_BODY_ERROR_TEMPLATE.format(error="") in str(exc_info.value)
+    assert "pull_record_id" in str(exc_info.value)
+
+
+def test_commit_request_body_contract_is_strict_canonical_and_losslessly_resolved() -> None:
+    pull_record_id = UUID("019d0000-0000-7000-8000-000000000001")
+    push_record_id = UUID("019d0000-0000-7000-8000-000000000002")
+    session_id = UUID("019d0000-0000-7000-8000-000000000003")
+    pull_record = PullResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=pull_record_id,
+            method=HTTP_GET_METHOD,
+            path=PULL_PATH,
+            response_code=status.HTTP_200_OK,
+        ),
+    )
+    push_record = PushResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=push_record_id,
+            method=HTTP_POST_METHOD,
+            path=PUSH_PATH,
+            response_code=status.HTTP_202_ACCEPTED,
+            request_body="{}",
+        ),
+        pull_response_record=pull_record,
+    )
+    body: dict[str, Any] = {
+        "pull_record_id": str(pull_record_id),
+        "push_record_id": str(push_record_id),
+        "codex_session_record": {
+            "codex_session_id": str(session_id),
+            "codex_rollout_record": {
+                "sha256": "0" * 64,
+                "size": 2,
+                "line_count": 1,
+            },
+            "appendwatch_report_record": {
+                "encoding": "base64",
+                "data": base64.b64encode(b".\n").decode(BASE64_TEXT_ENCODING),
+            },
+        },
+    }
+    serialized = json.dumps(body, separators=(",", ":"))
+    refs: dict[UUID, PullResponseRecord | PushResponseRecord] = {
+        pull_record_id: pull_record,
+        push_record_id: push_record,
+    }
+    resolved = CommitRequestBody.from_serialized_json(
+        serialized,
+        resolve_http_record=refs.__getitem__,
+    )
+
+    assert json.loads(resolved.model_dump_json()) == body
+    assert resolved.pull_response_record is pull_record
+    assert resolved.push_response_record is push_record
+    assert resolved.codex_session_record.session_id == session_id
+    for field in ("pull_record_id", "push_record_id", "codex_session_record"):
+        invalid = {key: value for key, value in body.items() if key != field}
+        with pytest.raises(ValidationError):
+            CommitRequestBody.validate_serialized_json(json.dumps(invalid))
+    for field in (
+        "codex_session_id",
+        "codex_rollout_record",
+        "appendwatch_report_record",
+    ):
+        invalid_session = {
+            key: value for key, value in body["codex_session_record"].items() if key != field
+        }
+        with pytest.raises(ValidationError):
+            CommitRequestBody.validate_serialized_json(
+                json.dumps({**body, "codex_session_record": invalid_session})
+            )
+        with pytest.raises(ValidationError):
+            CommitRequestBody.validate_serialized_json(
+                json.dumps({
+                    **body,
+                    "codex_session_record": {
+                        **body["codex_session_record"],
+                        field: None,
+                    },
+                })
+            )
+    with pytest.raises(ValidationError):
+        CommitRequestBody.validate_serialized_json(
+            json.dumps({**body, "schema_version": KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1})
+        )
+
+
+def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+) -> None:
+    session_id = UUID("019d0000-0000-7000-8000-000000000011")
+    pull_record_id = UUID("019d0000-0000-7000-8000-000000000012")
+    push_record_id = UUID("019d0000-0000-7000-8000-000000000013")
+    rollout_filename = f"{ROLLOUT_FILENAME_PREFIX}{session_id}{ROLLOUT_FILENAME_SUFFIX}"
+    for path in (tmp_path / "ssh.config", tmp_path / "identity", tmp_path / "known-hosts"):
+        write_text(path, "fixture\n")
+    monkeypatch.setattr(aivm_audit, "APPENDWATCH_REPORT", "/report.txt")
+    monkeypatch.setattr(aivm_audit, "LIMA_SSH_CONFIG_PATH", tmp_path / "ssh.config")
+    monkeypatch.setattr(aivm_audit, "AIVM_IDENTITY_FILE", tmp_path / "identity")
+    monkeypatch.setattr(aivm_audit, "AIVM_KNOWN_HOSTS_FILE", tmp_path / "known-hosts")
+    configuration = aivm_audit.audit_configuration(f"/home/ai/.codex/sessions/{rollout_filename}")
+    rollout_path = tmp_path / "rollout.jsonl"
+    rollout_path.write_bytes(b'{"a":1}\n{"b":2}\n{"c":3}\n')
+    archive = AiAugmentCAS._record(rollout_path)
+    calls: list[object] = []
+
+    def guest_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        assert command[0] == SSH_EXECUTABLE
+        assert command[-2] == configuration.ssh_target
+        if command[-1] == f"{AUDIT_FIND_ROLLOUT_COMMAND} {session_id}":
+            calls.append(("rollout", session_id))
+            return SimpleNamespace(
+                returncode=0, stdout=f"{configuration.rollout_guest_path}\n", stderr="",
+            )
+        if command[-1] == f"{AUDIT_READ_ROLLOUT_COMMAND} {rollout_filename}":
+            calls.append(("copy", configuration))
+            cast(Any, kwargs["stdout"]).write(rollout_path.read_bytes())
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        assert command[-1] == (
+            f"{AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
+        )
+        calls.append("appendwatch")
+        return SimpleNamespace(returncode=0, stdout=b".\n", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", guest_run)
+
+    monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
+    pull_record = PullResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=pull_record_id,
+            method=HTTP_GET_METHOD,
+            path=PULL_PATH,
+            response_code=status.HTTP_200_OK,
+        ),
+    )
+    push_record = PushResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=push_record_id,
+            method=HTTP_POST_METHOD,
+            path=PUSH_PATH,
+            response_code=HTTPStatus.CONFLICT,
+            request_body="{}",
+        ),
+    )
+
+    with api_store._writable(api_runtime):
+        api_store._append_authoritative_record(pull_record)
+        api_store._append_authoritative_record(push_record)
+        session, filename, failures = api_store.capture_run_outcome_snapshot(session_id)
+        assert api_store.context is api_runtime
+
+    assert failures == ()
+    assert filename == rollout_filename
+    assert session == CodexSessionRecord(
+        session_id=session_id,
+        codex_rollout_record=CodexRolloutRecord(
+            sha256=archive.sha256,
+            size=archive.size,
+            line_count=archive.line_count,
+        ),
+        appendwatch_report_record=AppendwatchReportRecord(
+            encoding=AppendwatchReportEncoding.BASE64,
+            data=base64.b64encode(b".\n").decode(BASE64_TEXT_ENCODING),
+        ),
+    )
+    assert calls == [
+        ("rollout", session_id),
+        ("copy", configuration),
+        "appendwatch",
+    ]
+
+
+@pytest.mark.parametrize("path", tuple(run_outcome_models.RunOutcomePath))
+@pytest.mark.parametrize("complete_capture", (False, True))
+@pytest.mark.parametrize("identity", (
+    "matching", "missing_namekey", "malformed_namekey", "wrong_namekey",
+    "missing_session", "malformed_session", "wrong_session", "no_backend_session",
+    "unexpected_body", "binary_body", "unexpected_query", "unexpected_sourcekey",
+))
+def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    threaded_loop: asyncio.Runner,
+    path: run_outcome_models.RunOutcomePath,
+    complete_capture: bool,
+    identity: str,
+) -> None:
+    session_id = None if identity == "no_backend_session" else TEST_SESSION_ID
+    monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
+    for file in (tmp_path / "ssh.config", tmp_path / "identity", tmp_path / "known-hosts"):
+        write_text(file, "fixture\n")
+    monkeypatch.setattr(aivm_audit, "APPENDWATCH_REPORT", "/report.txt")
+    monkeypatch.setattr(aivm_audit, "LIMA_SSH_CONFIG_PATH", tmp_path / "ssh.config")
+    monkeypatch.setattr(aivm_audit, "AIVM_IDENTITY_FILE", tmp_path / "identity")
+    monkeypatch.setattr(aivm_audit, "AIVM_KNOWN_HOSTS_FILE", tmp_path / "known-hosts")
+    rollout_path = tmp_path / TEST_ROLLOUT_FILENAME
+    rollout_path.write_bytes(b'{"one":1}\n{"two":2}\n')
+    rollout = AiAugmentCAS._record(rollout_path)
+
+    def guest_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        assert command[0] == SSH_EXECUTABLE
+        if not complete_capture:
+            raise OSError("guest evidence unavailable")
+        if command[-1] == f"{AUDIT_FIND_ROLLOUT_COMMAND} {TEST_SESSION_ID}":
+            return SimpleNamespace(
+                returncode=0,
+                stdout=f"{CODEX_SESSIONS_ROOT / TEST_ROLLOUT_FILENAME}\n",
+                stderr="",
+            )
+        if command[-1] == f"{AUDIT_READ_ROLLOUT_COMMAND} {TEST_ROLLOUT_FILENAME}":
+            cast(Any, kwargs["stdout"]).write(rollout_path.read_bytes())
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        assert command[-1] == f"{AUDIT_READ_APPENDWATCH_REPORT_COMMAND} /report.txt"
+        return SimpleNamespace(returncode=0, stdout=b".\n", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", guest_run)
+    session = CodexSessionRecord(
+        session_id=session_id,
+        codex_rollout_record=(
+            rollout if complete_capture and session_id is not None else None
+        ),
+        appendwatch_report_record=(
+            AppendwatchReportRecord(
+                encoding=AppendwatchReportEncoding.BASE64,
+                data=base64.b64encode(b".\n").decode(BASE64_TEXT_ENCODING),
+            ) if complete_capture else None
+        ),
+    )
+    headers = {
+        run_outcome_models.NAME_KEY_HEADER: name_key_header_value(TEST_NAMEKEY_MODEL),
+        SESSION_ID_HEADER: str(TEST_SESSION_ID),
+    }
+    if identity == "missing_namekey":
+        del headers[run_outcome_models.NAME_KEY_HEADER]
+    elif identity == "malformed_namekey":
+        headers[run_outcome_models.NAME_KEY_HEADER] = "not a NameKey"
+    elif identity == "wrong_namekey":
+        headers[run_outcome_models.NAME_KEY_HEADER] = name_key_header_value(
+            NameKey(**{KTP_FIRST_NAME_COL: "Another", KTP_LAST_NAME_COL: "Researcher"})
+        )
+    elif identity == "missing_session":
+        del headers[SESSION_ID_HEADER]
+    elif identity == "malformed_session":
+        headers[SESSION_ID_HEADER] = "not a UUID"
+    elif identity == "wrong_session":
+        headers[SESSION_ID_HEADER] = str(uuid7())
+    elif identity == "unexpected_sourcekey":
+        headers[SOURCE_KEY_HEADER] = "unexpected"
+    request_body = (
+        b"unexpected" if identity == "unexpected_body" else
+        b"\xff" if identity == "binary_body" else b""
+    )
+    query = "?unexpected=1" if identity == "unexpected_query" else ""
+    expected_status = (
+        HTTPStatus.BAD_REQUEST
+        if identity != "matching" or path is run_outcome_models.RunOutcomePath.COMPLETED else
+        HTTPStatus.INTERNAL_SERVER_ERROR if not complete_capture else
+        HTTPStatus.OK
+    )
+    with api_store._writable(api_runtime):
+        app = server.create_dashboard_query_app(
+            api_store.query_response_record,
+            query_path=DASHBOARD_QUERY_PATH,
+            run_outcome_store=api_store,
+            run_outcome_paths=run_outcome_models.RUN_OUTCOME_PATHS,
+            fatal_exit=lambda code: pytest.fail(f"IPC fatal exit: {code}"),
+        )
+        response = app.test_client().post(
+            f"{path}{query}",
+            base_url="http://invalid",
+            headers=headers,
+            data=request_body,
+        )
+        assert response.status_code == expected_status
+        log_bytes = Path(api_store._replay_log).read_bytes()
+        records = AiAugmentBackendStore._authoritative_log_records(log_bytes)
+        assert len(records) == 2
+        assert records[0][0].path == INIT_PATH
+        record = records[-1][0]
+        assert api_store._http_record(record.record_id) == record
+        validated = RunOutcomeResponseRecord.from_http_request_log_record(record)
+        body = validated._body()
+        assert body.run_outcome_record_id == record.record_id
+        assert body.commit_request_record_id is None and body.validation_record_id is None
+        assert body.pull_record_id is None and body.push_record_id is None
+        assert validated._codex_session_record() == session
+        assert record.record_id.version == 7
+        assert record.path == path
+        assert {
+            name.casefold(): value for name, value in record.request_headers.items()
+        } == {
+            **{name.casefold(): value for name, value in headers.items()},
+            "host": SYNTHETIC_COMMIT_HOST,
+            "content-length": str(len(request_body)),
+            "user-agent": f"Werkzeug/{version('werkzeug')}",
+        }
+        assert record.request_body == (
+            "unexpected" if identity == "unexpected_body" else
+            '{"encoding":"base64","data":"/w=="}' if identity == "binary_body" else None
+        )
+        assert record.query == ("unexpected=1" if identity == "unexpected_query" else "")
+        assert record.response_code == expected_status
+        assert record.response_body == body.model_dump_json()
+        assert response.text == record.response_body
+        assert record.received_at_unix_usec is None
+        assert record.ready_to_respond_at_unix_usec is not None
+        assert record.duration_usec is not None
+        assert record.duration_usec >= 0
+        assert validated.run_outcome_request_record.received_at_unix_usec == (
+            record.ready_to_respond_at_unix_usec - record.duration_usec
+        )
+        expected_response_headers = {
+            HTTP_CONTENT_TYPE_HEADER: ContentType.JSON,
+            HTTP_CONTENT_LENGTH_HEADER: str(
+                len(body.model_dump_json().encode(TEXT_ENCODING))
+            ),
+        }
+        if complete_capture and session_id is not None:
+            expected_response_headers[SOURCE_KEY_HEADER] = source_key_header_value(
+                TEST_ROLLOUT_FILENAME, rollout.line_count,
+            )
+        assert record.response_headers == expected_response_headers
+        live_query = DashboardQuerySnapshot(
+            ai_augment_singular_outerdicts=api_store.ai_augment_singular_outerdicts(),
+        )
+        assert all(
+            not person.codex_innerdicts for person in live_query.ai_augment_singular_outerdicts
+        )
+        live_snapshot = live_query.model_dump_json()
+
+    live_database = logical_database_snapshot(api_store._detour_db_path)
+    replay = AiAugmentBackendStore._from_resources(
+        replay_log=api_store._replay_log.model_copy(update={
+            "hash": hashlib.sha256(log_bytes).hexdigest(),
+        }),
+        detour_db=api_store._detour_db.model_copy(update={
+            "path": api_store._detour_db_path.with_name("outcome-replay.duckdb"),
+        }),
+        rollout_cas=api_store.rollout_cas,
+    )
+    replay._rebuild_from_log(api_runtime, reset_confirmed=True, confirm_replay=lambda: True)
+    with replay._read_only(api_runtime):
+        app = server.create_dashboard_query_app(
+            replay.query_response_record,
+            query_path=DASHBOARD_QUERY_PATH,
+        )
+        response = threaded_loop.run(
+            asyncio.to_thread(app.test_client().get, DASHBOARD_QUERY_PATH)
+        )
+        assert response.status_code == HTTPStatus.OK
+        snapshot = DashboardQuerySnapshot.from_serialized_json(response.get_data())
+        assert snapshot.model_dump_json() == live_snapshot
+        assert all(
+            not researcher.codex_innerdicts
+            for researcher in snapshot.ai_augment_singular_outerdicts
+        )
+    assert logical_database_snapshot(replay._detour_db_path) == live_database
+    assert Path(replay._replay_log).read_bytes() == log_bytes
+
+
+def test_failed_post_commit_work_projects_without_conditional_rollback(
+    tmp_path: Path,
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+) -> None:
+    rollout_path = tmp_path / TEST_ROLLOUT_FILENAME
+    rollout_path.write_text("{}\n", encoding=TEXT_ENCODING)
+    pull_record_id = UUID("019d0000-0000-7000-8000-000000000061")
+    push_record_id = UUID("019d0000-0000-7000-8000-000000000062")
+    pull_record = PullResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=pull_record_id,
+            method=HTTP_GET_METHOD,
+            path=PULL_PATH,
+            response_code=status.HTTP_200_OK,
+            response_headers={"content-type": ContentType.NDJSON_UTF8},
+            response_body="".join(
+                api.configured_pull_lines(api_runtime.ai_augment_singular_outerdict_blueprints[0])
+            ),
+        ),
+    )
+
+    with api_store._writable(api_runtime):
+        api_store._append_authoritative_record(pull_record)
+        replayed_pull = api_store.current_replayed_record
+        assert isinstance(replayed_pull, PullResponseRecord)
+        push_record = PushResponseRecord.from_http_request_log_record(
+            http_request_log_record=persisted_http_record(
+                record_id=push_record_id,
+                method=HTTP_POST_METHOD,
+                path=PUSH_PATH,
+                response_code=status.HTTP_202_ACCEPTED,
+                request_body="{}",
+            ),
+            pull_response_record=replayed_pull,
+        )
+        api_store._append_authoritative_record(push_record)
+        replayed_push = api_store.current_replayed_record
+        assert isinstance(replayed_push, PushResponseRecord)
+        session_id = UUID("019d0000-0000-7000-8000-000000000063")
+        rollout = CodexRolloutRecord(
+            sha256=hashlib.sha256(rollout_path.read_bytes()).hexdigest(),
+            size=rollout_path.stat().st_size,
+            line_count=1,
+        )
+        report = b".\n"
+        body = CommitRequestBody(
+            pull_response_record=replayed_pull,
+            push_response_record=replayed_push,
+            codex_session_record=CodexSessionRecord(
+                session_id=session_id,
+                codex_rollout_record=rollout,
+                appendwatch_report_record=AppendwatchReportRecord(
+                    encoding=AppendwatchReportEncoding.BASE64,
+                    data=base64.b64encode(report).decode(BASE64_TEXT_ENCODING),
+                ),
+            ),
+        )
+        record = BackendCommitRequestRecord(
+            schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+            method=HTTP_POST_METHOD,
+            scheme=SYNTHETIC_COMMIT_SCHEME,
+            host=SYNTHETIC_COMMIT_HOST,
+            port=None,
+            path=COMMIT_PATH,
+            query="",
+            request_headers={
+                SOURCE_KEY_HEADER: source_key_header_value(
+                    TEST_ROLLOUT_FILENAME, rollout.line_count,
+                ),
+                NAME_KEY_HEADER: name_key_header_value(TEST_NAMEKEY_MODEL),
+            },
+            request_body=body.model_dump_json(),
+            response_code=None,
+            response_headers=None,
+            response_body=None,
+            received_at_unix_usec=None,
+            ready_to_respond_at_unix_usec=(
+                time.time_ns() // NANOSECONDS_PER_MICROSECOND
+            ),
+            duration_usec=0,
+            commit_request_body=body,
+        )
+        api_store._append_authoritative_record(record)
+        replayed_commit = api_store.current_replayed_record
+        assert isinstance(replayed_commit, BackendCommitRequestRecord)
+        inputs, db_reads, _ = api_store._validated_commit_inputs(
+            replayed_commit, initial_validation_request_record=None,
+        )
+        failed_validation, _ = post_commit_validation.evaluate_commit(
+            replayed_commit,
+            inputs=inputs,
+            db_reads=db_reads,
+        )
+        assert failed_validation.result is BackendLifecycle.CONFIGURATION_ERROR
+        validation_body = ValidationRequestBody(
+            commit_request_record=replayed_commit,
+            post_commit_validation=failed_validation,
+            initial_validation_request_record=None,
+        )
+        validation_record = BackendValidationRequestRecord(
+            validation_request_body=validation_body,
+            schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+            method=HTTP_POST_METHOD,
+            scheme=SYNTHETIC_COMMIT_SCHEME,
+            host=SYNTHETIC_COMMIT_HOST,
+            port=None,
+            path=VALIDATE_PATH,
+            query="",
+            request_headers=dict(replayed_commit.request_headers),
+            request_body=validation_body.model_dump_json(by_alias=True),
+            response_code=None,
+            response_headers=None,
+            response_body=None,
+            received_at_unix_usec=None,
+            ready_to_respond_at_unix_usec=(
+                time.time_ns() // NANOSECONDS_PER_MICROSECOND
+            ),
+            duration_usec=0,
+        )
+        api_store._append_authoritative_record(validation_record)
+
+        assert api_store._execute(
+            f"SELECT count(*) FROM {COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE}"
+        ).fetchone() == (1,)
+        assert api_store._execute(
+            f"SELECT {AUTHORITATIVE_RECORD_ORDINAL_COLUMN} "
+            f"FROM {AUTHORITATIVE_RECORDS_TABLE} ORDER BY 1"
+        ).fetchall() == [(1,), (2,), (3,), (4,), (5,)]
+        assert len(AiAugmentBackendStore._authoritative_log_records(
+            Path(api_store._replay_log).read_bytes()
+        )) == 5
+
+
+@pytest.mark.parametrize("action", ("search_query", "open", "click", "find"))
+def test_direct_search_open_click_and_find_build_complete_ref_rows(action: str) -> None:
+    index = build_test_index(action)
+
+    assert len(index.fc_rows) == len(index.fco_rows) == len(index.turn_ref_rows) == 1
+    assert index.fc_rows[0].call_id == TEST_CALL_ID
+    assert (
+        set(json.loads(index.fc_rows[0].arguments_json))
+        & post_commit_validation.ELIGIBLE_WEB_ACTIONS
+        == {action}
+    )
+    assert index.fco_rows[0].fco_id == TEST_FCO_ID
+    assert index.turn_ref_rows[0] == post_commit_validation._CodexTurnRefRow(
+        ref_id=TEST_REF_ID,
+        call_id=TEST_CALL_ID,
+        domain="example.test",
+        snippet="Example snippet",
+        thumbnail_url="https://example.test/thumbnail.png",
+        title="Example title",
+        url=TEST_URL,
+        cite_text=index.turn_ref_rows[0].cite_text,
+    )
+    assert TEST_EXCERPT in index.turn_ref_rows[0].cite_text
+
+
+def test_supported_web_actions_can_share_one_call() -> None:
+    arguments: dict[str, object] = {
+        "search_query": [{"q": "example", "recency": 3, "domains": ["example.test"]}],
+        "open": [{"ref_id": TEST_REF_ID, "lineno": 1}],
+        "click": [{"ref_id": TEST_REF_ID, "id": 1}],
+        "find": [{"ref_id": TEST_REF_ID, "pattern": "example"}],
+        "response_length": "long",
+    }
+    index = post_commit_validation.build_rollout_index(
+        web_arguments_rollout(arguments),
+        timezone_name=TEST_TIMEZONE,
+        configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+    )
+    assert len(index.turn_ref_rows) == 1
+    assert json.loads(index.fc_rows[0].arguments_json) == arguments
+
+
+def test_find_batch_indexes_only_url_backed_results() -> None:
+    records = list(web_arguments_rollout({
+        "find": [{"ref_id": f"turn{index}search0", "pattern": "example"} for index in range(4)],
+        "response_length": "long",
+    }))
+    event = json.loads(json.dumps(records[3].line_value))
+    event["payload"]["action"] = {"type": "find_in_page", "pattern": "example"}
+    event["payload"]["results"] = [
+        {"type": "text_result", "ref_id": f"turn7view{index}", **(
+            {"url": TEST_URL, "title": "Result"} if index % 2 == 0
+            else {"title": "Internal Error"}
+        )}
+        for index in range(4)
+    ]
+    records[3] = rollout_record(event, records[3].line_number)
+    output = json.loads(json.dumps(records[4].line_value))
+    output["payload"]["output"][0]["text"] = (
+        f"\n{post_commit_validation.CODEX_RESULT_SEPARATOR}\n".join(
+            f"Result\n{CODEX_CITE_MARKER_PREFIX}turn7view{index}"
+            f"{CODEX_CITE_MARKER_SUFFIX}\n{TEST_EXCERPT}"
+            for index in range(4)
+        )
+    )
+    records[4] = rollout_record(output, records[4].line_number)
+    index = post_commit_validation.build_rollout_index(
+        tuple(records), timezone_name=TEST_TIMEZONE,
+        configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+    )
+    assert len(index.fc_rows) == len(index.fco_rows) == 1
+    assert tuple(row.ref_id for row in index.turn_ref_rows) == ("turn7view0", "turn7view2")
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        {"image_query": [{"q": "example"}]},
+        {"screenshot": [{"ref_id": TEST_REF_ID, "pageno": 0}]},
+        {"finance": [{"ticker": "TEST", "type": "equity"}]},
+        {"weather": [{"location": "London"}]},
+        {"sports": [{"fn": "schedule", "league": "nba"}]},
+        {"time": [{"utc_offset": "+00:00"}]},
+        {"unknown_action": [{}]},
+        {"find": [{"ref_id": TEST_REF_ID, "pattern": "example"}], "unknown_option": True},
+        {"open": [{"ref_id": TEST_REF_ID}], "image_query": [{"q": "example"}]},
+        {"response_length": "long"},
+        {"find": []},
+    ),
+)
+@pytest.mark.parametrize("multiple_output_blocks", (False, True))
+def test_unsupported_web_arguments_are_excluded_before_output_validation(
+    arguments: dict[str, object], multiple_output_blocks: bool,
+) -> None:
+    records = list(web_arguments_rollout(arguments))
+    if multiple_output_blocks:
+        value = json.loads(json.dumps(records[-1].line_value))
+        value["payload"]["output"].append({"type": "input_image", "image_url": TEST_URL})
+        records[-1] = rollout_record(value, records[-1].line_number)
+    index = post_commit_validation.build_rollout_index(
+        tuple(records),
+        timezone_name=TEST_TIMEZONE,
+        configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+    )
+    assert index.fc_rows == ()
+    assert index.fco_rows == ()
+    assert index.turn_ref_rows == ()
+
+
+@pytest.mark.parametrize("codex_match_version", (1, 2))
+@pytest.mark.parametrize("include_supported", (False, True))
+def test_evidence_candidates_exclude_unsupported_calls(
+    backend_test_paths: BackendTestPaths,
+    codex_match_version: int,
+    include_supported: bool,
+) -> None:
+    arguments: list[dict[str, object]] = [{"image_query": [{"q": "example"}]}]
+    if include_supported:
+        arguments.extend((
+            {"find": [{"ref_id": TEST_REF_ID, "pattern": "example"}]},
+            {"open": [{"ref_id": TEST_REF_ID}]},
+        ))
+    index = post_commit_validation.build_rollout_index(
+        web_arguments_rollout(*arguments),
+        timezone_name=TEST_TIMEZONE,
+        configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+    )
+    connection = duckdb.connect(":memory:")
+    try:
+        if codex_match_version == 2:
+            load_duckdb_extension_from_config_path(
+                connection, "splink_udfs", backend_test_paths.config, log=None,
+            )
+        store = store_for_connection(connection)
+        store._persist_rollout_index(index, codex_match_version=codex_match_version,
+        )
+        submission = Submission.model_validate(submission_body_for_evidence(TEST_EXCERPT))
+        post_commit_validation._seed_evidence_random(17)
+        assessment = post_commit_validation.assess_submission_evidence(
+            index, submission,
+            config_facts=(
+                MATCH_V2_CONFIG_FACTS if codex_match_version == 2
+                else MATCH_V1_CONFIG_FACTS
+            ),
+        )
+        assert assessment.accepted is include_supported
+        for item in assessment.items:
+            assert {candidate.call_id for candidate in item.candidates} == (
+                {"call_arguments_1", "call_arguments_2"} if include_supported else set()
+            )
+            if include_supported:
+                assert item.match is not None
+                assert item.match.call_id in {"call_arguments_1", "call_arguments_2"}
+            else:
+                assert item.outcome == EVIDENCE_OUTCOME_UNMATCHED
+                assert item.match is None
+        if codex_match_version == 2:
+            near = post_commit_validation.assess_submission_evidence(
+                index,
+                Submission.model_validate(submission_body_for_evidence(TEST_EXCERPT.upper())),
+                config_facts=MATCH_V2_CONFIG_FACTS,
+            )
+            for item in near.items:
+                assert item.outcome == (
+                    EVIDENCE_OUTCOME_V2_NEAR if include_supported
+                    else EVIDENCE_OUTCOME_UNMATCHED
+                )
+                assert all(candidate.call_id != "call_arguments_0" for candidate in item.candidates)
+    finally:
+        connection.close()
+
+
+def test_optional_result_metadata_is_nullable_and_no_url_ref_is_skipped() -> None:
+    records = list(minimal_rollout_records())
+    event_value = json.loads(json.dumps(records[3].line_value))
+    event_results = event_value["payload"]["results"]
+    valid_result = event_results[0]
+    for optional_field in ("domain", "snippet", "thumbnail_url", "title"):
+        valid_result.pop(optional_field, None)
+    event_results.append({
+        "type": "text_result",
+        "ref_id": TEST_NO_URL_REF_ID,
+        "snippet": "Total lines: 1",
+        "title": "Internal Error",
+    })
+    records[3] = rollout_record(event_value, records[3].line_number)
+
+    output_value = json.loads(json.dumps(records[4].line_value))
+    output_text = output_value["payload"]["output"][0]["text"]
+    output_value["payload"]["output"][0]["text"] = (
+        f"{output_text}\n{post_commit_validation.CODEX_RESULT_SEPARATOR}\nInternal Error ()\n"
+        f"{CODEX_CITE_MARKER_PREFIX}{TEST_NO_URL_REF_ID}"
+        f"{CODEX_CITE_MARKER_SUFFIX} Source: open; Total lines: 1"
+    )
+    records[4] = rollout_record(output_value, records[4].line_number)
+
+    index = post_commit_validation.build_rollout_index(
+        tuple(records),
+        timezone_name=TEST_TIMEZONE,
+        configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+    )
+
+    assert index.turn_ref_rows == (
+        post_commit_validation._CodexTurnRefRow(
+            ref_id=TEST_REF_ID,
+            call_id=TEST_CALL_ID,
+            domain=None,
+            snippet=None,
+            thumbnail_url=None,
+            title=None,
+            url=TEST_URL,
+            cite_text=index.turn_ref_rows[0].cite_text,
+        ),
+    )
+    connection = duckdb.connect(":memory:")
+    try:
+        store_for_connection(connection)._create_codex_schema()
+        not_null = {
+            row[1]: bool(row[3])
+            for row in connection.execute(
+                f"PRAGMA table_info('{CODEX_TURN_REF_TABLE}')"
+            ).fetchall()
+        }
+        assert all(not not_null[column] for column in OPTIONAL_REF_METADATA_COLUMNS)
+
+        store_for_connection(connection)._persist_rollout_index(index)
+        stored = connection.execute(
+            f'SELECT "{CODEX_REF_DOMAIN_COL}", '
+            f'"{CODEX_REF_SNIPPET_COL}", '
+            f'"{CODEX_REF_THUMBNAIL_URL_COL}", '
+            f'"{CODEX_REF_TITLE_COL}", '
+            f'"{CODEX_REF_URL_COL}" '
+            f"FROM {CODEX_TURN_REF_TABLE}"
+        ).fetchone()
+        assert stored == (None, None, None, None, TEST_URL)
+    finally:
+        connection.close()
+
+
+def test_rollout_index_fails_closed_on_broken_direct_chain() -> None:
+    records = minimal_rollout_records()
+    without_event = records[:3] + records[4:]
+
+    with pytest.raises(
+        post_commit_validation._PushValidationError, match="one function call and one",
+    ):
+        post_commit_validation.build_rollout_index(
+            without_event,
+            timezone_name=TEST_TIMEZONE,
+            configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+        )
+
+    malformed_output = list(records)
+    output_value = json.loads(json.dumps(malformed_output[-1].line_value))
+    output_value["payload"]["output"].append({"type": "input_text", "text": TEST_EXCERPT})
+    malformed_output[-1] = rollout_record(output_value, malformed_output[-1].line_number)
+    with pytest.raises(post_commit_validation._PushValidationError, match="exactly one input_text"):
+        post_commit_validation.build_rollout_index(
+            tuple(malformed_output),
+            timezone_name=TEST_TIMEZONE,
+            configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+        )
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    (
+        ("malformed_arguments", "malformed arguments"),
+        ("nonobject_arguments", "not a JSON object"),
+        ("duplicate_call", "one function call and one"),
+        ("duplicate_event", "one function call and one"),
+        ("out_of_order", "out of order"),
+        ("duplicate_ref", "does not resolve to one event result"),
+    ),
+)
+def test_find_eligibility_preserves_corrupt_chain_failures(damage: str, message: str) -> None:
+    records = list(minimal_rollout_records("find"))
+    if damage in {"malformed_arguments", "nonobject_arguments"}:
+        value = json.loads(json.dumps(records[2].line_value))
+        value["payload"]["arguments"] = "{" if damage == "malformed_arguments" else "[]"
+        records[2] = rollout_record(value, records[2].line_number)
+    elif damage == "duplicate_call":
+        records.insert(3, records[2])
+    elif damage == "duplicate_event":
+        records.insert(4, records[3])
+    elif damage == "out_of_order":
+        records[3] = rollout_record(records[3].line_value, 6)
+    else:
+        value = json.loads(json.dumps(records[3].line_value))
+        value["payload"]["results"].append(value["payload"]["results"][0])
+        records[3] = rollout_record(value, records[3].line_number)
+    with pytest.raises(post_commit_validation._PushValidationError, match=message):
+        post_commit_validation.build_rollout_index(
+            tuple(records), timezone_name=TEST_TIMEZONE,
+            configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+        )
+
+
+def test_rollout_parser_rejects_completed_malformed_json_but_ignores_live_tail(
+    tmp_path: Path,
+) -> None:
+    rollout_path = tmp_path / "rollout.jsonl"
+    write_bytes(rollout_path, b'{"type":"event_msg"}\n{"incomplete"')
+    assert len(post_commit_validation.parse_rollout(rollout_path)) == 1
+
+    write_bytes(rollout_path, b'{"type":"event_msg"}\nnot-json\n')
+    with pytest.raises(post_commit_validation._PushValidationError, match="line 2"):
+        post_commit_validation.parse_rollout(rollout_path)
+
+
+def test_submission_contract_has_nine_evidence_fields_and_optional_comments() -> None:
+    without_comments = valid_submission_body(include_comments=False)
+    parsed = Submission.model_validate(without_comments)
+
+    assert tuple(column for column, _field in parsed.evidence_items()) == (
+        AI_AUGMENT_EVIDENCE_COLUMNS
+    )
+    assert parsed.comments is None
+    assert KTP_AI_AUGMENT_COMMENTS_COL not in parsed.normalized_values()
+
+    with_comments = Submission.model_validate(valid_submission_body())
+    assert with_comments.comments is not None
+    assert with_comments.comments.value == EXPECTED_COMMENT
+
+    missing = valid_submission_body()
+    missing.pop(AI_AUGMENT_EVIDENCE_COLUMNS[0])
+    with pytest.raises(ValidationError):
+        Submission.model_validate(missing)
+
+    absent_evidence = valid_submission_body()
+    absent_evidence[AI_AUGMENT_EVIDENCE_COLUMNS[0]]["web_search_excerpts"] = []  # type: ignore[index]
+    with pytest.raises(ValidationError):
+        Submission.model_validate(absent_evidence)
+
+    duplicate_evidence = valid_submission_body()
+    first_field = duplicate_evidence[AI_AUGMENT_EVIDENCE_COLUMNS[0]]
+    first_field["web_search_excerpts"] *= 2  # type: ignore[index]
+    with pytest.raises(ValidationError):
+        Submission.model_validate(duplicate_evidence)
+
+    comments_with_evidence = valid_submission_body()
+    comments_with_evidence[KTP_AI_AUGMENT_COMMENTS_COL][  # type: ignore[index]
+        nameof(lambda: FieldSubmission.web_search_excerpts)
+    ] = []
+    with pytest.raises(ValidationError) as exc_info:
+        Submission.model_validate(comments_with_evidence)
+    assert [(issue["loc"], issue["type"]) for issue in exc_info.value.errors()] == [
+        (
+            (KTP_AI_AUGMENT_COMMENTS_COL, nameof(lambda: FieldSubmission.web_search_excerpts)),
+            "extra_forbidden",
+        )
+    ]
+
+
+def test_initial_submission_redacts_selected_narrative_without_standardized_values() -> None:
+    initial = Submission.model_validate(api.EVIDENCE_SUBMISSION_EXAMPLE)
+    rendered = post_commit_validation.render_codex_values(
+        initial,
+        {column: [] for column in AI_AUGMENT_EVIDENCE_COLUMNS},
+        commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
+        argument_ref_urls={},
+    )
+    namekey = NameKey(first_name="A.", last_name="Sheikh")
+    codex_innerdict = InnerDict.from_mapping(
+        {KTP_NAMEKEY_COL: namekey.to_json_key(), **rendered},
+        _CodexInnerDictProcedure(),
+    )
+    cards = build_cards(
+        OuterDict(data={namekey.to_json_key(): [codex_innerdict]}),
+        total_draws=1,
+        intro="",
+        excluded_cols=CARD_EXCLUDED_COLUMNS,
+    )
+    assert len(cards) == 1
+    card = next(iter(cards.values()))
+    assert AI_AUGMENT_REDACTED_REPORT_VALUE_COLUMNS == [
+        KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
+    ]
+    for (column, field_submission), (_, standardized_column) in zip(
+        initial.evidence_items(), AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS, strict=True,
+    ):
+        if column != KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL:
+            expected_value = codex_parse.render_footnoted_submission_value(
+                field_submission.value, (), column=column,
+            )
+            assert rendered[column] == expected_value
+            assert f"**`{column}`**: {expected_value}" in card
+        assert rendered[standardized_column] is None
+        assert f"**`{standardized_column}`**:" not in card
+    race_column = KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
+    assert rendered[race_column] == "[REDACTED]"
+    assert f"**`{race_column}`**: [REDACTED]" in card
+    assert initial.race_ethnicity_language_culture.value not in card
+
+
+def test_report_redaction_omits_ai_prefix_but_keeps_footnote_marker() -> None:
+    race_column = KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
+    assert codex_parse.render_footnoted_submission_value(
+        "Sensitive narrative", (1, 2), column=race_column,
+    ) == "[REDACTED]^1,2^"
+    assert codex_parse.render_footnoted_submission_value(
+        "Public narrative", (1, 2), column=KTP_AI_AUGMENT_GENDER_COL,
+    ) == '**AI-generated text**: "Public narrative"^1,2^'
+
+
+def test_openapi_example_is_a_complete_pydantic_valid_submission(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    assert isinstance(
+        L_FEI_FEI_INITIAL_FIXTURE.submission,
+        Submission,
+    )
+    assert (
+        Submission.model_validate_json(json.dumps(api.EVIDENCE_SUBMISSION_EXAMPLE))
+        == L_FEI_FEI_INITIAL_FIXTURE.submission
+    )
+    assert set(api.EVIDENCE_SUBMISSION_EXAMPLE) == set(AI_AUGMENT_COLUMNS)
+    assert L_FEI_FEI_INITIAL_FIXTURE.identity == ("L.", "Fei-Fei")
+    assert isinstance(
+        L_FEI_FEI_RETRY_FIXTURE.submission,
+        StandardizedSubmission,
+    )
+    retry_example = L_FEI_FEI_RETRY_FIXTURE.submission.model_dump(
+        by_alias=True, mode="json"
+    )
+    retry_guidance = post_commit_validation._retry_submission_public_guidance(
+        guidance_pull_response_record(AGE_EXAMPLE_AS_OF)
+    )
+    assert all(
+        FIELD_STANDARDIZED_VALUE_FIELD not in field
+        for column, field in api.EVIDENCE_SUBMISSION_EXAMPLE.items()
+        if column in AI_AUGMENT_EVIDENCE_COLUMNS and isinstance(field, dict)
+    )
+    assert all(
+        FIELD_STANDARDIZED_VALUE_FIELD in field
+        for column, field in retry_example.items()
+        if column in AI_AUGMENT_EVIDENCE_COLUMNS and isinstance(field, dict)
+    )
+    source = backend_test_paths.pydantic_to_paste.read_text(encoding=TEXT_ENCODING).rstrip()
+    assert PYDANTIC_TO_PASTE_SOURCE == source
+    assert source in retry_guidance
+    assert (
+        json.dumps(
+            retry_example,
+            ensure_ascii=False,
+            indent=2,
+        )
+        in retry_guidance
+    )
+    assert "class CurrentBiologicalAge(" in source
+    assert "class CurrentAgeFromFirstPublication(" in source
+    assert "class DateOfBirth(" in source
+    assert "class DateOfFirstPublication(" in source
+    assert "class BirthComputation(" in source
+    assert "class FirstPublicationComputation(" in source
+    assert 'NotReported: TypeAlias = Literal["NR"]' in source
+    assert 'NotAvailableOrApplicable: TypeAlias = Literal["NA"]' in source
+
+
+@pytest.mark.parametrize("pull_date", (date(2026, 10, 28), date(2027, 10, 28)))
+def test_retry_guidance_example_uses_linked_pull_date(pull_date: date) -> None:
+    guidance = post_commit_validation._retry_submission_public_guidance(
+        guidance_pull_response_record(pull_date)
+    )
+    example = json.loads(guidance.split("```json\n", 1)[1].split("\n```", 1)[0])
+    age = example[KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL][
+        FIELD_STANDARDIZED_VALUE_FIELD
+    ]
+    assert age["age"]["computed"]["as_of"] == pull_date.isoformat()
+    pydantic_to_paste.AgeFromBirth.model_validate_json(json.dumps(age))
+
+
+def test_pydantic_failure_reports_exact_rejected_input() -> None:
+    body = valid_submission_body()
+    rejected_value = ["not", "an", "object"]
+    body[AI_AUGMENT_EVIDENCE_COLUMNS[0]] = rejected_value
+
+    with pytest.raises(ValidationError) as raised:
+        Submission.model_validate(body)
+
+    field, reason, failed_input = post_commit_validation.pydantic_failure(raised.value)
+    assert field == AI_AUGMENT_EVIDENCE_COLUMNS[0]
+    assert reason == "Input should be a valid dictionary or instance of FieldSubmission"
+    assert failed_input is rejected_value
+
+
+def test_persisted_index_is_idempotent_and_evidence_lookup_is_exact() -> None:
+    connection = duckdb.connect(":memory:")
+    try:
+        index = build_test_index()
+        store_for_connection(connection)._persist_rollout_index(index)
+        store_for_connection(connection)._persist_rollout_index(index)
+        body = {
+            column: {
+                "value": column,
+                "web_search_excerpts": [{"excerpt": TEST_EXCERPT, "url": TEST_URL}],
+            }
+            for column in AI_AUGMENT_EVIDENCE_COLUMNS
+        }
+        submission = Submission.model_validate(body)
+        validated = post_commit_validation.validate_submission_evidence(
+            index,
+            submission,
+            config_facts=MATCH_V1_CONFIG_FACTS,
+        )
+        assert [
+            match.evidence_number for matches in validated.values() for match in matches
+        ] == list(range(1, len(AI_AUGMENT_EVIDENCE_COLUMNS) + 1))
+
+        changed_excerpt = json.loads(json.dumps(body))
+        changed_excerpt[AI_AUGMENT_EVIDENCE_COLUMNS[0]]["web_search_excerpts"][0]["excerpt"] = (
+            TEST_EXCERPT[:-1] + "X"
+        )
+        with pytest.raises(post_commit_validation._PushValidationError, match="no indexed match"):
+            post_commit_validation.validate_submission_evidence(
+                index,
+                Submission.model_validate(changed_excerpt),
+                config_facts=MATCH_V1_CONFIG_FACTS,
+            )
+
+        changed_url = json.loads(json.dumps(body))
+        changed_url[AI_AUGMENT_EVIDENCE_COLUMNS[0]]["web_search_excerpts"][0]["url"] = (
+            TEST_URL + "/"
+        )
+        with pytest.raises(post_commit_validation._PushValidationError, match="URL does not match"):
+            post_commit_validation.validate_submission_evidence(
+                index,
+                Submission.model_validate(changed_url),
+                config_facts=MATCH_V1_CONFIG_FACTS,
+            )
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    ("excerpt", "cite_text", "expected_outcome"),
+    (
+        (TEST_EXCERPT, f"Result: {TEST_EXCERPT}", EVIDENCE_OUTCOME_V1_EXACT),
+        ("josé garcía — senior\nresearcher", V2_CITE_TEXT, EVIDENCE_OUTCOME_V2_NEAR),
+    ),
+    ids=("exact", "near"),
+)
+def test_evidence_percent_encoded_citation_url_matches_and_logs_raw_urls(
+    excerpt: str,
+    cite_text: str,
+    expected_outcome: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    submitted_url = f"{TEST_URL}/Alan_Evans_(neuroscientist)"
+    cited_url = f"{TEST_URL}/Alan_Evans_%28neuroscientist%29"
+    index = build_citation_index(((cited_url, cite_text),))
+    assessment = post_commit_validation.assess_submission_evidence(
+        index,
+        Submission.model_validate(submission_body_for_evidence(excerpt, url=submitted_url)),
+        config_facts=MATCH_V2_CONFIG_FACTS,
+    )
+    assert {item.outcome for item in assessment.items} == {expected_outcome}
+    assert assessment.accepted is (expected_outcome == EVIDENCE_OUTCOME_V1_EXACT)
+    assert all(item.candidates[0].url == cited_url for item in assessment.items)
+    if assessment.accepted:
+        assert all(
+            item.match is not None and item.match.url == submitted_url
+            for item in assessment.items
+        )
+
+    _, commit_request_record = retry_commit_records(
+        original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+        init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+        session_id=TEST_SESSION_ID,
+        synthetic_record_id_seed="encoded-evidence-url",
+    )
+    caplog.set_level(logging.INFO, logger=post_commit_validation.__name__)
+    post_commit_validation._log_evidence_assessment(
+        assessment, commit_request_record=commit_request_record,
+    )
+    item_logs = [
+        record for record in caplog.records
+        if record.name == post_commit_validation.__name__
+        and "raw_submitted_url=" in record.getMessage()
+    ]
+    assert len(item_logs) == len(AI_AUGMENT_EVIDENCE_COLUMNS)
+    selected = expected_outcome == EVIDENCE_OUTCOME_V1_EXACT
+    assert all(
+        f"raw_submitted_url={submitted_url!r}" in record.getMessage()
+        and f"decoded_submitted_url={submitted_url!r}" in record.getMessage()
+        and (
+            f"raw_cited_url={cited_url!r} decoded_cited_url={submitted_url!r} "
+            f"raw_url_equal=False decoded_url_equal=True selected={selected}"
+        ) in record.getMessage()
+        for record in item_logs
+    )
+
+
+def test_evidence_url_comparison_rejects_invalid_utf8_on_decoded_path() -> None:
+    assert post_commit_validation.evidence_urls_match(
+        f"{TEST_URL}/cafe\u0301", f"{TEST_URL}/caf%C3%A9",
+    ) is True
+    assert post_commit_validation.evidence_urls_match(
+        f"{TEST_URL}/%FF", f"{TEST_URL}/different",
+    ) is False
+
+
+@pytest.mark.parametrize(
+    ("excerpt", "expected_outcome"),
+    (
+        (V2_EXACT_EXCERPT, EVIDENCE_OUTCOME_V1_EXACT),
+        ("josé garcía — senior\nresearcher", EVIDENCE_OUTCOME_V2_NEAR),
+        ("Jose Garcia — Senior\nResearcher", EVIDENCE_OUTCOME_V2_NEAR),
+        ("José García Senior Researcher", EVIDENCE_OUTCOME_V2_NEAR),
+        ("José   García\n\n—\tSenior   Researcher", EVIDENCE_OUTCOME_V2_NEAR),
+    ),
+    ids=("exact", "case", "accent", "punctuation", "whitespace"),
+)
+def test_codex_v2_classifies_normalized_variants_without_accepting_them(
+    excerpt: str,
+    expected_outcome: str,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection, index = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
+    try:
+        assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            Submission.model_validate(submission_body_for_evidence(excerpt)),
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+    finally:
+        connection.close()
+
+    assert {item.outcome for item in assessment.items} == {expected_outcome}
+    assert assessment.accepted is (expected_outcome == EVIDENCE_OUTCOME_V1_EXACT)
+    assert sum(len(matches) for matches in assessment.validated.values()) == (
+        len(AI_AUGMENT_EVIDENCE_COLUMNS)
+        if expected_outcome == EVIDENCE_OUTCOME_V1_EXACT else 0
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_tokens"),
+    (
+        ("Иван Петров", ("иван", "петров")),
+        ("ИВАН—ПЕТРОВ", ("иван", "петров")),
+        ("张伟", ("张伟",)),
+        ("张 伟", ("张", "伟")),
+        ("张，伟", ("张", "伟")),
+        ("أحمد حسن", ("احمد", "حسن")),
+        ("Αλέξανδρος Παπαδόπουλος", ("αλεξανδρος", "παπαδοπουλος")),
+    ),
+    ids=(
+        "cyrillic",
+        "cyrillic-punctuation",
+        "han-unseparated",
+        "han-space",
+        "han-fullwidth-punctuation",
+        "arabic",
+        "greek",
+    ),
+)
+def test_codex_v2_normalizer_preserves_non_latin_scripts(
+    value: str,
+    expected_tokens: tuple[str, ...],
+) -> None:
+    assert post_commit_validation._normalized_evidence_tokens(value) == expected_tokens
+
+
+@pytest.mark.parametrize(
+    ("cite_text", "excerpt", "expected_outcome"),
+    (
+        ("ИВАН—ПЕТРОВ", "иван петров", EVIDENCE_OUTCOME_V2_NEAR),
+        ("张，伟", "张 伟", EVIDENCE_OUTCOME_V2_NEAR),
+        ("张伟", "张 伟", EVIDENCE_OUTCOME_UNMATCHED),
+        ("أحمد حسن", "احمد—حسن", EVIDENCE_OUTCOME_V2_NEAR),
+        (
+            "Αλέξανδρος Παπαδόπουλος",
+            "αλεξανδρος παπαδοπουλος",
+            EVIDENCE_OUTCOME_V2_NEAR,
+        ),
+    ),
+    ids=(
+        "cyrillic",
+        "han-equivalent-boundaries",
+        "han-different-boundaries",
+        "arabic",
+        "greek",
+    ),
+)
+def test_codex_v2_matches_non_latin_token_sequences_conservatively(
+    cite_text: str,
+    excerpt: str,
+    expected_outcome: str,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection, index = connect_v2_index(
+        build_citation_index(((TEST_URL, cite_text),)),
+        config_path=backend_test_paths.config,
+    )
+    try:
+        assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            Submission.model_validate(submission_body_for_evidence(excerpt)),
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+    finally:
+        connection.close()
+
+    assert {item.outcome for item in assessment.items} == {expected_outcome}
+    assert assessment.accepted is False
+
+
+@pytest.mark.parametrize(
+    "excerpt",
+    (
+        "Alpha Gamma Beta Delta",
+        "Alpha Beta Delta",
+        "Alpha Beta Extra Gamma Delta",
+        "!!!",
+    ),
+    ids=("reordered", "missing", "added", "punctuation-only"),
+)
+def test_codex_v2_rejects_noncontiguous_or_empty_token_sequences(
+    excerpt: str,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection, index = connect_v2_index(
+        build_citation_index(((TEST_URL, "Alpha Beta Gamma Delta"),)),
+        config_path=backend_test_paths.config,
+    )
+    try:
+        assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            Submission.model_validate(submission_body_for_evidence(excerpt)),
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+    finally:
+        connection.close()
+
+    assert {item.outcome for item in assessment.items} == {EVIDENCE_OUTCOME_UNMATCHED}
+    assert assessment.accepted is False
+
+
+def test_codex_v2_cannot_join_tokens_across_citation_sections(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection, index = connect_v2_index(
+        build_citation_index((
+            (TEST_URL, "Alpha Beta"),
+            (TEST_URL, "Gamma Delta"),
+        )),
+        config_path=backend_test_paths.config,
+    )
+    try:
+        assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            Submission.model_validate(submission_body_for_evidence("Alpha Beta Gamma Delta")),
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+    finally:
+        connection.close()
+
+    assert {item.outcome for item in assessment.items} == {EVIDENCE_OUTCOME_UNMATCHED}
+
+
+def test_codex_v2_requires_the_exact_candidate_url(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection, index = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
+    try:
+        assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            Submission.model_validate(
+                submission_body_for_evidence(
+                    "Jose Garcia Senior Researcher",
+                    url=f"{TEST_URL}/other",
+                )
+            ),
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+    finally:
+        connection.close()
+
+    assert {item.outcome for item in assessment.items} == {EVIDENCE_OUTCOME_UNMATCHED}
+
+
+def test_empty_excerpt_is_rejected_before_codex_v2_matching() -> None:
+    with pytest.raises(ValidationError):
+        Submission.model_validate(submission_body_for_evidence(""))
+
+
+def test_evidence_assessment_is_exhaustive_and_public_guidance_is_nonrevealing(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    body = submission_body_for_evidence(V2_EXACT_EXCERPT)
+    failed_field = AI_AUGMENT_EVIDENCE_COLUMNS[0]
+    body[failed_field]["web_search_excerpts"][0]["excerpt"] = (  # type: ignore[index]
+        "Jose Garcia Senior Researcher"
+    )
+    connection, index = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
+    try:
+        assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            Submission.model_validate(body),
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        detail = post_commit_validation._assessment_public_detail(
+            assessment,
+            pull_response_record=guidance_pull_response_record(AGE_EXAMPLE_AS_OF),
+            progress_template=Locale.EVIDENCE_GOOD_PROGRESS_TEMPLATE,
+        )
+    finally:
+        connection.close()
+
+    assert len(assessment.items) == len(AI_AUGMENT_EVIDENCE_COLUMNS)
+    assert assessment.exact_count == len(AI_AUGMENT_EVIDENCE_COLUMNS) - 1
+    assert assessment.items[0].outcome == EVIDENCE_OUTCOME_V2_NEAR
+    assert assessment.items[-1].outcome == EVIDENCE_OUTCOME_V1_EXACT
+    assert assessment.accepted is False
+    assert f"{failed_field}.web_search_excerpts[0]" in detail
+    assert TEST_CALL_ID not in detail
+    assert TEST_REF_ID not in detail
+    assert V2_CITE_TEXT not in detail
+
+
+def test_retry_guidance_separates_exact_progress_from_blocking_contract_violations() -> None:
+    submission = L_FEI_FEI_RETRY_FIXTURE.submission
+    assessment = post_commit_validation._EvidenceAssessment(
+        items=tuple(
+            post_commit_validation._EvidenceItemAssessment(
+                field=field,
+                index=0,
+                evidence_number=evidence_number,
+                submission=field_submission.web_search_excerpts[0],
+                outcome=EVIDENCE_OUTCOME_V1_EXACT,
+                match=None,
+            )
+            for evidence_number, (field, field_submission) in enumerate(
+                submission.evidence_items(),
+                start=1,
+            )
+        )
+    )
+    total = len(AI_AUGMENT_EVIDENCE_COLUMNS)
+    location = f"{AI_AUGMENT_EVIDENCE_COLUMNS[0]}.web_search_excerpts[0]"
+    violation = post_commit_validation._RetryViolation(
+        submission_column=post_commit_validation._EvidenceSubmissionColumn(
+            AI_AUGMENT_EVIDENCE_COLUMNS[0]
+        ),
+        message=Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(location=location),
+    )
+    age_violation = post_commit_validation._RetryViolation(
+        submission_column=(
+            post_commit_validation._EvidenceSubmissionColumn.AGE_FIRST_PUBLICATION
+        ),
+        message=(
+            f"{KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL}: "
+            f"{Locale.STANDARDIZED_VALUE_RETRY_VIOLATION}"
+        ),
+    )
+    pull_response_record = guidance_pull_response_record(AGE_EXAMPLE_AS_OF)
+    detail = post_commit_validation._assessment_public_detail(
+        assessment,
+        pull_response_record=pull_response_record,
+        progress_template=Locale.EVIDENCE_PROGRESS_TEMPLATE,
+        violations=(violation,),
+    )
+    age_detail = post_commit_validation._assessment_public_detail(
+        assessment,
+        pull_response_record=pull_response_record,
+        progress_template=Locale.EVIDENCE_PROGRESS_TEMPLATE,
+        violations=(age_violation,),
+    )
+    combined_detail = post_commit_validation._assessment_public_detail(
+        assessment,
+        pull_response_record=pull_response_record,
+        progress_template=Locale.EVIDENCE_PROGRESS_TEMPLATE,
+        violations=(violation, age_violation),
+    )
+
+    assert assessment.exact_count == total
+    assert assessment.accepted is True
+    assert detail.splitlines()[0] == (
+        f"{total} of {total} current evidence items exactly match our records."
+    )
+    assert "archived rollout" not in detail
+    assert Locale.EVIDENCE_REVIEW_HEADER not in detail
+    assert Locale.EVIDENCE_RETRY_VIOLATION_HEADER in detail
+    assert f"- {violation.message}" in detail
+    assert Locale.EVIDENCE_RETRY_VIOLATION_HEADER in age_detail
+    assert f"- {age_violation.message}" in age_detail
+    assert Locale.EVIDENCE_RETRY_VIOLATIONS_HEADER_TEMPLATE.format(count=2) in combined_detail
+    assert f"- {violation.message}" in combined_detail
+    assert f"- {age_violation.message}" in combined_detail
+
+
+def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection, index = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
+    near_body = submission_body_for_evidence(V2_EXACT_EXCERPT)
+    near_body[AI_AUGMENT_EVIDENCE_COLUMNS[0]][  # type: ignore[index]
+        "web_search_excerpts"
+    ][0]["excerpt"] = "Jose Garcia Senior Researcher"
+    near_submission = Submission.model_validate(near_body)
+    near_standardized_submission = StandardizedSubmission.model_validate(
+        standardized_submission_body(near_body)
+    )
+    invalid_contract_body = near_standardized_submission.model_dump(mode="json", by_alias=True)
+    invalid_contract_field = invalid_contract_body[AI_AUGMENT_EVIDENCE_COLUMNS[0]]
+    assert isinstance(invalid_contract_field, dict)
+    invalid_contract_evidence = invalid_contract_field[FIELD_EVIDENCE_FIELD]
+    assert isinstance(invalid_contract_evidence, list)
+    invalid_contract_evidence[0]["excerpt"] = "Jose Garcia Lead Researcher"
+    invalid_contract_submission = StandardizedSubmission.model_validate(
+        invalid_contract_body
+    )
+    changed_education_body = near_standardized_submission.model_dump(mode="json", by_alias=True)
+    changed_education_field = changed_education_body[KTP_AI_AUGMENT_EDUCATION_COL]
+    assert isinstance(changed_education_field, dict)
+    changed_education_field[FIELD_STANDARDIZED_VALUE_FIELD] = [
+        dict.fromkeys(EducationRecord.model_fields, NOT_REPORTED_VALUE)
+    ]
+    changed_education_submission = StandardizedSubmission.model_validate(
+        changed_education_body
+    )
+    exact_submission = StandardizedSubmission.model_validate(
+        standardized_submission_body(submission_body_for_evidence(V2_EXACT_EXCERPT))
+    )
+    changed_body = exact_submission.model_dump(mode="json", by_alias=True)
+    changed_field = changed_body[KTP_AI_AUGMENT_EDUCATION_COL]
+    assert isinstance(changed_field, dict)
+    changed_field[FIELD_STANDARDIZED_VALUE_FIELD] = [
+        dict.fromkeys(EducationRecord.model_fields, NOT_REPORTED_VALUE)
+    ]
+    changed_submission = StandardizedSubmission.model_validate(changed_body)
+    try:
+        near_assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            near_submission,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        assert near_assessment.accepted is False
+        assert (
+            evaluate_retry_submission_for_test(
+                connection,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                session_id=TEST_SESSION_ID,
+                synthetic_record_id_seed="commit-near",
+                submission_payload=near_submission,
+                rollout_index=index,
+                assessment=near_assessment,
+            )
+            == ()
+        )
+        assert evaluate_retry_submission_for_test(
+            connection,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+            session_id=TEST_SESSION_ID,
+            synthetic_record_id_seed="commit-contract-invalid",
+            submission_payload=invalid_contract_submission,
+            rollout_index=index,
+            assessment=post_commit_validation.assess_submission_evidence(
+                index, invalid_contract_submission, config_facts=MATCH_V2_CONFIG_FACTS,
+            ),
+        ) == (
+            Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(
+                location=f"{AI_AUGMENT_EVIDENCE_COLUMNS[0]}.web_search_excerpts[0]"
+            ),
+        )
+        assert evaluate_retry_submission_for_test(
+            connection,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+            session_id=TEST_SESSION_ID,
+            synthetic_record_id_seed="commit-changed-education-before-applied",
+            submission_payload=changed_education_submission,
+            rollout_index=index,
+            assessment=post_commit_validation.assess_submission_evidence(
+                index, changed_education_submission, config_facts=MATCH_V2_CONFIG_FACTS,
+            ),
+        ) == (
+            Locale.EVIDENCE_EXACT_IMMUTABLE_TEMPLATE.format(
+                immutable=(
+                    f"{KTP_AI_AUGMENT_EDUCATION_COL}."
+                    f"{FIELD_STANDARDIZED_VALUE_FIELD}"
+                ),
+            ),
+        )
+        assert (
+            evaluate_retry_submission_for_test(
+                connection,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                session_id=TEST_SESSION_ID,
+                synthetic_record_id_seed="commit-near-standardized",
+                submission_payload=near_standardized_submission,
+                rollout_index=index,
+                assessment=post_commit_validation.assess_submission_evidence(
+                    index, near_standardized_submission, config_facts=MATCH_V2_CONFIG_FACTS,
+                ),
+            )
+            == ()
+        )
+
+        exact_assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            exact_submission,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        assert exact_assessment.accepted is True
+        changed_violations = evaluate_retry_submission_for_test(
+            connection,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+            session_id=TEST_SESSION_ID,
+            synthetic_record_id_seed="commit-changed-standardized",
+            submission_payload=changed_submission,
+            rollout_index=index,
+            assessment=post_commit_validation.assess_submission_evidence(
+                index, changed_submission, config_facts=MATCH_V2_CONFIG_FACTS,
+            ),
+        )
+        assert changed_violations == (
+            Locale.EVIDENCE_EXACT_IMMUTABLE_TEMPLATE.format(
+                immutable=f"{KTP_AI_AUGMENT_EDUCATION_COL}.{FIELD_STANDARDIZED_VALUE_FIELD}"
+            ),
+        )
+        assert (
+            evaluate_retry_submission_for_test(
+                connection,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                session_id=TEST_SESSION_ID,
+                synthetic_record_id_seed="commit-exact",
+                submission_payload=exact_submission,
+                rollout_index=index,
+                assessment=exact_assessment,
+            )
+            == ()
+        )
+
+        audit_rows = connection.execute(
+            f"""
+            SELECT {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL},
+                   {POST_COMMIT_VALIDATION_FIELD_COL},
+                   {POST_COMMIT_VALIDATION_FIELD_AUDIT_COL}
+            FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}
+            ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert len(audit_rows) == 6 * len(AI_AUGMENT_EVIDENCE_COLUMNS)
+    assert len({row[0] for row in audit_rows}) == 6
+    assert all(row[1] == json.loads(row[2])["submission_column"] for row in audit_rows)
+    assert all(
+        json.loads(row[2])["state"]["pins"] == 7
+        for row in audit_rows[-len(AI_AUGMENT_EVIDENCE_COLUMNS):]
+    )
+
+
+def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection, index = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
+    near_body = submission_body_for_evidence(V2_EXACT_EXCERPT)
+    failed_field = AI_AUGMENT_EVIDENCE_COLUMNS[0]
+    near_body[failed_field]["web_search_excerpts"][0]["excerpt"] = (  # type: ignore[index]
+        "Jose Garcia Senior Researcher"
+    )
+    changed_body = json.loads(json.dumps(near_body))
+    changed_body[failed_field]["web_search_excerpts"][0]["excerpt"] = "Jose Garcia Lead Researcher"
+    try:
+        near_submission = Submission.model_validate(near_body)
+        near_assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            near_submission,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        assert (
+            evaluate_retry_submission_for_test(
+                connection,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                session_id=TEST_SESSION_ID,
+                synthetic_record_id_seed="commit-near",
+                submission_payload=near_submission,
+                rollout_index=index,
+                assessment=near_assessment,
+            )
+            == ()
+        )
+
+        changed_submission = StandardizedSubmission.model_validate(
+            standardized_submission_body(changed_body)
+        )
+        changed_assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            changed_submission,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        changed_violations = evaluate_retry_submission_for_test(
+            connection,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+            session_id=TEST_SESSION_ID,
+            synthetic_record_id_seed="commit-changed",
+            submission_payload=changed_submission,
+            rollout_index=index,
+            assessment=changed_assessment,
+        )
+        near_retry_submission = StandardizedSubmission.model_validate(
+            standardized_submission_body(near_body)
+        )
+        repeated_violations = evaluate_retry_submission_for_test(
+            connection,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+            session_id=TEST_SESSION_ID,
+            synthetic_record_id_seed="commit-near-again",
+            submission_payload=near_retry_submission,
+            rollout_index=index,
+            assessment=near_assessment,
+        )
+        field_audits = connection.execute(
+            f"""
+            SELECT {POST_COMMIT_VALIDATION_FIELD_AUDIT_COL}
+            FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}
+            WHERE {POST_COMMIT_VALIDATION_FIELD_COL} = ?
+            ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}
+            """,
+            [failed_field],
+        ).fetchall()
+    finally:
+        connection.close()
+
+    location = f"{failed_field}.web_search_excerpts[0]"
+    assert changed_assessment.items[0].outcome == EVIDENCE_OUTCOME_UNMATCHED
+    assert changed_violations == (
+        Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(location=location),
+    )
+    assert repeated_violations == ()
+    assert near_assessment.accepted is False
+    assert len(field_audits) == 3
+    assert json.loads(field_audits[1][0])["violations"]
+    assert not json.loads(field_audits[2][0])["violations"]
+
+
+def test_retry_preserves_exact_items_inside_a_rejected_field(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection, index = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
+    field = AI_AUGMENT_EVIDENCE_COLUMNS[0]
+    baseline_body = submission_body_for_evidence(V2_EXACT_EXCERPT)
+    baseline_body[field]["web_search_excerpts"] = [  # type: ignore[index]
+        {"excerpt": "José García", "url": TEST_URL},
+        {"excerpt": "Jose Garcia Senior Researcher", "url": TEST_URL},
+    ]
+    changed_body = json.loads(json.dumps(baseline_body))
+    changed_body[field]["web_search_excerpts"][0]["excerpt"] = "García"
+    try:
+        baseline_submission = Submission.model_validate(baseline_body)
+        baseline_assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            baseline_submission,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        assert (
+            evaluate_retry_submission_for_test(
+                connection,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                session_id=TEST_SESSION_ID,
+                synthetic_record_id_seed="commit-baseline",
+                submission_payload=baseline_submission,
+                rollout_index=index,
+                assessment=baseline_assessment,
+            )
+            == ()
+        )
+
+        changed_submission = StandardizedSubmission.model_validate(
+            standardized_submission_body(changed_body)
+        )
+        changed_assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            changed_submission,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        violations = evaluate_retry_submission_for_test(
+            connection,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+            session_id=TEST_SESSION_ID,
+            synthetic_record_id_seed="commit-changed",
+            submission_payload=changed_submission,
+            rollout_index=index,
+            assessment=changed_assessment,
+        )
+    finally:
+        connection.close()
+
+    assert violations == (
+        Locale.EVIDENCE_EXACT_IMMUTABLE_TEMPLATE.format(
+            immutable=f"{field}.web_search_excerpts[0]"
+        ),
+    )
+
+
+def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection, index = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
+    failed_field = AI_AUGMENT_EVIDENCE_COLUMNS[0]
+    accepted_field = AI_AUGMENT_EVIDENCE_COLUMNS[1]
+    baseline_body = submission_body_for_evidence(V2_EXACT_EXCERPT)
+    baseline_body[failed_field]["web_search_excerpts"] = [  # type: ignore[index]
+        {"excerpt": "José García", "url": TEST_URL},
+        {"excerpt": "Jose Garcia Senior Researcher", "url": TEST_URL},
+    ]
+    changed_body = json.loads(json.dumps(baseline_body))
+    changed_body[accepted_field]["value"] = "changed"
+    changed_body[failed_field]["web_search_excerpts"].pop(0)
+    try:
+        baseline_submission = Submission.model_validate(baseline_body)
+        baseline_assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            baseline_submission,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        assert (
+            evaluate_retry_submission_for_test(
+                connection,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                session_id=TEST_SESSION_ID,
+                synthetic_record_id_seed="commit-baseline",
+                submission_payload=baseline_submission,
+                rollout_index=index,
+                assessment=baseline_assessment,
+            )
+            == ()
+        )
+
+        changed_submission = StandardizedSubmission.model_validate(
+            standardized_submission_body(changed_body)
+        )
+        changed_assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            changed_submission,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        violations = evaluate_retry_submission_for_test(
+            connection,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+            session_id=TEST_SESSION_ID,
+            synthetic_record_id_seed="commit-changed",
+            submission_payload=changed_submission,
+            rollout_index=index,
+            assessment=changed_assessment,
+        )
+    finally:
+        connection.close()
+
+    assert Locale.EVIDENCE_COUNT_DECREASED_TEMPLATE.format(field=failed_field) in violations
+    assert (
+        Locale.EVIDENCE_ACCEPTED_FIELD_IMMUTABLE_TEMPLATE.format(immutable=accepted_field)
+        in violations
+    )
+
+
+@pytest.mark.parametrize(
+    ("replacement", "changed_value", "expected_outcome"),
+    (
+        (
+            {"excerpt": "Profile:", "url": TEST_URL},
+            False,
+            EVIDENCE_OUTCOME_V1_EXACT,
+        ),
+        (
+            {
+                EVIDENCE_WITHDRAWAL_ACTION_FIELD: EVIDENCE_WITHDRAWAL_ACTION,
+                EVIDENCE_WITHDRAWAL_REASON_FIELD: EVIDENCE_WITHDRAWAL_REASON,
+                EVIDENCE_WITHDRAWAL_ATTESTED_FIELD: True,
+            },
+            True,
+            EVIDENCE_OUTCOME_WITHDRAWN,
+        ),
+    ),
+    ids=("replace", "withdraw"),
+)
+def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
+    replacement: dict[str, object],
+    changed_value: bool,
+    expected_outcome: str,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection, index = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
+    field = AI_AUGMENT_EVIDENCE_COLUMNS[0]
+    baseline_body = submission_body_for_evidence(V2_EXACT_EXCERPT)
+    baseline_body[field]["web_search_excerpts"] = [  # type: ignore[index]
+        {"excerpt": V2_EXACT_EXCERPT, "url": TEST_URL},
+        {"excerpt": "Invented evidence", "url": TEST_URL},
+    ]
+    retry_body = json.loads(json.dumps(baseline_body))
+    retry_body[field]["web_search_excerpts"][1] = replacement
+    if changed_value:
+        retry_body[field]["value"] = "corrected value"
+    try:
+        baseline_submission = Submission.model_validate(baseline_body)
+        baseline_assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            baseline_submission,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        assert (
+            evaluate_retry_submission_for_test(
+                connection,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                session_id=TEST_SESSION_ID,
+                synthetic_record_id_seed="commit-baseline",
+                submission_payload=baseline_submission,
+                rollout_index=index,
+                assessment=baseline_assessment,
+            )
+            == ()
+        )
+
+        retry_submission = StandardizedSubmission.model_validate(
+            standardized_submission_body(retry_body)
+        )
+        retry_assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            retry_submission,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        violations = evaluate_retry_submission_for_test(
+            connection,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+            session_id=TEST_SESSION_ID,
+            synthetic_record_id_seed="commit-retry",
+            submission_payload=retry_submission,
+            rollout_index=index,
+            assessment=retry_assessment,
+        )
+    finally:
+        connection.close()
+
+    field_items = tuple(item for item in retry_assessment.items if item.field == field)
+    assert field_items[1].outcome == expected_outcome
+    assert retry_assessment.accepted is True
+    assert violations == ()
+    if expected_outcome == EVIDENCE_OUTCOME_WITHDRAWN:
+        detail = post_commit_validation._assessment_public_detail(
+            retry_assessment,
+            pull_response_record=guidance_pull_response_record(AGE_EXAMPLE_AS_OF),
+            progress_template=Locale.EVIDENCE_GOOD_PROGRESS_TEMPLATE,
+        )
+        location = f"{field}.web_search_excerpts[1]"
+        assert Locale.EVIDENCE_WITHDRAWN_ITEM_TEMPLATE.format(location=location) in detail
+        assert Locale.EVIDENCE_REVIEW_HEADER not in detail
+        assert Locale.EVIDENCE_RETRY_COMPARE_INSTRUCTION not in detail
+        assert Locale.EVIDENCE_RETRY_RESUBMIT_INSTRUCTION not in detail
+
+
+def test_v2_near_evidence_cannot_be_withdrawn(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection, index = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
+    field = AI_AUGMENT_EVIDENCE_COLUMNS[0]
+    baseline_body = submission_body_for_evidence(V2_EXACT_EXCERPT)
+    baseline_body[field]["web_search_excerpts"][0]["excerpt"] = (  # type: ignore[index]
+        "Jose Garcia Senior Researcher"
+    )
+    withdrawal_body = json.loads(json.dumps(baseline_body))
+    withdrawal_body[field]["value"] = "corrected value"
+    withdrawal_body[field]["web_search_excerpts"][0] = {
+        EVIDENCE_WITHDRAWAL_ACTION_FIELD: EVIDENCE_WITHDRAWAL_ACTION,
+        EVIDENCE_WITHDRAWAL_REASON_FIELD: EVIDENCE_WITHDRAWAL_REASON,
+        EVIDENCE_WITHDRAWAL_ATTESTED_FIELD: True,
+    }
+    try:
+        baseline_submission = Submission.model_validate(baseline_body)
+        baseline_assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            baseline_submission,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        assert (
+            evaluate_retry_submission_for_test(
+                connection,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                session_id=TEST_SESSION_ID,
+                synthetic_record_id_seed="commit-baseline",
+                submission_payload=baseline_submission,
+                rollout_index=index,
+                assessment=baseline_assessment,
+            )
+            == ()
+        )
+
+        withdrawal_submission = StandardizedSubmission.model_validate(
+            standardized_submission_body(withdrawal_body)
+        )
+        withdrawal_assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            withdrawal_submission,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        violations = evaluate_retry_submission_for_test(
+            connection,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+            init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+            session_id=TEST_SESSION_ID,
+            synthetic_record_id_seed="commit-withdrawal",
+            submission_payload=withdrawal_submission,
+            rollout_index=index,
+            assessment=withdrawal_assessment,
+        )
+    finally:
+        connection.close()
+
+    assert violations == (
+        Locale.EVIDENCE_WITHDRAWAL_NOT_ALLOWED_TEMPLATE.format(
+            location=f"{field}.web_search_excerpts[0]"
+        ),
+        Locale.EVIDENCE_ACCEPTED_FIELD_IMMUTABLE_TEMPLATE.format(immutable=field),
+    )
+
+
+def test_retry_baselines_survive_restart_and_remain_isolated_by_original_pull(
+    tmp_path: Path,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    database_path = tmp_path / "retry.duckdb"
+    index = build_citation_index(((TEST_URL, V2_CITE_TEXT),))
+    near_body = submission_body_for_evidence(V2_EXACT_EXCERPT)
+    near_body[AI_AUGMENT_EVIDENCE_COLUMNS[0]][  # type: ignore[index]
+        "web_search_excerpts"
+    ][0]["excerpt"] = "Jose Garcia Senior Researcher"
+    unmatched_body = submission_body_for_evidence(V2_EXACT_EXCERPT)
+    unmatched_body[AI_AUGMENT_EVIDENCE_COLUMNS[0]][  # type: ignore[index]
+        "web_search_excerpts"
+    ][0]["excerpt"] = "Invented evidence"
+
+    first_connection, index = connect_v2_index(
+        index,
+        config_path=backend_test_paths.config,
+        database_path=database_path,
+    )
+    try:
+        for original_pull_record_id, synthetic_record_id_seed, body in (
+            (TEST_ORIGINAL_PULL_RECORD_ID, "run-one-baseline", near_body),
+            (TEST_SECOND_ORIGINAL_PULL_RECORD_ID, "run-two-baseline", unmatched_body),
+        ):
+            submission = Submission.model_validate(body)
+            assessment = post_commit_validation.assess_submission_evidence(
+                index,
+                submission,
+                config_facts=MATCH_V2_CONFIG_FACTS,
+            )
+            assert (
+                evaluate_retry_submission_for_test(
+                    first_connection,
+                    original_pull_record_id=original_pull_record_id,
+                    init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                    session_id=TEST_SESSION_ID,
+                    synthetic_record_id_seed=synthetic_record_id_seed,
+                    submission_payload=submission,
+                    rollout_index=index,
+                    assessment=assessment,
+                )
+                == ()
+            )
+    finally:
+        first_connection.close()
+
+    second_connection, index = connect_v2_index(
+        index,
+        config_path=backend_test_paths.config,
+        database_path=database_path,
+    )
+    try:
+        exact_submission = StandardizedSubmission.model_validate(
+            standardized_submission_body(submission_body_for_evidence(V2_EXACT_EXCERPT))
+        )
+        exact_assessment = post_commit_validation.assess_submission_evidence(
+            index,
+            exact_submission,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        for original_pull_record_id, synthetic_record_id_seed in (
+            (TEST_ORIGINAL_PULL_RECORD_ID, "run-one-exact"),
+            (TEST_SECOND_ORIGINAL_PULL_RECORD_ID, "run-two-exact"),
+        ):
+            assert (
+                evaluate_retry_submission_for_test(
+                    second_connection,
+                    original_pull_record_id=original_pull_record_id,
+                    init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                    session_id=TEST_SESSION_ID,
+                    synthetic_record_id_seed=synthetic_record_id_seed,
+                    submission_payload=exact_submission,
+                    rollout_index=index,
+                    assessment=exact_assessment,
+                )
+                == ()
+            )
+        original_pulls = second_connection.execute(
+            f"""
+            SELECT DISTINCT {POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL}
+            FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}
+            ORDER BY {POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL}
+            """
+        ).fetchall()
+        audit_rows = second_connection.execute(
+            f"""
+            SELECT {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL},
+                   {POST_COMMIT_VALIDATION_FIELD_AUDIT_COL}
+            FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}
+            """
+        ).fetchall()
+    finally:
+        second_connection.close()
+
+    assert original_pulls == sorted([
+        (str(TEST_ORIGINAL_PULL_RECORD_ID),),
+        (str(TEST_SECOND_ORIGINAL_PULL_RECORD_ID),),
+    ])
+    assert len({commit for commit, audit in audit_rows
+                if json.loads(audit)["state"]["pins"] == 7}) == 2
+
+
+def test_concurrent_first_rejections_cannot_replace_the_baseline(
+    tmp_path: Path,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    database_path = tmp_path / "concurrent.duckdb"
+    index = build_citation_index(((TEST_URL, V2_CITE_TEXT),))
+    setup_connection, index = connect_v2_index(
+        index,
+        config_path=backend_test_paths.config,
+        database_path=database_path,
+    )
+    setup_connection.close()
+    barrier = Barrier(2)
+    operation_lock = Lock()
+
+    def submit(synthetic_record_id_seed: str, excerpt: str) -> None:
+        connection = duckdb.connect(str(database_path))
+        load_duckdb_extension_from_config_path(
+            connection,
+            "splink_udfs",
+            backend_test_paths.config,
+            log=None,
+        )
+        try:
+            plain_body = submission_body_for_evidence(excerpt)
+            barrier.wait()
+            with operation_lock:
+                original_pull, commit_request_record = retry_commit_records(
+                    original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+                    init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                    session_id=TEST_SESSION_ID,
+                    synthetic_record_id_seed=synthetic_record_id_seed,
+                )
+                previous_audits = store_for_connection(connection)._field_audits(
+                    commit_request_record,
+                    original_pull_response_record=original_pull,
+                    init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                )
+                standardized_required = post_commit_validation._FinalSubmission(
+                    fields={
+                        audit.submission_column: audit.state for audit in previous_audits
+                    }
+                ).ready_for_standardized
+                submission: Submission | StandardizedSubmission = (
+                    StandardizedSubmission.model_validate(standardized_submission_body(plain_body))
+                    if standardized_required
+                    else Submission.model_validate(plain_body)
+                )
+                assessment = post_commit_validation.assess_submission_evidence(
+                    index,
+                    submission,
+                    config_facts=MATCH_V2_CONFIG_FACTS,
+                )
+                assert (
+                    evaluate_retry_submission_for_test(
+                        connection,
+                        original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+                        init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                        session_id=TEST_SESSION_ID,
+                        synthetic_record_id_seed=synthetic_record_id_seed,
+                        submission_payload=submission,
+                        rollout_index=index,
+                        assessment=assessment,
+                    )
+                    == ()
+                )
+        finally:
+            connection.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = (
+            executor.submit(
+                submit,
+                "concurrent-lower",
+                "Jose Garcia Senior Researcher",
+            ),
+            executor.submit(
+                submit,
+                "concurrent-upper",
+                "JOSE GARCIA SENIOR RESEARCHER",
+            ),
+        )
+        for future in futures:
+            future.result()
+
+    verification_connection = duckdb.connect(str(database_path))
+    try:
+        audit_commit_records = verification_connection.execute(
+            f"""
+            SELECT DISTINCT {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL}
+            FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}
+            """
+        ).fetchall()
+    finally:
+        verification_connection.close()
+
+    assert len(audit_commit_records) == 2
+
+
+def test_corrupt_applied_audit_fails_as_configuration_error(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection, index = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
+    body = submission_body_for_evidence(V2_EXACT_EXCERPT)
+    body[AI_AUGMENT_EVIDENCE_COLUMNS[0]][  # type: ignore[index]
+        "web_search_excerpts"
+    ][0]["excerpt"] = "Jose Garcia Senior Researcher"
+    submission = Submission.model_validate(body)
+    try:
+        post_commit_validation.assess_submission_evidence(
+            index,
+            submission,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        retry_submission = StandardizedSubmission.model_validate(standardized_submission_body(body))
+        for synthetic_record_id_seed, candidate_submission in (
+            ("audit-baseline", submission),
+            ("audit-second", retry_submission),
+        ):
+            candidate_assessment = post_commit_validation.assess_submission_evidence(
+                index,
+                candidate_submission,
+                config_facts=MATCH_V2_CONFIG_FACTS,
+            )
+            assert (
+                evaluate_retry_submission_for_test(
+                    connection,
+                    original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+                    init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                    session_id=TEST_SESSION_ID,
+                    synthetic_record_id_seed=synthetic_record_id_seed,
+                    submission_payload=candidate_submission,
+                    rollout_index=index,
+                    assessment=candidate_assessment,
+                )
+                == ()
+            )
+        connection.execute(
+            f"""
+            UPDATE {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}
+            SET {POST_COMMIT_VALIDATION_FIELD_AUDIT_COL} = ?
+            WHERE {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL} = ?
+            """,
+            ["{}", str(deterministic_uuid7("audit-second"))],
+        )
+
+        with pytest.raises(
+            post_commit_validation._ValidationPreparationError,
+            match=Locale.EVIDENCE_AUDIT_REPLAY_FAILED,
+        ):
+            evaluate_retry_submission_for_test(
+                connection,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
+                init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+                session_id=TEST_SESSION_ID,
+                synthetic_record_id_seed="audit-third",
+                submission_payload=retry_submission,
+                rollout_index=index,
+                assessment=candidate_assessment,
+            )
+    finally:
+        connection.close()
+
+
+def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    original_body_value, archived_retry_body_value = historical_haanen_submissions(
+        backend_test_paths
+    )
+    original_body = cast(dict[str, Any], original_body_value)
+    archived_retry_body = cast(dict[str, Any], archived_retry_body_value)
+    rollout_index = post_commit_validation.build_rollout_index(
+        post_commit_validation.parse_rollout(backend_test_paths.haanen_accepted_rollout),
+        timezone_name=TEST_TIMEZONE,
+        configured_rollout_basename=HAANEN_ROLLOUT_FILENAME,
+    )
+    connection, index = connect_v2_index(
+        rollout_index,
+        config_path=backend_test_paths.config,
+    )
+    try:
+        original_submission = Submission.model_validate(original_body)
+        original_assessment = post_commit_validation.assess_submission_evidence(
+            rollout_index,
+            original_submission,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        original_archived_items = tuple(
+            item
+            for item in original_assessment.items
+            if item.field in HAANEN_ARCHIVED_EVIDENCE_COLUMNS
+        )
+        assert len(original_archived_items) == HAANEN_ORIGINAL_EVIDENCE_COUNT
+        assert sum(
+            item.outcome == EVIDENCE_OUTCOME_V1_EXACT
+            for item in original_archived_items
+        ) == (HAANEN_ORIGINAL_EVIDENCE_COUNT - 1)
+        near_items = tuple(
+            item
+            for item in original_assessment.items
+            if item.outcome == EVIDENCE_OUTCOME_V2_NEAR
+        )
+        assert tuple((item.field, item.index) for item in near_items) == (
+            (KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL, 1),
+        )
+        assert (
+            evaluate_retry_submission_for_test(
+                connection,
+                original_pull_record_id=HAANEN_ORIGINAL_PULL_RECORD_ID,
+                init_request_record=init_request_record(HAANEN_NAMEKEY_MODEL),
+                session_id=HAANEN_SESSION_ID,
+                synthetic_record_id_seed=HAANEN_REJECTED_CAPTURE_ID,
+                submission_payload=original_submission,
+                rollout_index=index,
+                assessment=original_assessment,
+            )
+            == ()
+        )
+
+        archived_retry = StandardizedSubmission.model_validate(archived_retry_body)
+        archived_retry_assessment = post_commit_validation.assess_submission_evidence(
+            rollout_index,
+            archived_retry,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        assert (
+            len(
+                tuple(
+                    item
+                    for item in archived_retry_assessment.items
+                    if item.field in HAANEN_ARCHIVED_EVIDENCE_COLUMNS
+                )
+            )
+            == HAANEN_RETRY_EVIDENCE_COUNT
+        )
+        archived_retry_violations = evaluate_retry_submission_for_test(
+            connection,
+            original_pull_record_id=HAANEN_ORIGINAL_PULL_RECORD_ID,
+            init_request_record=init_request_record(HAANEN_NAMEKEY_MODEL),
+            session_id=HAANEN_SESSION_ID,
+            synthetic_record_id_seed=HAANEN_ACCEPTED_CAPTURE_ID,
+            submission_payload=archived_retry,
+            rollout_index=index,
+            assessment=archived_retry_assessment,
+        )
+        assert archived_retry_violations
+        assert (
+            Locale.EVIDENCE_COUNT_DECREASED_TEMPLATE.format(field=KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL)
+            in archived_retry_violations
+        )
+        assert (
+            Locale.EVIDENCE_ACCEPTED_FIELD_IMMUTABLE_TEMPLATE.format(
+                immutable=KTP_AI_AUGMENT_GENDER_COL
+            )
+            in archived_retry_violations
+        )
+        assert (
+            original_body[KTP_AI_AUGMENT_GENDER_COL][FIELD_EVIDENCE_FIELD][0][
+                EVIDENCE_EXCERPT_FIELD
+            ]
+            == HAANEN_ORIGINAL_GENDER_EXCERPT
+        )
+        assert (
+            archived_retry_body[KTP_AI_AUGMENT_GENDER_COL][FIELD_EVIDENCE_FIELD][0][
+                EVIDENCE_EXCERPT_FIELD
+            ]
+            == HAANEN_RETRY_GENDER_EXCERPT
+        )
+
+        ideal_retry_body = json.loads(json.dumps(original_body, ensure_ascii=False))
+        ideal_retry_body[KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL][FIELD_EVIDENCE_FIELD][1][
+            EVIDENCE_EXCERPT_FIELD
+        ] = HAANEN_CORRECTED_NEAR_EXCERPT
+        changed_items = tuple(
+            (field, index)
+            for field in HAANEN_ARCHIVED_EVIDENCE_COLUMNS
+            for index, (original, corrected) in enumerate(
+                zip(
+                    original_body[field][FIELD_EVIDENCE_FIELD],
+                    ideal_retry_body[field][FIELD_EVIDENCE_FIELD],
+                    strict=True,
+                )
+            )
+            if original != corrected
+        )
+        assert changed_items == ((KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL, 1),)
+
+        ideal_retry = StandardizedSubmission.model_validate(
+            standardized_submission_body(ideal_retry_body)
+        )
+        ideal_assessment = post_commit_validation.assess_submission_evidence(
+            rollout_index,
+            ideal_retry,
+            config_facts=MATCH_V2_CONFIG_FACTS,
+        )
+        ideal_archived_items = tuple(
+            item
+            for item in ideal_assessment.items
+            if item.field in HAANEN_ARCHIVED_EVIDENCE_COLUMNS
+        )
+        assert len(ideal_archived_items) == HAANEN_ORIGINAL_EVIDENCE_COUNT
+        assert all(
+            item.outcome == EVIDENCE_OUTCOME_V1_EXACT
+            for item in ideal_archived_items
+        )
+        assert ideal_assessment.accepted is True
+        assert (
+            evaluate_retry_submission_for_test(
+                connection,
+                original_pull_record_id=HAANEN_ORIGINAL_PULL_RECORD_ID,
+                init_request_record=init_request_record(HAANEN_NAMEKEY_MODEL),
+                session_id=HAANEN_SESSION_ID,
+                synthetic_record_id_seed=f"{HAANEN_ACCEPTED_CAPTURE_ID}-ideal",
+                submission_payload=ideal_retry,
+                rollout_index=index,
+                assessment=ideal_assessment,
+            )
+            == ()
+        )
+
+        audit_rows = connection.execute(
+            f"""
+            SELECT
+                {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL},
+                {POST_COMMIT_VALIDATION_FIELD_AUDIT_COL}
+            FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}
+            WHERE {POST_COMMIT_VALIDATION_FIELD_COL} = ?
+            ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}
+            """,
+            [KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL],
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert [row[0] for row in audit_rows] == [
+        str(deterministic_uuid7(HAANEN_REJECTED_CAPTURE_ID)),
+        str(deterministic_uuid7(HAANEN_ACCEPTED_CAPTURE_ID)),
+        str(deterministic_uuid7(f"{HAANEN_ACCEPTED_CAPTURE_ID}-ideal")),
+    ]
+    assert json.loads(audit_rows[1][1])["violations"]
+    assert json.loads(audit_rows[2][1])["state"]["pins"] == 7
+
+
+@pytest.mark.skip(reason="multiple evidence matches are currently allowed")
+def test_multiple_sql_matches_report_the_exact_excerpt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(post_commit_validation, "ALLOW_MULTIPLE_EVIDENCE_MATCHES", False)
+    connection = duckdb.connect(":memory:")
+    try:
+        index = build_test_index()
+        duplicate_call_id = "call_duplicate"
+        duplicate_index = post_commit_validation._RolloutIndex(
+            session=index.session,
+            fc_rows=index.fc_rows
+            + (
+                post_commit_validation._CodexFcRow(
+                    timestamp=index.fc_rows[0].timestamp,
+                    fc_id="fc_duplicate",
+                    call_id=duplicate_call_id,
+                    name="run",
+                    namespace="web",
+                    arguments_json=index.fc_rows[0].arguments_json,
+                ),
+            ),
+            fco_rows=index.fco_rows
+            + (
+                post_commit_validation._CodexFcoRow(
+                    timestamp=index.fco_rows[0].timestamp,
+                    fco_id="fco_duplicate",
+                    call_id=duplicate_call_id,
+                ),
+            ),
+            turn_ref_rows=index.turn_ref_rows
+            + (
+                post_commit_validation._CodexTurnRefRow(
+                    ref_id="turn1search0",
+                    call_id=duplicate_call_id,
+                    domain="duplicate.example.test",
+                    snippet="Duplicate snippet",
+                    thumbnail_url=None,
+                    title="Duplicate title",
+                    url=TEST_URL,
+                    cite_text=f"Duplicate result: {TEST_EXCERPT}",
+                ),
+            ),
+        )
+        store_for_connection(connection)._persist_rollout_index(duplicate_index,
+        )
+        body = {
+            column: {
+                "value": column,
+                "web_search_excerpts": [{"excerpt": TEST_EXCERPT, "url": TEST_URL}],
+            }
+            for column in AI_AUGMENT_EVIDENCE_COLUMNS
+        }
+
+        with pytest.raises(post_commit_validation._MultipleEvidenceMatches) as raised:
+            post_commit_validation.validate_submission_evidence(
+                duplicate_index,
+                Submission.model_validate(body),
+                config_facts=MATCH_V1_CONFIG_FACTS,
+            )
+        assert raised.value.excerpt == TEST_EXCERPT
+        assert TEST_EXCERPT in Locale.MULTIPLE_MATCH_DETAIL_TEMPLATE.format(
+            excerpt=raised.value.excerpt
+        )
+    finally:
+        connection.close()
+
+
+@pytest.mark.skip(reason="multiple evidence matches are currently allowed")
+def test_multiple_sql_matches_are_audited_by_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(post_commit_validation, "ALLOW_MULTIPLE_EVIDENCE_MATCHES", False)
+    duplicate_index = build_duplicate_evidence_index()
+    body = {
+        column: {
+            "value": column,
+            "web_search_excerpts": [{"excerpt": TEST_EXCERPT, "url": TEST_URL}],
+        }
+        for column in AI_AUGMENT_EVIDENCE_COLUMNS
+    }
+    with pytest.raises(post_commit_validation._MultipleEvidenceMatches) as raised:
+        post_commit_validation.assess_submission_evidence(
+            duplicate_index,
+            Submission.model_validate(body),
+            config_facts=MATCH_V1_CONFIG_FACTS,
+        )
+    assert raised.value.excerpt == TEST_EXCERPT
+
+
+def test_multiple_exact_excerpt_and_url_matches_use_random_candidate(
+) -> None:
+    assert post_commit_validation.ALLOW_MULTIPLE_EVIDENCE_MATCHES is True
+    connection = duckdb.connect(":memory:")
+    try:
+        duplicate_index = build_duplicate_evidence_index()
+        store_for_connection(connection)._persist_rollout_index(duplicate_index)
+        body = {
+            column: {
+                "value": column,
+                "web_search_excerpts": [{"excerpt": TEST_EXCERPT, "url": TEST_URL}],
+            }
+            for column in AI_AUGMENT_EVIDENCE_COLUMNS
+        }
+
+        original_state = post_commit_validation.EVIDENCE_RANDOM.getstate()
+        try:
+            post_commit_validation._seed_evidence_random(42)
+            validated = post_commit_validation.validate_submission_evidence(
+                duplicate_index, Submission.model_validate(body),
+                config_facts=MATCH_V1_CONFIG_FACTS,
+            )
+            post_commit_validation._seed_evidence_random(42)
+            repeated = post_commit_validation.validate_submission_evidence(
+                duplicate_index, Submission.model_validate(body),
+                config_facts=MATCH_V1_CONFIG_FACTS,
+            )
+        finally:
+            post_commit_validation.EVIDENCE_RANDOM.setstate(original_state)
+
+        matches = [match for field_matches in validated.values() for match in field_matches]
+        assert len(matches) == len(AI_AUGMENT_EVIDENCE_COLUMNS)
+        assert {match.ref_id for match in matches} == {TEST_REF_ID, TEST_VIEW_REF_ID}
+        assert validated == repeated
+    finally:
+        connection.close()
+
+
+def test_exact_evidence_retry_keeps_selected_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    index = build_duplicate_evidence_index()
+    field = post_commit_validation._EvidenceSubmissionColumn(
+        AI_AUGMENT_EVIDENCE_COLUMNS[0]
+    )
+    submission = FieldSubmission.model_validate({
+        "value": field.value,
+        "web_search_excerpts": [{"excerpt": TEST_EXCERPT, "url": TEST_URL}],
+    })
+    first = post_commit_validation._assess_field_evidence(
+        index,
+        field,
+        submission,
+        config_facts=MATCH_V1_CONFIG_FACTS,
+        evidence_number_offset=post_commit_validation._EvidenceNumberOffset(0),
+    )
+    first_match = first.items[0].match
+    assert first_match is not None
+    obligations, violations, changed = post_commit_validation._apply_retry_obligations(
+        field, submission, first, post_commit_validation._FieldPinState(),
+    )
+    assert not violations
+    assert changed
+    assert obligations[0].selected_match == first_match
+    previous = post_commit_validation._FieldPinState(
+        pins=post_commit_validation._FieldPin.EVIDENCE,
+        evidence_obligations=obligations,
+    )
+
+    monkeypatch.setattr(
+        post_commit_validation.EVIDENCE_RANDOM,
+        "choice",
+        lambda _candidates: pytest.fail("unchanged pinned evidence was resampled"),
+    )
+    retry = post_commit_validation._assess_field_evidence(
+        index,
+        field,
+        submission,
+        config_facts=MATCH_V1_CONFIG_FACTS,
+        evidence_number_offset=post_commit_validation._EvidenceNumberOffset(7),
+        previous=previous,
+    )
+    retry_match = retry.items[0].match
+    assert retry_match is not None
+    assert (retry_match.ref_id, retry_match.call_id) == (
+        first_match.ref_id, first_match.call_id,
+    )
+    assert first_match.evidence_number == 1
+    assert retry_match.evidence_number == 8
+
+    missing_reference_index = post_commit_validation._RolloutIndex(
+        session=index.session,
+        fc_rows=index.fc_rows,
+        fco_rows=index.fco_rows,
+        turn_ref_rows=tuple(
+            row for row in index.turn_ref_rows
+            if (row.ref_id, row.call_id)
+            != (first_match.ref_id, first_match.call_id)
+        ),
+    )
+    with pytest.raises(
+        post_commit_validation._PushValidationError,
+        match="previously selected evidence reference is unavailable",
+    ):
+        post_commit_validation._assess_field_evidence(
+            missing_reference_index,
+            field,
+            submission,
+            config_facts=MATCH_V1_CONFIG_FACTS,
+            evidence_number_offset=post_commit_validation._EvidenceNumberOffset(7),
+            previous=previous,
+        )
+
+
+def test_seeded_evidence_selection_round_trips_deterministically(
+    tmp_path: Path,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    database_path = tmp_path / "evidence.duckdb"
+    index = build_duplicate_evidence_index()
+    submission = Submission.model_validate({
+        column: {
+            "value": column,
+            "web_search_excerpts": [{"excerpt": TEST_EXCERPT, "url": TEST_URL}],
+        }
+        for column in AI_AUGMENT_EVIDENCE_COLUMNS
+    })
+    sample_seed = PipelineConfig.from_json(backend_test_paths.config).sample_seed
+    selections: list[tuple[tuple[str, int, str, str], ...]] = []
+
+    for _roundtrip in range(2):
+        connection = duckdb.connect(str(database_path))
+        try:
+            store_for_connection(connection)._persist_rollout_index(index)
+            post_commit_validation._seed_evidence_random(sample_seed)
+            validated = post_commit_validation.validate_submission_evidence(
+                index,
+                submission,
+                config_facts=MATCH_V1_CONFIG_FACTS,
+            )
+            selections.append(
+                tuple(
+                    (match.field, match.evidence_number, match.ref_id, match.call_id)
+                    for field_matches in validated.values()
+                    for match in field_matches
+                )
+            )
+        finally:
+            connection.close()
+
+    assert selections[0] == selections[1]
+    assert len(selections[0]) == len(AI_AUGMENT_EVIDENCE_COLUMNS)
+    assert {(ref_id, call_id) for _field, _number, ref_id, call_id in selections[0]}.issubset({
+        (TEST_REF_ID, TEST_CALL_ID),
+        (TEST_VIEW_REF_ID, TEST_VIEW_CALL_ID),
+    })
+
+
+def test_renderer_uses_generic_arguments_wording() -> None:
+    citation_marker = (
+        f"{CODEX_CITE_MARKER_PREFIX}{TEST_REF_ID}"
+        f"{CODEX_CITE_MARKER_SUFFIX}"
+    )
+    cite_prefix = (
+        f"Neighbor header turn9search9\n{citation_marker}\n"
+        "# Heading\n- [source](https://example.test) `before` "
+        f"{CODEX_CITE_MARKER_PREFIX}13\u2020"
+    )
+    cite_suffix = (
+        f"{codex_parse.INLINE_CITATION_SEPARATOR}example.test"
+        f"{CODEX_CITE_MARKER_SUFFIX} after\n> quoted"
+    )
+    footnote = codex_parse.render_footnote(
+        number=1,
+        cite_text=f"{cite_prefix}{TEST_EXCERPT}{cite_suffix}",
+        citation_marker=citation_marker,
+        marker_prefix=CODEX_CITE_MARKER_PREFIX,
+        marker_suffix=CODEX_CITE_MARKER_SUFFIX,
+        excerpt=TEST_EXCERPT,
+        excerpt_position=len(cite_prefix),
+        context_characters=post_commit_validation.FOOTNOTE_CONTEXT_CHARACTERS,
+        fco_timestamp="2026-07-31T16:11:02.000Z",
+        url=TEST_URL,
+    )
+
+    assert f"**{codex_parse.escape_markdown_text(TEST_EXCERPT)}**" in footnote
+    assert r"\# Heading \- \[source\]\(https\:\/\/example\.test\) \`before\`" in footnote
+    assert r"after \> quoted" in footnote
+    assert "\n" not in footnote
+    assert TEST_REF_ID not in footnote
+    assert "turn9search9" not in footnote
+    assert CODEX_CITE_MARKER_PREFIX not in footnote
+    assert CODEX_CITE_MARKER_SUFFIX not in footnote
+    assert codex_parse.INLINE_CITATION_SEPARATOR not in footnote
+    assert "using arguments^1^" in footnote
+    assert "search query" not in footnote
+    assert codex_parse.render_footnote_argument(
+        1,
+        CALL_ARGUMENTS_TURN_6,
+        {"turn5search0": COMPANY_URL},
+        ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
+    ) == (
+        f"1. {codex_parse.AI_GENERATED_TEXT_PREFIX} "
+        f"{MARKDOWN_CODE_DELIMITER}{DISPLAY_ARGUMENTS_TURN_6}{MARKDOWN_CODE_DELIMITER}"
+    )
+    assert codex_parse.render_footnote_argument(
+        1,
+        CALL_ARGUMENTS_TURN_7,
+        {"turn6view0": COMPANY_URL},
+        ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
+    ) == (
+        f"1. {codex_parse.AI_GENERATED_TEXT_PREFIX} "
+        f"{MARKDOWN_CODE_DELIMITER}{DISPLAY_ARGUMENTS_TURN_7}{MARKDOWN_CODE_DELIMITER}"
+    )
+    multi_open = (
+        '{"open":[{"ref_id":"turn1search0"},{"ref_id":"turn1search1"}],"response_length":"long"}'
+    )
+    assert codex_parse.render_footnote_argument(
+        1,
+        multi_open,
+        {"turn1search0": COMPANY_URL, "turn1search1": OFFICERS_URL},
+        ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
+    ) == (
+        f"1. {codex_parse.AI_GENERATED_TEXT_PREFIX} "
+        f'{MARKDOWN_CODE_DELIMITER}{{"open":[{{"ref_id":"turn1search0","url":"{COMPANY_URL}"}},'
+        f'{{"ref_id":"turn1search1","url":"{OFFICERS_URL}"}}],'
+        f'"response_length":"long"}}{MARKDOWN_CODE_DELIMITER}'
+    )
+    assert codex_parse.render_footnote_argument(
+        1,
+        CALL_ARGUMENTS_TURN_6,
+        {},
+        ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
+    ) == (
+        f"1. {codex_parse.AI_GENERATED_TEXT_PREFIX} "
+        f"{MARKDOWN_CODE_DELIMITER}{CALL_ARGUMENTS_TURN_6}{MARKDOWN_CODE_DELIMITER}"
+    )
+    direct_url_open = f'{{"open":[{{"ref_id":"{COMPANY_URL}"}}],"response_length":"long"}}'
+    assert codex_parse.render_footnote_argument(
+        1,
+        direct_url_open,
+        {},
+        ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
+    ) == (
+        f"1. {codex_parse.AI_GENERATED_TEXT_PREFIX} "
+        f"{MARKDOWN_CODE_DELIMITER}{direct_url_open}{MARKDOWN_CODE_DELIMITER}"
+    )
+    assert codex_parse.render_footnote_argument(
+        1,
+        CALL_ARGUMENTS_TURN_2,
+        {},
+        ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
+    ) == (
+        f"1. {codex_parse.AI_GENERATED_TEXT_PREFIX} "
+        f"{MARKDOWN_CODE_DELIMITER}{CALL_ARGUMENTS_TURN_2}{MARKDOWN_CODE_DELIMITER}"
+    )
+
+
+def test_copied_report_requires_one_exact_nested_ok_path(tmp_path: Path) -> None:
+    report_path = tmp_path / "snapshot.txt"
+    write_text(report_path, report_for_rollout(TEST_ROLLOUT_RELATIVE_PATH))
+    parse_appendwatch_report(report_path, TEST_ROLLOUT_RELATIVE_PATH)
+
+    write_text(
+        report_path,
+        report_for_rollout(TEST_ROLLOUT_RELATIVE_PATH).replace(
+            APPENDWATCH_OK_PREFIX,
+            APPENDWATCH_COMPROMISED_PREFIX,
+        ),
+    )
+    with pytest.raises(AppendwatchReportError):
+        parse_appendwatch_report(report_path, TEST_ROLLOUT_RELATIVE_PATH)
+
+
+@pytest.mark.parametrize(
+    "report_text",
+    (
+        ".  [COMPROMISED: monitoring gap]\n",
+        ".\n",
+        ".\n└── malformed status rollout-chat.jsonl\n",
+        (
+            ".\n"
+            "└── 2026/\n"
+            "    └── 07/\n"
+            "        └── 31/\n"
+            f"            ├── {APPENDWATCH_OK_PREFIX}rollout-chat.jsonl\n"
+            f"            └── {APPENDWATCH_OK_PREFIX}rollout-chat.jsonl\n"
+        ),
+    ),
+)
+def test_copied_report_missing_malformed_or_ambiguous_fails_closed(
+    report_text: str,
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "snapshot.txt"
+    write_text(report_path, report_text)
+
+    with pytest.raises(AppendwatchReportError):
+        parse_appendwatch_report(report_path, TEST_ROLLOUT_RELATIVE_PATH)
+
+
+def test_configured_replay_log_hash_is_enforced_on_each_backend_start(
+    tmp_path: Path,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    release_map = tmp_path / "release-map.csv"
+    replay_log = tmp_path / "replay.jsonl"
+    release_map.write_text("draw,batch\n1,1\n", encoding=TEXT_ENCODING)
+    replay_log.write_text('{"first":true}\n', encoding=TEXT_ENCODING)
+    config_data = json.loads(
+        backend_test_paths.ai_augment_config.read_text(encoding=TEXT_ENCODING)
+    )
+    config_data["files_config"][MAP_SUBSET_0_TO_BATCH_KEY] = {
+        RESOURCE_PATH_KEY: str(release_map),
+        RESOURCE_SHA256_KEY: hashlib.sha256(release_map.read_bytes()).hexdigest(),
+        RESOURCE_DESCRIPTION_KEY: "isolated release map",
+    }
+    config_data["files_config"][REPLAY_LOG_KEY] = {
+        RESOURCE_PATH_KEY: str(replay_log),
+        RESOURCE_SHA256_KEY: hashlib.sha256(replay_log.read_bytes()).hexdigest(),
+        RESOURCE_DESCRIPTION_KEY: "isolated authoritative log",
+    }
+
+    configured = AiAugmentDetourConfig.model_validate_json(
+        json.dumps(config_data)
+    )
+
+    assert all(
+        resource.verify_hash_on_init
+        for resource in configured.registered_resources
+    )
+    replay_log.chmod(0o600)
+    try:
+        replay_log.write_text('{"changed":true}\n', encoding=TEXT_ENCODING)
+    finally:
+        replay_log.chmod(0o400)
+    config_path = tmp_path / "ai-augment.json"
+    config_path.write_text(json.dumps(config_data), encoding=TEXT_ENCODING)
+    # Both Backend and Dashboard startup load configuration through this method.
+    with pytest.raises(ValidationError):
+        AiAugmentDetourConfig.from_json(config_path)
+    assert replay_log.read_text(encoding=TEXT_ENCODING) == '{"changed":true}\n'
+    assert replay_log.stat().st_mode & 0o777 == 0o400
+
+
+def test_replay_log_registered_resource_inherits_construction_hash_check(
+    tmp_path: Path,
+) -> None:
+    replay_log = tmp_path / "replay.jsonl"
+    value = b'{}\n{"unfinished":'
+    replay_log.write_bytes(value)
+    original_mode = replay_log.stat().st_mode
+    # The hash matches only the prefix. Nothing may truncate the actual file to fit it.
+    with pytest.raises(ValidationError, match="Hash mismatch"):
+        ReplayLogRegisteredResource(
+            name=replay_log.name,
+            hash=hashlib.sha256(b"{}\n").hexdigest(),
+            group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
+            fragment_type=FragmentType.LINE_NUMBER,
+            description="isolated authoritative log",
+            url=AnyUrl(replay_log.resolve().as_uri()),
+            verify_hash_on_init=True,
+        )
+    assert replay_log.read_bytes() == value
+    assert replay_log.stat().st_mode == original_mode
+
+
+@pytest.mark.parametrize("read_only", (False, True))
+def test_replay_log_rejects_incomplete_tail_without_repair(
+    tmp_path: Path,
+    read_only: bool,
+) -> None:
+    replay_log = tmp_path / "replay.jsonl"
+    complete_record = persisted_http_record(
+        record_id=UUID("019d0000-0000-7000-8000-000000000020"),
+        method=HTTP_GET_METHOD,
+        path=PULL_PATH,
+        response_code=status.HTTP_200_OK,
+    )
+    value = (complete_record.model_dump_json() + '\n{"unfinished":').encode(TEXT_ENCODING)
+    replay_log.write_bytes(value)
+    resource = ReplayLogRegisteredResource.from_config_entry(
+        {
+            RESOURCE_PATH_KEY: str(replay_log),
+            RESOURCE_SHA256_KEY: hashlib.sha256(value).hexdigest(),
+            RESOURCE_DESCRIPTION_KEY: "isolated authoritative log",
+        },
+        resource_key=REPLAY_LOG_KEY,
+        verify_hash_on_init=True,
+    )
+    # A matching hash does not make malformed JSONL acceptable for replay.
+    with resource._locked(append_allowed=not read_only):
+        with pytest.raises(
+            _ReplayLogLineInvalidError,
+            match=Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=2),
+        ):
+            AiAugmentBackendStore._authoritative_log_records(resource._read())
+    assert replay_log.read_bytes() == value
+
+
+def test_replay_line_reports_missing_timing_endpoint() -> None:
+    record = persisted_http_record(
+        record_id=UUID("019d0000-0000-7000-8000-000000000021"),
+        method=HTTP_GET_METHOD,
+        path=PULL_PATH,
+        response_code=HTTPStatus.OK,
+    )
+    invalid = {
+        **record.model_dump(mode="json"),
+        nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec): None,
+    }
+    with pytest.raises(_ReplayLogLineInvalidError) as exc_info:
+        AiAugmentBackendStore._authoritative_log_records(
+            (json.dumps(invalid) + "\n").encode(TEXT_ENCODING),
+            start_line_number=4,
+        )
+    assert str(exc_info.value) == Locale.REPLAY_DETAIL_TEMPLATE.format(
+        message=Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=4),
+        detail=Locale.REPLAY_VALIDATION_ERROR_DETAIL_TEMPLATE.format(
+            location="", error_type="value_error",
+        ),
+    )
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ValidationError)
+    assert [(error["loc"], error["type"]) for error in cause.errors()] == [
+        ((), "value_error"),
+    ]
+
+
+def test_replay_line_logs_full_pydantic_rejected_input(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    record = persisted_http_record(
+        record_id=UUID("019d0000-0000-7000-8000-000000000021"),
+        method=HTTP_GET_METHOD,
+        path=PULL_PATH,
+        response_code=HTTPStatus.OK,
+    )
+    rejected_value = "x" * 10_000
+    invalid = {
+        **record.model_dump(mode="json"),
+        nameof(lambda: HttpRequestLogRecord.response_code): rejected_value,
+    }
+    with pytest.raises(_ReplayLogLineInvalidError):
+        AiAugmentBackendStore._authoritative_log_records(
+            (json.dumps(invalid) + "\n").encode(TEXT_ENCODING),
+        )
+    diagnostics = [
+        entry for entry in caplog.records
+        if entry.msg == Locale.PYDANTIC_VALIDATION_DETAILS_LOG
+    ]
+    assert len(diagnostics) == 1
+    assert isinstance(diagnostics[0].args, tuple)
+    diagnostic_json = diagnostics[0].args[0]
+    assert isinstance(diagnostic_json, str)
+    assert any(
+        error["input"] == rejected_value
+        for error in json.loads(diagnostic_json)
+    )
+
+
+def test_replay_line_reports_invalid_public_response_timing() -> None:
+    record = persisted_http_record(
+        record_id=UUID("019d0000-0000-7000-8000-000000000021"),
+        method=HTTP_GET_METHOD,
+        path=PULL_PATH,
+        response_code=HTTPStatus.OK,
+    )
+    invalid = HttpRequestLogRecord.model_validate({
+        **record.model_dump(),
+        nameof(lambda: HttpRequestLogRecord.received_at_unix_usec): 1,
+    })
+    with pytest.raises(_ReplayLogLineInvalidError) as exc_info:
+        AiAugmentBackendStore._authoritative_log_records(
+            (invalid.model_dump_json() + "\n").encode(TEXT_ENCODING),
+            start_line_number=4,
+        )
+    assert str(exc_info.value) == Locale.REPLAY_DETAIL_TEMPLATE.format(
+        message=Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=4),
+        detail=Locale.REPLAY_DETAIL_TEMPLATE.format(
+            message=Locale.REPLAY_RECORD_CONTOUR_INVALID,
+            detail=Locale.REPLAY_RECEIVED_AT_ABSENT_DETAIL,
+        ),
+    )
+
+
+def test_replay_log_registered_resource_rejects_reentry(
+    tmp_path: Path,
+) -> None:
+    replay_log = tmp_path / "replay.jsonl"
+    replay_log.write_text("{}\n", encoding=TEXT_ENCODING)
+    resource = ReplayLogRegisteredResource.from_config_entry(
+        {
+            RESOURCE_PATH_KEY: str(replay_log),
+            RESOURCE_SHA256_KEY: hashlib.sha256(replay_log.read_bytes()).hexdigest(),
+            RESOURCE_DESCRIPTION_KEY: "isolated authoritative log",
+        },
+        resource_key=REPLAY_LOG_KEY,
+        verify_hash_on_init=True,
+    )
+
+    with resource._locked(append_allowed=True):
+        with pytest.raises(
+            RuntimeError,
+            match="ReplayLogRegisteredResource is already open",
+        ):
+            with resource._locked(append_allowed=True):
+                pass
+
+    assert replay_log.stat().st_mode & 0o777 == 0o400
+
+
+def test_replay_log_registered_resource_rejects_unexpected_append_offset(
+    tmp_path: Path,
+) -> None:
+    replay_log = tmp_path / "replay.jsonl"
+    replay_log.write_bytes(b"")
+    resource = ReplayLogRegisteredResource.from_config_entry(
+        {
+            RESOURCE_PATH_KEY: str(replay_log),
+            RESOURCE_SHA256_KEY: hashlib.sha256(b"").hexdigest(),
+            RESOURCE_DESCRIPTION_KEY: "isolated authoritative log",
+        },
+        resource_key=REPLAY_LOG_KEY,
+        verify_hash_on_init=True,
+    )
+
+    with resource._locked(append_allowed=True):
+        with pytest.raises(_ReplayProjectionConflictError, match=Locale.REPLAY_PROJECTION_CONFLICT):
+            resource._append(b"{}\n", expected_offset=1)
+        assert resource._append(b"{}\n", expected_offset=0) == 3
+        assert resource._read() == b"{}\n"
+
+
+@pytest.mark.parametrize(
+    "rollout_path",
+    (
+        "",
+        "relative/rollout-chat.jsonl",
+        "/home/ai/.codex/sessions/../rollout-chat.jsonl",
+        "/home/ai/rollout-chat.jsonl",
+        "/home/ai/.codex/sessions/2026/07/31/not-a-rollout.txt",
+        "/home/ai/.codex/sessions/2026/07/31/rollout-chat.jsonl\n",
+    ),
+)
+def test_rollout_configuration_is_confined(
+    rollout_path: str,
+) -> None:
+    with pytest.raises(aivm_audit._AivmAuditError):
+        aivm_audit.audit_configuration(rollout_path)
+
+
+def test_aivm_identity_file_must_be_configured_explicitly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lima_config = tmp_path / "ssh.config"
+    write_text(lima_config, "fixture\n")
+    monkeypatch.setattr(
+        aivm_audit, "APPENDWATCH_REPORT", "/mounted/appendwatch-tree.txt",
+    )
+    monkeypatch.setattr(aivm_audit, "LIMA_SSH_CONFIG_PATH", lima_config)
+    monkeypatch.setattr(aivm_audit, "AIVM_IDENTITY_FILE", None)
+
+    with pytest.raises(
+        aivm_audit._AivmAuditError,
+        match=AIVM_IDENTITY_FILE_ENV_NAME,
+    ):
+        aivm_audit.audit_configuration(TEST_ROLLOUT_GUEST_PATH)
+
+
+def test_session_rollout_discovery_uses_restricted_audit_principal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = UUID("019fa457-aac5-7652-8669-9d571206e7cb")
+    rollout = CODEX_SESSIONS_ROOT / JULY_ROLLOUT_RELATIVE_PATH
+    deployment_files = [
+        tmp_path / "identity",
+        tmp_path / "known-hosts",
+        tmp_path / "ssh.config",
+    ]
+    for path in deployment_files:
+        write_text(path, "fixture\n")
+    monkeypatch.setattr(
+        aivm_audit, "APPENDWATCH_REPORT", "/mounted/appendwatch-tree.txt",
+    )
+    monkeypatch.setattr(aivm_audit, "AIVM_IDENTITY_FILE", deployment_files[0])
+    monkeypatch.setattr(aivm_audit, "AIVM_KNOWN_HOSTS_FILE", deployment_files[1])
+    monkeypatch.setattr(aivm_audit, "LIMA_SSH_CONFIG_PATH", deployment_files[2])
+    observed: list[str] = []
+
+    def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        observed.extend(command)
+        assert kwargs["check"] is True
+        return SimpleNamespace(stdout=f"{rollout}\n", stderr="", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    configured = aivm_audit.audit_configuration_for_session(session_id)
+
+    assert configured.ssh_user == AIVM_AUDIT_USER
+    assert configured.ssh_target == f"{AIVM_INSTANCE}-{AIVM_AUDIT_USER}"
+    assert f"User={AIVM_AUDIT_USER}" in observed
+    assert observed[-1] == f"{AUDIT_FIND_ROLLOUT_COMMAND} {session_id}"
+    assert configured.rollout_guest_path == str(rollout)
+
+
+def test_audit_ssh_uses_pinned_identity_and_counts_physical_lines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    report_path = tmp_path / "report.txt"
+    identity_path = tmp_path / "identity"
+    known_hosts_path = tmp_path / "known_hosts"
+    lima_config_path = tmp_path / "ssh.config"
+    for path in (report_path, identity_path, known_hosts_path, lima_config_path):
+        write_text(path, "fixture\n")
+    configuration = aivm_audit._AivmAuditConfiguration(
+        rollout_guest_path=TEST_ROLLOUT_GUEST_PATH,
+        rollout_relative_path=TEST_ROLLOUT_RELATIVE_PATH,
+        appendwatch_report=PurePosixPath("/mounted/appendwatch-tree.txt"),
+        lima_ssh_config=lima_config_path,
+        identity_file=identity_path,
+        known_hosts_file=known_hosts_path,
+        ssh_user="aivm-audit",
+        ssh_target="aivm-aivm-audit",
+        host_key_alias="lima-aivm-aivm-audit",
+    )
+    runtime = runtime_for_test(tmp_path, backend_test_paths)
+    captured: dict[str, Any] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> None:
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        cast(Any, kwargs["stdout"]).write(b"first\nsecond")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert configuration.rollout_relative_path is not None
+    archived = runtime.pipeline_config.rollout_cas.copy_rollout(
+        rollout_relative_path=configuration.rollout_relative_path,
+        ssh_target=configuration.ssh_target,
+        ssh_options=aivm_audit.aivm_connection_options(
+            lima_ssh_config=configuration.lima_ssh_config,
+            identity_file=configuration.identity_file,
+            known_hosts_file=configuration.known_hosts_file,
+            ssh_user=configuration.ssh_user,
+            host_key_alias=configuration.host_key_alias,
+        ),
+    )
+
+    command = captured["command"]
+    assert command[0] == SSH_EXECUTABLE
+    assert f"IdentityFile={identity_path}" in command
+    assert f"UserKnownHostsFile={known_hosts_path}" in command
+    assert f"User={configuration.ssh_user}" in command
+    assert f"HostKeyAlias={configuration.host_key_alias}" in command
+    assert "StrictHostKeyChecking=accept-new" in command
+    assert command[-2] == configuration.ssh_target
+    assert command[-1] == (f"{AUDIT_READ_ROLLOUT_COMMAND} {TEST_ROLLOUT_RELATIVE_PATH}")
+    assert "shell" not in captured["kwargs"]
+    assert archived.line_count == 2
+    validated = runtime.pipeline_config.rollout_cas.validated_rollout(archived)
+    assert validated.model_dump(exclude={"cas_path"}) == archived.model_dump()
+    assert validated.cas_path == (
+        runtime.pipeline_config.rollout_cas.path
+        / archived.sha256[:2] / archived.sha256[2:4] / archived.sha256
+    )
+
+
+@pytest.mark.parametrize(
+    "raw_namekey",
+    (
+        TEST_NAMEKEY,
+        '{"ktp.first_name":"A.","ktp.last_name":"Sheikh"}',
+        '{"ktp.last_name":"Sheikh","ktp.first_name":"A."}',
+        '{  "ktp.first_name" : "A." ,  "ktp.last_name" : "Sheikh"  }',
+    ),
+)
+def test_blueprint_lookup_normalizes_equivalent_namekey_json(
+    raw_namekey: str,
+    api_runtime: AiAugmentBackendContext,
+) -> None:
+    runtime = AiAugmentBackendContext(
+        pipeline_config=api_runtime.pipeline_config,
+        ai_augment_singular_outerdict_blueprints=(
+            api_runtime.ai_augment_singular_outerdict_blueprints
+        ),
+    )
+
+    assert runtime.blueprint_for_namekey(NameKey.from_json_key(raw_namekey)) is (
+        runtime.ai_augment_singular_outerdict_blueprints[0]
+    )
+
+
+@pytest.mark.parametrize(
+    "raw_namekey",
+    (
+        "not-json",
+        '{"ktp.first_name":"A."}',
+    ),
+)
+def test_configured_namekey_rejects_malformed_or_incomplete_json(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_namekey: str,
+    startup_files: StartupFiles,
+) -> None:
+    monkeypatch.setenv(NAMEKEY_ENV_NAME, raw_namekey)
+
+    with pytest.raises(
+        ValueError,
+        match=Locale.CONFIGURED_NAMEKEY_MALFORMED,
+    ):
+        server.main([
+            "--config", str(startup_files.config), "--new", "--yes",
+        ])
+
+
+@pytest.mark.parametrize(
+    ("raw_namekey", "expected_message"),
+    (
+        (
+            NameKey(first_name="Absent", last_name="Startup").to_json_key(),
+            Locale.CONFIGURED_NAMEKEY_NOT_FOUND,
+        ),
+        (
+            EXCLUDED_NAMEKEY,
+            Locale.CONFIGURED_NAMEKEY_INELIGIBLE_TEMPLATE.format(
+                category=AiAugmentIneligibilityCategory.EXCLUDED_DUPLICATE_NAMEKEY.value,
+            ),
+        ),
+    ),
+)
+def test_invalid_namekey_is_rejected_before_startup_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_namekey: str,
+    expected_message: str,
+    startup_files: StartupFiles,
+) -> None:
+    monkeypatch.setenv(NAMEKEY_ENV_NAME, raw_namekey)
+    monkeypatch.setattr(
+        Console, "input", lambda *_args, **_kwargs: pytest.fail("prompted for invalid NameKey"),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        server.main(["--config", str(startup_files.config), "--new"])
+
+    assert str(exc_info.value) == expected_message
+    assert api.BACKEND_PROCESS_LOCK_DESCRIPTOR is None
+
+
+def ai_augment_singular_outerdict(
+    first_name: str,
+    last_name: str,
+    *,
+    cohort: AiAugmentCohort = AiAugmentCohort.GROUND_TRUTH,
+    ineligibility_category: AiAugmentIneligibilityCategory | None = None,
+) -> AiAugmentSingularOuterDict:
+    namekey = NameKey(first_name=first_name, last_name=last_name)
+    xlsx_innerdict = InnerDict.from_mapping(
+        {
+            KTP_NAMEKEY_COL: namekey.to_json_key(),
+            KTP_FIRST_NAME_COL: first_name,
+            KTP_LAST_NAME_COL: last_name,
+            DRAW_LABEL: "1",
+        },
+        XlsxMatchProcedure(),
+    )
+    return AiAugmentSingularOuterDict(
+        namekey=namekey,
+        xlsx_innerdicts=(xlsx_innerdict,),
+        ssn_innerdicts=(),
+        docx_innerdicts=(),
+        ai_augment_rnd=1,
+        ai_augment_cohort=cohort,
+        ai_augment_ineligibility_category=ineligibility_category,
+    )
+
+
+def test_card_labels_stored_standardized_fields_without_mutating_source() -> None:
+    submission = L_FEI_FEI_RETRY_FIXTURE.submission.model_copy(deep=True)
+    rendered = post_commit_validation.render_codex_values(
+        submission,
+        {column: [] for column in AI_AUGMENT_EVIDENCE_COLUMNS},
+        commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
+        argument_ref_urls={},
+    )
+    singular_outerdict = ai_augment_singular_outerdict("A.", "Sheikh")
+    source_innerdict = singular_outerdict.xlsx_innerdicts[0]
+    original_source = deepcopy(source_innerdict.data)
+    selected = api.selected_card_outer_dict(singular_outerdict)
+    assert (
+        selected.get_inner_by_key(singular_outerdict.namekey.to_json_key())[0]
+        is source_innerdict
+    )
+    codex_innerdict = InnerDict.from_mapping(
+        {
+            KTP_NAMEKEY_COL: singular_outerdict.namekey.to_json_key(),
+            KTP_FILENAME_COL: TEST_ROLLOUT_FILENAME,
+            **rendered,
+        },
+        _CodexInnerDictProcedure(),
+    )
+    cards = build_cards(
+        OuterDict(data={singular_outerdict.namekey.to_json_key(): [codex_innerdict]}),
+        total_draws=1,
+        intro="",
+        excluded_cols=CARD_EXCLUDED_COLUMNS,
+    )
+
+    assert len(cards) == 1
+    card = next(iter(cards.values()))
+    race_narrative_column = KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
+    assert rendered[race_narrative_column] == "[REDACTED]"
+    assert f"**`{race_narrative_column}`**: [REDACTED]" in card
+    for (_, field_submission), column in zip(
+        submission.evidence_items(), AI_AUGMENT_STANDARDIZED_COLUMNS, strict=True,
+    ):
+        canonical_json = json.dumps(
+            field_submission.model_dump(mode="json")[FIELD_STANDARDIZED_VALUE_FIELD],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        expected_value = codex_parse.render_standardized_submission_value(canonical_json)
+        assert codex_innerdict.data[column] == expected_value
+        assert f"**`{column}`**: {expected_value}" in card
+    race_column = AI_AUGMENT_STANDARDIZED_COLUMNS[
+        AI_AUGMENT_EVIDENCE_COLUMNS.index(KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL)
+    ]
+    assert (
+        f'"{nameof(lambda: RaceEthnicityLanguageCultureStandardized.race)}":'
+        f'"{NOT_AVAILABLE_OR_APPLICABLE_VALUE}"'
+    ) in codex_innerdict.data[race_column]
+    assert f"**`{race_column}`**: {codex_innerdict.data[race_column]}" in card
+    assert source_innerdict.data == original_source
+
+
+def test_card_preserves_standardized_placeholder() -> None:
+    submission = L_FEI_FEI_RETRY_FIXTURE.submission.model_copy(deep=True)
+    submission.gender = GenderSubmission(
+        value=submission.gender.value,
+        web_search_excerpts=submission.gender.web_search_excerpts,
+        standardized_value=NOT_REPORTED_VALUE,
+    )
+    rendered = post_commit_validation.render_codex_values(
+        submission,
+        {column: [] for column in AI_AUGMENT_EVIDENCE_COLUMNS},
+        commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
+        argument_ref_urls={},
+    )
+    column = AI_AUGMENT_STANDARDIZED_COLUMNS[
+        AI_AUGMENT_EVIDENCE_COLUMNS.index(KTP_AI_AUGMENT_GENDER_COL)
+    ]
+    expected_value = codex_parse.render_standardized_submission_value(
+        json.dumps(NOT_REPORTED_VALUE)
+    )
+    assert rendered[column] == expected_value
+    namekey = NameKey(first_name="A.", last_name="Sheikh")
+    codex_innerdict = InnerDict.from_mapping(
+        {KTP_NAMEKEY_COL: namekey.to_json_key(), **rendered},
+        _CodexInnerDictProcedure(),
+    )
+    cards = build_cards(
+        OuterDict(data={namekey.to_json_key(): [codex_innerdict]}),
+        total_draws=1,
+        intro="",
+        excluded_cols=CARD_EXCLUDED_COLUMNS,
+    )
+    assert f"**`{column}`**: {expected_value}" in next(iter(cards.values()))
+    assert codex_innerdict.data[column] == expected_value
+
+
+@pytest.mark.python_subprocess
+def test_backend_singleton_lock_is_independent_of_replay_log(
+    tmp_path: Path, python_process: PythonProcess,
+) -> None:
+    lock_path = api.BACKEND_PROCESS_LOCK_PATH
+    holder = python_process.popen(backend_lock_holder_process, str(lock_path))
+    assert holder.stdout is not None
+    assert holder.stdout.readline().strip() == "locked"
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match=Locale.BACKEND_ALREADY_RUNNING,
+        ):
+            api._acquire_backend_process_lock()
+    finally:
+        assert holder.stdin is not None
+        holder.stdin.write("\n")
+        holder.stdin.flush()
+        holder.wait(timeout=5)
+
+    api._acquire_backend_process_lock()
+    assert api.BACKEND_PROCESS_LOCK_DESCRIPTOR is not None
+    api._release_backend_process_lock()
+    assert api.BACKEND_PROCESS_LOCK_DESCRIPTOR is None
+
+
+def test_backend_startup_prepares_source_rows_for_initial_pull(
+    monkeypatch: pytest.MonkeyPatch,
+    api_store: AiAugmentBackendStore,
+    api_runtime: AiAugmentBackendContext,
+) -> None:
+    runtime = AiAugmentBackendContext(
+        pipeline_config=api_runtime.pipeline_config,
+        ai_augment_singular_outerdict_blueprints=(
+            api_runtime.ai_augment_singular_outerdict_blueprints
+        ),
+    )
+
+    assert runtime.ai_augment_singular_outerdict_blueprints == (
+        api_runtime.ai_augment_singular_outerdict_blueprints
+    )
+    with api_store._writable(runtime):
+        singular_outerdict = api_store.selected_ai_augment_singular_outerdict()
+        monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
+        response = api._pull_response(api_store)
+    assert response.status_code == HTTPStatus.OK
+    assert response.content == "".join(api.configured_pull_lines(singular_outerdict)).encode()
+
+
+def test_ipc_only_context_configures_query_without_a_namekey(
+    api_store: AiAugmentBackendStore,
+    api_runtime: AiAugmentBackendContext,
+) -> None:
+    runtime = AiAugmentBackendContext(
+        pipeline_config=api_runtime.pipeline_config,
+        ai_augment_singular_outerdict_blueprints=(
+            api_runtime.ai_augment_singular_outerdict_blueprints
+        ),
+    )
+
+    assert not hasattr(runtime, "configured_namekey")
+    with api_store._read_only(runtime):
+        assert len(api_store.ai_augment_singular_outerdicts()) == 1
+
+
+def test_ipc_only_query_uses_explicit_runtime_and_read_only_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
+    threaded_loop: asyncio.Runner,
+) -> None:
+    singular_outerdicts = (
+        ai_augment_singular_outerdict(
+            "A.", "Sheikh", cohort=AiAugmentCohort.NO_GROUND_TRUTH,
+        ),
+        ai_augment_singular_outerdict(
+            "Jane", "Doe", cohort=AiAugmentCohort.NO_GROUND_TRUTH,
+        ),
+    )
+    base_runtime = runtime_for_test(tmp_path, backend_test_paths)
+    runtime = AiAugmentBackendContext(
+        pipeline_config=base_runtime.pipeline_config,
+        ai_augment_singular_outerdict_blueprints=singular_outerdicts,
+    )
+    monkeypatch.setattr(
+        ai_augment_detour_db,
+        "load_duckdb_extension",
+        lambda *_args, **_kwargs: None,
+    )
+    with writable_backend_store(runtime) as store:
+        pass
+    with store._read_only(runtime):
+        response = query_snapshot_for_test(store, threaded_loop)
+
+    assert tuple(
+        value.serialize() for value in response.ai_augment_singular_outerdicts
+    ) == tuple(value.serialize() for value in singular_outerdicts)
+
+
+def test_detour_database_open_modes_are_explicit_and_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    runtime = runtime_for_test(tmp_path, backend_test_paths)
+    detour_db = backend_store_for_test(runtime)._detour_db
+    database_path = detour_db.path
+    duckdb.connect(str(database_path)).close()
+    real_connect = duckdb.connect
+    calls: list[tuple[str, bool]] = []
+
+    def connect(path: str, *, read_only: bool) -> duckdb.DuckDBPyConnection:
+        calls.append((path, read_only))
+        if not read_only:
+            raise duckdb.IOException("permission denied")
+        return real_connect(path, read_only=read_only)
+
+    monkeypatch.setattr(duckdb, "connect", connect)
+    monkeypatch.setattr(
+        ai_augment_detour_db,
+        "load_duckdb_extension",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with detour_db.read_only() as opened_database:
+        assert opened_database is detour_db
+        with pytest.raises(duckdb.Error):
+            opened_database.connection.execute("CREATE TABLE forbidden_write (id INTEGER)")
+    with pytest.raises(RuntimeError) as write_error:
+        with detour_db.writable():
+            pass
+    assert str(write_error.value) == Locale.DETOUR_DUCKDB_OPEN_FAILED
+    assert isinstance(write_error.value.__cause__, duckdb.IOException)
+
+    assert calls == [
+        (str(database_path), True),
+        (str(database_path), False),
+    ]
+
+    def denied_connect(*_args: object, **_kwargs: object) -> None:
+        raise duckdb.IOException("permission denied")
+
+    monkeypatch.setattr(duckdb, "connect", denied_connect)
+    with pytest.raises(RuntimeError) as read_error:
+        with detour_db.read_only():
+            pass
+    assert str(read_error.value) == Locale.DETOUR_DUCKDB_READ_ONLY_OPEN_FAILED
+    assert isinstance(read_error.value.__cause__, duckdb.IOException)
+
+
+def test_backend_store_exposes_only_detached_reads_outside_transactions(
+    api_runtime: AiAugmentBackendContext,
+) -> None:
+    store = backend_store_for_test(api_runtime)
+    assert not hasattr(store, "detour_db")
+    with pytest.raises(RuntimeError, match="must be used inside"):
+        store._execute("SELECT 1")
+    with writable_backend_store(api_runtime) as store:
+        assert store._detour_db._conn is None
+        result = store._execute("SELECT 1 UNION ALL SELECT 2")
+        assert store._detour_db._conn is None
+        assert result.fetchall() == [(1,), (2,)]
+        assert result.fetchone() is None
+        for sql in ("BEGIN", "CREATE TABLE forbidden (id INT)", "ATTACH ':memory:' AS other"):
+            with pytest.raises(RuntimeError):
+                store._execute(sql)
+        with pytest.raises(RuntimeError, match="transaction"):
+            store._materialize_innerdicts(source_relation="unused", table_name="unused")
+        assert store._detour_db_path.stat().st_mode & 0o777 == 0o400
+    with store._read_only(api_runtime):
+        assert store._execute("SELECT 1").fetchone() == (1,)
+        assert store._detour_db._conn is None
+    with pytest.raises(RuntimeError, match="must be used inside"):
+        store._execute("SELECT 1")
+
+
+def test_query_handler_requires_managed_backend_store_context(
+    api_runtime: AiAugmentBackendContext,
+    monkeypatch: pytest.MonkeyPatch,
+    threaded_loop: asyncio.Runner,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = backend_store_for_test(api_runtime)
+    monkeypatch.setattr(
+        ai_augment_detour_db,
+        "load_duckdb_extension",
+        lambda *_args, **_kwargs: None,
+    )
+
+    app = server.create_dashboard_query_app(
+        store.query_response_record,
+        query_path=DASHBOARD_QUERY_PATH,
+        fatal_exit=sys.exit,
+    )
+    with pytest.raises(SystemExit) as fatal:
+        threaded_loop.run(asyncio.to_thread(app.test_client().get, DASHBOARD_QUERY_PATH))
+    assert fatal.value.code == 1
+    assert any(
+        record.exc_info is not None
+        and isinstance(record.exc_info[1], BackendStoreException)
+        and str(record.exc_info[1]) == Locale.STORE_CONTEXT_UNAVAILABLE
+        for record in caplog.records
+    )
+
+    with writable_backend_store(api_runtime) as store:
+        response = query_snapshot_for_test(store, threaded_loop)
+
+    assert tuple(
+        item.serialize() for item in response.ai_augment_singular_outerdicts
+    ) == tuple(
+        item.serialize() for item in api_runtime.ai_augment_singular_outerdict_blueprints
+    )
+
+
+def test_detour_database_prepares_both_open_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    runtime = runtime_for_test(tmp_path, backend_test_paths)
+    calls: list[tuple[duckdb.DuckDBPyConnection, str, object, object]] = []
+
+    def prepare_extension(
+        connection: duckdb.DuckDBPyConnection,
+        extension: str,
+        config: object,
+        *,
+        log: object,
+    ) -> None:
+        calls.append((connection, extension, config, log))
+
+    monkeypatch.setattr(
+        ai_augment_detour_db,
+        "load_duckdb_extension",
+        prepare_extension,
+    )
+
+    detour_db = backend_store_for_test(runtime)._detour_db
+    with detour_db.writable() as writable_database:
+        writable_connection = writable_database.connection
+    with detour_db.read_only() as read_only_database:
+        read_only_connection = read_only_database.connection
+
+    extension_config = runtime.pipeline_config.duckdb_extensions.get(
+        "splink_udfs"
+    )
+    assert calls == [
+        (
+            writable_connection,
+            "splink_udfs",
+            extension_config,
+            None,
+        ),
+        (
+            read_only_connection,
+            "splink_udfs",
+            extension_config,
+            None,
+        ),
+    ]
+
+
+def test_detour_database_discards_connection_before_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingCloseConnection:
+        def close(self) -> None:
+            raise RuntimeError("close failed")
+
+    connection = cast(duckdb.DuckDBPyConnection, FailingCloseConnection())
+    monkeypatch.setattr(duckdb, "connect", lambda *_args, **_kwargs: connection)
+    monkeypatch.setattr(
+        ai_augment_detour_db,
+        "load_duckdb_extension",
+        lambda *_args, **_kwargs: None,
+    )
+
+    writable_path = tmp_path / "writable.duckdb"
+    writable_path.touch()
+    writable_database = AiAugmentDetourDB(path=writable_path)
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        with writable_database.writable():
+            pass
+    assert writable_database._conn is None
+
+    read_only_database = AiAugmentDetourDB(path=tmp_path / "read-only.duckdb")
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        with read_only_database.read_only():
+            pass
+    assert read_only_database._conn is None
+
+
+def test_blueprint_lookup_accepts_exact_eligible_match(
+    api_runtime: AiAugmentBackendContext,
+) -> None:
+    singular_outerdict = ai_augment_singular_outerdict("Gaoquan ", "Shi")
+    context = AiAugmentBackendContext(
+        pipeline_config=api_runtime.pipeline_config,
+        ai_augment_singular_outerdict_blueprints=(singular_outerdict,),
+    )
+
+    assert context.blueprint_for_namekey(singular_outerdict.namekey) is singular_outerdict
+
+
+def test_blueprint_lookup_reports_exact_ineligibility_category(
+    api_runtime: AiAugmentBackendContext,
+) -> None:
+    category = AiAugmentIneligibilityCategory.STAGING_PARTITION_2
+    singular_outerdict = ai_augment_singular_outerdict(
+        "Gaoquan ",
+        "Shi",
+        cohort=AiAugmentCohort.INELIGIBLE,
+        ineligibility_category=category,
+    )
+    context = AiAugmentBackendContext(
+        pipeline_config=api_runtime.pipeline_config,
+        ai_augment_singular_outerdict_blueprints=(singular_outerdict,),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        context.blueprint_for_namekey(singular_outerdict.namekey)
+
+    assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_INELIGIBLE_TEMPLATE.format(
+        category=category.value
+    )
+
+
+def test_blueprint_lookup_suggests_exact_trailing_space_match(
+    api_runtime: AiAugmentBackendContext,
+) -> None:
+    singular_outerdict = ai_augment_singular_outerdict("Gaoquan ", "Shi")
+    configured_namekey = ai_augment_singular_outerdict("Gaoquan", "Shi").namekey
+    context = AiAugmentBackendContext(
+        pipeline_config=api_runtime.pipeline_config,
+        ai_augment_singular_outerdict_blueprints=(singular_outerdict,),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        context.blueprint_for_namekey(configured_namekey)
+
+    assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_NOT_FOUND_SUGGESTIONS_TEMPLATE.format(
+        suggestions=singular_outerdict.namekey.to_json_key()
+    )
+
+
+def test_blueprint_lookup_sorts_multiple_whitespace_suggestions(
+    api_runtime: AiAugmentBackendContext,
+) -> None:
+    singular_outerdicts = (
+        ai_augment_singular_outerdict("Gaoquan ", "Shi"),
+        ai_augment_singular_outerdict(" Gaoquan", "Shi"),
+    )
+    configured_namekey = ai_augment_singular_outerdict("Gaoquan", "Shi").namekey
+    suggestions = " or ".join(
+        sorted(
+            singular_outerdict.namekey.to_json_key()
+            for singular_outerdict in singular_outerdicts
+        )
+    )
+    context = AiAugmentBackendContext(
+        pipeline_config=api_runtime.pipeline_config,
+        ai_augment_singular_outerdict_blueprints=singular_outerdicts,
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        context.blueprint_for_namekey(configured_namekey)
+
+    assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_NOT_FOUND_SUGGESTIONS_TEMPLATE.format(
+        suggestions=suggestions
+    )
+
+
+def test_blueprint_lookup_reports_unrelated_unknown_without_suggestion(
+    api_runtime: AiAugmentBackendContext,
+) -> None:
+    singular_outerdict = ai_augment_singular_outerdict("Gaoquan ", "Shi")
+    configured_namekey = ai_augment_singular_outerdict("Gaoquan", "Shih").namekey
+    context = AiAugmentBackendContext(
+        pipeline_config=api_runtime.pipeline_config,
+        ai_augment_singular_outerdict_blueprints=(singular_outerdict,),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        context.blueprint_for_namekey(configured_namekey)
+
+    assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_NOT_FOUND
+
+
+def test_required_config_and_source_database_are_read_only(
+    tmp_path: Path,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    with pytest.raises(SystemExit):
+        server.parse_args([])
+    arguments = server.parse_args(["--config", str(backend_test_paths.config), "--new"])
+    assert arguments.config == backend_test_paths.config
+    assert arguments.ipc_only is False
+    assert (
+        server.parse_args([
+            "--config",
+            str(backend_test_paths.config),
+            server.IPC_ONLY_OPTION, "--resume",
+        ]).ipc_only
+        is True
+    )
+    replay_log = tmp_path / "configured-replay.jsonl"
+    replay_log.write_text("", encoding=TEXT_ENCODING)
+    config_data = json.loads(
+        backend_test_paths.ai_augment_config.read_text(encoding=TEXT_ENCODING)
+    )
+    config_data["db_file"] = str(backend_test_paths.source_database)
+    config_data["files_config"][REPLAY_LOG_KEY] = {
+        RESOURCE_PATH_KEY: str(replay_log),
+        RESOURCE_SHA256_KEY: hashlib.sha256(b"").hexdigest(),
+        RESOURCE_DESCRIPTION_KEY: "isolated authoritative log",
+    }
+    ai_augment_config = tmp_path / "ai-augment-config.json"
+    write_text(ai_augment_config, json.dumps(config_data))
+    configured = AiAugmentDetourConfig.from_json(
+        ai_augment_config,
+        verify_hash_on_init=False,
+    )
+    assert not hasattr(configured, "backend_store")
+    assert AiAugmentDetourDB.from_pipeline_db(
+        configured.db_file, duckdb_extensions=configured.duckdb_extensions,
+    ).path == backend_test_paths.source_database.with_name(
+        "scisci_process__detour_ai-augment.duckdb"
+    )
+
+    before = file_signature(backend_test_paths.source_database)
+    connection = duckdb.connect(str(configured.db_file), read_only=True)
+    try:
+        with pytest.raises(duckdb.Error):
+            connection.execute("CREATE TABLE forbidden_write (id INTEGER)")
+    finally:
+        connection.close()
+    runtime = AiAugmentBackendContext(
+        pipeline_config=configured,
+        ai_augment_singular_outerdict_blueprints=(),
+    )
+    assert runtime.ai_augment_singular_outerdict_blueprints == ()
+    assert file_signature(backend_test_paths.source_database) == before
+
+
+def backend_startup_config_for_test(
+    tmp_path: Path, backend_test_paths: BackendTestPaths,
+) -> Path:
+    source = tmp_path / "source.duckdb"
+    release_map = tmp_path / "release-map.csv"
+    source_population(source, release_map)
+    replay_log = tmp_path / "replay.jsonl"
+    replay_log.write_bytes(b"")
+    config_data = json.loads(backend_test_paths.ai_augment_config.read_text(encoding=TEXT_ENCODING))
+    config_data.update(
+        db_file=str(source), output_dir=str(tmp_path / "output"),
+        state_file=str(tmp_path / "state.json"),
+        rollout_cas_dir=str(tmp_path / "cas"),
+    )
+    for key, path in ((MAP_SUBSET_0_TO_BATCH_KEY, release_map), (REPLAY_LOG_KEY, replay_log)):
+        config_data["files_config"][key] = {
+            RESOURCE_PATH_KEY: str(path),
+            RESOURCE_SHA256_KEY: hashlib.sha256(path.read_bytes()).hexdigest(),
+            RESOURCE_DESCRIPTION_KEY: "isolated startup fixture",
+        }
+    config_path = tmp_path / "config.json"
+    write_text(config_path, json.dumps(config_data))
+    return config_path
+
+
+def test_subset_9_researchers_are_released_ground_truth(
+    tmp_path: Path,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    context = server.configure_runtime(
+        backend_startup_config_for_test(tmp_path, backend_test_paths)
+    )
+    by_namekey = {
+        item.namekey.to_json_key(): item
+        for item in context.ai_augment_singular_outerdict_blueprints
+    }
+    for index in range(196, 207):
+        namekey = NameKey(first_name=f"Case {index:03}", last_name="Startup")
+        assert (
+            by_namekey[namekey.to_json_key()].ai_augment_cohort
+            is AiAugmentCohort.GROUND_TRUTH
+        )
+
+
+def test_main_ipc_only_runs_only_the_dashboard_query_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    config_path = backend_startup_config_for_test(tmp_path, backend_test_paths)
+    context = server.configure_runtime(config_path)
+    with server.backend_store_lifecycle(
+        context,
+        init_request_record=init_request_record(
+            context.ai_augment_singular_outerdict_blueprints[0].namekey,
+        ),
+        new=True, confirmed=True, yes=True,
+    ):
+        pass
+    config_data = json.loads(config_path.read_text(encoding=TEXT_ENCODING))
+    replay_entry = config_data["files_config"][REPLAY_LOG_KEY]
+    replay_entry[RESOURCE_SHA256_KEY] = hashlib.sha256(
+        Path(replay_entry[RESOURCE_PATH_KEY]).read_bytes()
+    ).hexdigest()
+    write_text(config_path, json.dumps(config_data))
+    served: list[AiAugmentQueryBackendStore] = []
+
+    def serve(store: AiAugmentQueryBackendStore) -> None:
+        assert isinstance(store, AiAugmentQueryBackendStore)
+        served.append(store)
+
+    monkeypatch.setattr(
+        server,
+        "serve_dashboard_query_only",
+        serve,
+    )
+    monkeypatch.setattr(
+        uvicorn,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("Uvicorn must not start in IPC-only mode"),
+    )
+
+    server.main(["--config", str(config_path), "--resume", "--yes", server.IPC_ONLY_OPTION])
+
+    assert len(served) == 1
+    assert api.BACKEND_PROCESS_LOCK_DESCRIPTOR is None
+
+
+def test_main_full_mode_configures_and_runs_composed_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    config_path = backend_startup_config_for_test(tmp_path, backend_test_paths)
+    monkeypatch.setenv(
+        NAMEKEY_ENV_NAME,
+        NameKey(first_name="Case 000", last_name="Startup").to_json_key(),
+    )
+    served: list[tuple[FastAPI, str, int]] = []
+    monkeypatch.setattr(
+        uvicorn,
+        "run",
+        lambda application, *, host, port: served.append((application, host, port)),
+    )
+
+    server.main(["--config", str(config_path), "--new", "--yes"])
+
+    assert served == [(server.app, SERVER_HOST, SERVER_PORT)]
+    assert api.BACKEND_PROCESS_LOCK_DESCRIPTOR is None
+
+
+@pytest.mark.parametrize("stop_signal", (signal.SIGINT, signal.SIGTERM))
+def test_ipc_only_signals_stop_server(
+    monkeypatch: pytest.MonkeyPatch, stop_signal: signal.Signals,
+) -> None:
+    calls: list[object] = []
+    handlers: dict[int, Any] = {}
+    store = AiAugmentQueryBackendStore()
+    ipc_server = SimpleNamespace(thread=SimpleNamespace(is_alive=lambda: True))
+
+    def sleep(_timeout: float) -> None:
+        handlers[stop_signal](stop_signal, None)
+
+    monkeypatch.setattr(time, "sleep", sleep)
+    monkeypatch.setattr(signal, "getsignal", lambda sig: f"old-{sig}")
+    monkeypatch.setattr(
+        signal, "signal",
+        lambda sig, handler: (handlers.update({sig: handler}), f"old-{sig}")[1],
+    )
+    monkeypatch.setattr(server, "start_dashboard_query_server", lambda *_a, **_kw: ipc_server)
+    monkeypatch.setattr(server, "stop_dashboard_query_server", lambda handle: calls.append(handle))
+    server.serve_dashboard_query_only(store)
+    assert calls == [ipc_server]
+    assert handlers == {
+        signal.SIGINT: f"old-{signal.SIGINT}", signal.SIGTERM: f"old-{signal.SIGTERM}",
+    }
+
+
+def test_ipc_worker_death_cleans_up_and_restores_signal_handlers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handlers: dict[int, Any] = {}
+    closed: list[object] = []
+    handle = SimpleNamespace(thread=SimpleNamespace(is_alive=lambda: False))
+    monkeypatch.setattr(signal, "getsignal", lambda sig: f"old-{sig}")
+    monkeypatch.setattr(signal, "signal", lambda sig, handler: handlers.update({sig: handler}))
+    monkeypatch.setattr(server, "start_dashboard_query_server", lambda *_a, **_k: handle)
+    monkeypatch.setattr(
+        server, "stop_dashboard_query_server", lambda selected: closed.append(selected),
+    )
+    with pytest.raises(RuntimeError, match="stopped unexpectedly"):
+        server.serve_dashboard_query_only(AiAugmentQueryBackendStore())
+    assert closed == [handle]
+    assert handlers == {
+        signal.SIGINT: f"old-{signal.SIGINT}", signal.SIGTERM: f"old-{signal.SIGTERM}",
+    }
+
+
+def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
+    connection = duckdb.connect(":memory:")
+    try:
+
+        def output_row(fragment: int) -> dict[str, object]:
+            values: dict[str, object] = {
+                column: f"value for {column}" for column, _data_type in CODEX_OUTPUT_SCHEMA
+            }
+            values.update({
+                KTP_NAMEKEY_COL: TEST_NAMEKEY,
+                KTP_FILENAME_COL: TEST_ROLLOUT_FILENAME,
+                KTP_FRAGMENT_COL: fragment,
+                KTP_FRAGMENT_TYPE_COL: ROLLOUT_LINE_FRAGMENT_TYPE,
+                DRAW_LABEL: TEST_DRAW_NUMBER,
+                KTP_FIRST_NAME_COL: "A.",
+                KTP_LAST_NAME_COL: "Sheikh",
+                KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL: f"outcome-{fragment}",
+                KTP_AI_AUGMENT_SESSION_METADATA_COL: f"summary-{fragment}",
+                KTP_AI_AUGMENT_COMMENTS_COL: None,
+            })
+            return values
+
+        store_for_connection(connection)._append_codex_output(output_row(100),
+        )
+        store_for_connection(connection)._append_codex_output(output_row(101),
+        )
+        store_for_connection(connection)._replace_codex_output_view()
+        innerdicts_row = connection.execute(
+            f"SELECT {duckdb_quote_identifier(KTP_INNERDICT_JSONLINES_COL)} "
+            f"FROM {CODEX_INNERDICT_TABLE}"
+        ).fetchone()
+        assert innerdicts_row is not None
+        innerdicts_text = innerdicts_row[0]
+        innerdicts = tuple(json.loads(line) for line in innerdicts_text.splitlines())
+        assert [row[KTP_FRAGMENT_COL] for row in innerdicts] == [100, 101]
+        assert all(
+            set(row) == {
+                column for column, _data_type in CODEX_OUTPUT_SCHEMA
+                if column != KTP_NAMEKEY_COL
+            }
+            for row in innerdicts
+        )
+        assert [row[KTP_AI_AUGMENT_SESSION_METADATA_COL] for row in innerdicts] == [
+            "summary-100", "summary-101",
+        ]
+        assert connection.execute(
+            f'SELECT {duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)} '
+            f'FROM {CODEX_OUTPUT_ROWS_TABLE} '
+            f'ORDER BY {duckdb_quote_identifier(KTP_FRAGMENT_COL)}'
+        ).fetchall() == [("outcome-100",), ("outcome-101",)]
+
+        with pytest.raises(ReplayInputMissing, match="already accepted"):
+            store_for_connection(connection)._append_codex_output(output_row(101),
+            )
+    finally:
+        connection.close()
+
+
+def test_push_acceptance_changes_state_before_validation_is_exposed(
+    monkeypatch: pytest.MonkeyPatch, api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    api_push_capture: tuple[CodexRolloutRecord, aivm_audit._AivmAuditConfiguration],
+    threaded_loop: asyncio.Runner,
+) -> None:
+    monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
+
+    async def exercise() -> None:
+        api_store._loop = asyncio.get_running_loop()
+        app = api_application_for_test(api_runtime, api_store)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://invalid",
+        ) as client:
+            await client.get(PULL_PATH)
+            captured_pull = api_store.current_replayed_record
+            assert isinstance(captured_pull, PullResponseRecord)
+            response = await client.post(PUSH_PATH, content=b"{}")
+        assert response.status_code == HTTPStatus.ACCEPTED
+        assert response.headers[LOCATION_HEADER] == PULL_PATH
+        assert api.BACKEND_LIFECYCLE is BackendLifecycle.BUSY
+        await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+        validation = api_store.current_replayed_record
+        assert isinstance(validation, BackendValidationRequestRecord)
+        assert (
+            validation.validation_request_body.commit_request_record
+            .commit_request_body.pull_response_record is captured_pull
+        )
+    with api_store._writable(api_runtime):
+        threaded_loop.run(exercise())
+
+
+def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
+    caplog: pytest.LogCaptureFixture, api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    api_push_capture: tuple[CodexRolloutRecord, aivm_audit._AivmAuditConfiguration],
+    threaded_loop: asyncio.Runner,
+) -> None:
+    async def exercise() -> None:
+        api_store._loop = asyncio.get_running_loop()
+        app = api_application_for_test(api_runtime, api_store)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://invalid",
+        ) as client:
+            await client.get(PULL_PATH)
+            initial = api_store.current_replayed_record
+            assert isinstance(initial, PullResponseRecord)
+            pushed = await client.post(PUSH_PATH, content=b"{}")
+            assert pushed.status_code == HTTPStatus.ACCEPTED
+            await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+            validation = api_store.current_replayed_record
+            assert isinstance(validation, BackendValidationRequestRecord)
+            commit = validation.validation_request_body.commit_request_record
+            assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
+            premature = await client.post(PUSH_PATH, content=b"{}")
+            assert premature.status_code == HTTPStatus.CONFLICT
+            assert premature.headers[LOCATION_HEADER] == PULL_PATH
+            assert premature.json() == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
+            assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
+            assert api_store.current_replayed_record is validation
+            assert commit.commit_request_body.pull_response_record is initial
+            assert Locale.PUSH_CURRENT_PULL_REQUIRED_LOG in caplog.messages
+            pulled = await client.get(PULL_PATH)
+            assert pulled.status_code == HTTPStatus.OK
+            persisted_pull = api_store.current_replayed_record
+            assert isinstance(persisted_pull, PullResponseRecord)
+            assert persisted_pull is not initial
+            assert persisted_pull.validation_request_record is validation
+            assert api_store._http_record(persisted_pull.record_id).model_dump_json() == (
+                persisted_pull.model_dump_json()
+            )
+            accepted = await client.post(PUSH_PATH, content=b"{}")
+            assert accepted.status_code == HTTPStatus.ACCEPTED
+            assert accepted.headers[LOCATION_HEADER] == PULL_PATH
+            assert BackendLifecycle(api.BACKEND_LIFECYCLE) is BackendLifecycle.BUSY
+            await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+            retried_validation = api_store.current_replayed_record
+            assert isinstance(retried_validation, BackendValidationRequestRecord)
+            assert (
+                retried_validation.validation_request_body.commit_request_record
+                .commit_request_body.pull_response_record is persisted_pull
+            )
+    with api_store._writable(api_runtime):
+        threaded_loop.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("workflow_status", "session_id"),
+    (
+        (BackendLifecycle.READY, None),
+        (BackendLifecycle.FAILED, TEST_SESSION_ID),
+    ),
+)
+def test_push_configuration_failures_remain_internal_errors(
+    monkeypatch: pytest.MonkeyPatch, workflow_status: BackendLifecycle,
+    session_id: UUID | None, api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    threaded_loop: asyncio.Runner,
+) -> None:
+    pull_record = PullResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
+            response_code=HTTPStatus.OK,
+        ),
+    )
+    monkeypatch.setattr(api, "BACKEND_LIFECYCLE", workflow_status)
+    monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
+    with api_store._writable(api_runtime):
+        api_store._append_authoritative_record(pull_record)
+        captured_pull = api_store.current_replayed_record
+        assert isinstance(captured_pull, PullResponseRecord)
+
+        async def request_push() -> httpx.Response:
+            api_store._loop = asyncio.get_running_loop()
+            app = api_application_for_test(api_runtime, api_store)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://invalid",
+            ) as client:
+                return await client.post(PUSH_PATH, content=b"{}")
+
+        response = threaded_loop.run(request_push())
+        assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert LOCATION_HEADER not in response.headers
+        assert api.BACKEND_LIFECYCLE is workflow_status
+        assert api_store.current_replayed_record is captured_pull
+
+
+def test_accepted_push_is_committed_only_after_its_public_record(
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    api_push_capture: tuple[CodexRolloutRecord, aivm_audit._AivmAuditConfiguration],
+    threaded_loop: asyncio.Runner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rollout, configuration = api_push_capture
+    entered = Event()
+    release = Event()
+    guest_run = subprocess.run
+
+    def delayed_guest_run(command: list[str], **kwargs: object) -> object:
+        if command[-1] == (
+            f"{AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
+        ):
+            entered.set()
+            assert release.wait(timeout=10), "test did not release guest capture"
+        return cast(Any, guest_run)(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", delayed_guest_run)
+
+    async def exercise() -> None:
+        api_store._loop = asyncio.get_running_loop()
+        app = api_application_for_test(api_runtime, api_store)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://invalid",
+        ) as client:
+            await client.get(PULL_PATH)
+            initial_pull = api_store.current_replayed_record
+            assert isinstance(initial_pull, PullResponseRecord)
+            try:
+                response = await client.post(PUSH_PATH, json=valid_submission_body())
+                assert response.status_code == HTTPStatus.ACCEPTED
+                assert response.headers[LOCATION_HEADER] == PULL_PATH
+                assert await asyncio.to_thread(entered.wait, 5)
+                busy_lifecycle = api.BACKEND_LIFECYCLE
+                assert busy_lifecycle is BackendLifecycle.BUSY
+                accepted_push = api_store.current_replayed_record
+                assert isinstance(accepted_push, PushResponseRecord)
+                assert accepted_push.pull_response_record is initial_pull
+                records = AiAugmentBackendStore._authoritative_log_records(
+                    Path(api_store._replay_log).read_bytes()
+                )
+                assert [item.path for item, _ in records] == [
+                    INIT_PATH, PULL_PATH, PUSH_PATH,
+                ]
+                assert records[-1][0].record_id == accepted_push.record_id
+                assert api_store._http_record(accepted_push.record_id).model_dump_json() == (
+                    accepted_push.model_dump_json()
+                )
+                assert all(not task.done() for task in api.AUTHORITATIVE_BACKGROUND_TASKS)
+                busy = await client.get(PULL_PATH)
+                assert busy.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+                assert busy.headers[RETRY_AFTER_HEADER] == RETRY_AFTER_SECONDS
+                assert ETAG_HEADER not in busy.headers
+            finally:
+                release.set()
+                await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+
+        completed_records = [item for item, _ in AiAugmentBackendStore._authoritative_log_records(
+            Path(api_store._replay_log).read_bytes()
+        )]
+        assert [item.path for item in completed_records] == [
+            INIT_PATH, PULL_PATH, PUSH_PATH, PULL_PATH, COMMIT_PATH, VALIDATE_PATH,
+        ]
+        committed = api_store._backend_commit_request_record(completed_records[-2])
+        assert (
+            committed.commit_request_body.pull_response_record.record_id == initial_pull.record_id
+        )
+        assert (
+            committed.commit_request_body.push_response_record.record_id
+            == completed_records[2].record_id
+        )
+        assert committed.commit_request_body.codex_session_record.codex_rollout_record == rollout
+        validation = api_store.current_replayed_record
+        assert isinstance(validation, BackendValidationRequestRecord)
+        assert (
+            validation.validation_request_body.commit_request_record.model_dump_json()
+            == committed.model_dump_json()
+        )
+        assert (
+            validation.validation_request_body.commit_request_record
+            .commit_request_body.push_response_record is accepted_push
+        )
+        assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
+
+    with api_store._writable(api_runtime):
+        threaded_loop.run(asyncio.wait_for(exercise(), timeout=20))
+
+
+@pytest.mark.parametrize("etag", ("matching", "missing", "wrong", "malformed"))
+def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    api_push_capture: tuple[CodexRolloutRecord, aivm_audit._AivmAuditConfiguration],
+    threaded_loop: asyncio.Runner,
+    etag: str,
+) -> None:
+    async def exercise() -> None:
+        api_store._loop = asyncio.get_running_loop()
+        http_app = api_application_for_test(api_runtime, api_store)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=http_app), base_url="http://invalid",
+        ) as client:
+            await client.get(PULL_PATH)
+            initial_pull = api_store.current_replayed_record
+            assert isinstance(initial_pull, PullResponseRecord)
+            response = await client.post(PUSH_PATH, json=valid_submission_body())
+            assert response.status_code == HTTPStatus.ACCEPTED
+            await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+            initial_validation = api_store.current_replayed_record
+            assert isinstance(initial_validation, BackendValidationRequestRecord)
+            assert (
+                initial_validation.validation_request_body.post_commit_validation.stage
+                is BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED
+            )
+            retry_response = await client.get(PULL_PATH)
+            assert retry_response.status_code == HTTPStatus.OK
+            pull = api_store.current_replayed_record
+            assert isinstance(pull, PullResponseRecord)
+            assert pull.validation_request_record is initial_validation
+            response = await client.post(
+                PUSH_PATH, json=standardized_submission_body(valid_submission_body()),
+            )
+            assert response.status_code == HTTPStatus.ACCEPTED
+            await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+        validation = api_store.current_replayed_record
+        assert isinstance(validation, BackendValidationRequestRecord)
+        commit = validation.validation_request_body.commit_request_record
+        push = commit.commit_request_body.push_response_record
+        assert isinstance(push, PushResponseRecord)
+        assert push.pull_response_record is pull
+        assert api_store._http_record(push.record_id).model_dump_json() == push.model_dump_json()
+        headers = {
+            run_outcome_models.NAME_KEY_HEADER: name_key_header_value(TEST_NAMEKEY_MODEL),
+            SESSION_ID_HEADER: str(OPERATOR_CAPTURED_SESSION_ID),
+        }
+        if etag != "missing":
+            headers[ETAG_HEADER] = (
+                f'"{validation.record_id}"' if etag == "matching" else
+                f'"{uuid7()}"' if etag == "wrong" else "invalid"
+            )
+        session, _rollout_filename, failures = api_store.capture_run_outcome_snapshot(
+            UUID(OPERATOR_CAPTURED_SESSION_ID),
+        )
+        assert failures == ()
+        assert api_store.context is api_runtime
+        assert session.session_id == UUID(OPERATOR_CAPTURED_SESSION_ID)
+        ipc_app = server.create_dashboard_query_app(
+            api_store.query_response_record,
+            query_path=DASHBOARD_QUERY_PATH,
+            run_outcome_store=api_store,
+            run_outcome_paths=run_outcome_models.RUN_OUTCOME_PATHS,
+            fatal_exit=lambda code: pytest.fail(f"IPC fatal exit: {code}"),
+        )
+        reply = await asyncio.to_thread(
+            ipc_app.test_client().post,
+            "/completed",
+            base_url="http://invalid",
+            headers=headers,
+        )
+        records = AiAugmentBackendStore._authoritative_log_records(
+            Path(api_store._replay_log).read_bytes()
+        )
+        response_record = RunOutcomeResponseRecord.from_http_request_log_record(
+            records[-1][0], attempt=validation,
+        )
+        assert reply.status_code == response_record.response_code
+        assert response_record.response_code == (
+            HTTPStatus.OK if etag == "matching" else HTTPStatus.BAD_REQUEST
+        )
+        if etag == "matching":
+            current = api_store.current_replayed_record
+            assert isinstance(current, RunOutcomeResponseRecord)
+            assert current.record_id == response_record.record_id
+            assert current.model_dump_json() == response_record.model_dump_json()
+            assert current.attempt is validation
+            assert current.run_outcome_request_record.model_dump(exclude={"record_id"}) == (
+                response_record.run_outcome_request_record.model_dump(exclude={"record_id"})
+            )
+        else:
+            assert api_store.current_replayed_record is validation
+        body = response_record._body()
+        assert body.push_record_id == push.record_id
+        assert body.pull_record_id == pull.record_id
+        assert body.commit_request_record_id == commit.record_id
+        assert body.validation_record_id == validation.record_id
+        assert body.run_outcome_record_id == response_record.record_id
+        assert api_store._http_record(response_record.record_id).model_dump_json() == (
+            response_record.model_dump_json()
+        )
+        (researcher,) = api_store.ai_augment_singular_outerdicts()
+        assert len(researcher.codex_innerdicts) == int(etag == "matching")
+
+    with api_store._writable(api_runtime):
+        threaded_loop.run(asyncio.wait_for(exercise(), timeout=20))
+
+
+@pytest.mark.parametrize("failure", ("disconnect", "send"))
+def test_accepted_push_finishes_after_client_or_response_send_failure(
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    api_push_capture: tuple[CodexRolloutRecord, aivm_audit._AivmAuditConfiguration],
+    threaded_loop: asyncio.Runner,
+    failure: str,
+) -> None:
+    async def exercise() -> None:
+        api_store._loop = asyncio.get_running_loop()
+        app = api_application_for_test(api_runtime, api_store)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://invalid",
+        ) as http_client:
+            await http_client.get(PULL_PATH)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def receive() -> Message:
+            return {
+                ASGI_TYPE_KEY: ASGI_HTTP_REQUEST_MESSAGE_TYPE,
+                ASGI_BODY_KEY: json.dumps(valid_submission_body()).encode(),
+                ASGI_MORE_BODY_KEY: False,
+            }
+
+        async def send(message: Message) -> None:
+            if message[ASGI_TYPE_KEY] == ASGI_HTTP_RESPONSE_START_MESSAGE_TYPE:
+                assert message["status"] == HTTPStatus.ACCEPTED
+                assert api.AUTHORITATIVE_BACKGROUND_TASKS
+                started.set()
+                await release.wait()
+                if failure == "send":
+                    raise OSError("response send failed")
+
+        scope: Scope = {
+            ASGI_TYPE_KEY: ASGI_HTTP_SCOPE_TYPE,
+            "asgi": {"version": "3.0"}, "http_version": "1.1",
+            ASGI_METHOD_KEY: HTTP_POST_METHOD, "scheme": "http", ASGI_PATH_KEY: PUSH_PATH,
+            "raw_path": PUSH_PATH.encode(), "query_string": b"",
+            ASGI_HEADERS_KEY: [(
+                HTTP_CONTENT_TYPE_HEADER.lower().encode(TEXT_ENCODING),
+                ContentType.JSON.encode(TEXT_ENCODING),
+            )],
+            "server": (SYNTHETIC_COMMIT_HOST, 80),
+            "client": ("client", 1234), "root_path": "",
+        }
+        client = asyncio.create_task(app(scope, receive, send))
+        try:
+            await started.wait()
+            if failure == "disconnect":
+                client.cancel()
+            release.set()
+            with pytest.raises(asyncio.CancelledError if failure == "disconnect" else OSError):
+                await client
+        finally:
+            release.set()
+            await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+        assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
+        records = AiAugmentBackendStore._authoritative_log_records(
+            Path(api_store._replay_log).read_bytes()
+        )
+        assert [record.path for record, _ in records] == [
+            INIT_PATH, PULL_PATH, PUSH_PATH, COMMIT_PATH, VALIDATE_PATH,
+        ]
+        assert api_store._http_record(records[-1][0].record_id) == records[-1][0]
+        async with app.state.request_gate.ipc():
+            assert not api.AUTHORITATIVE_BACKGROUND_TASKS
+
+    with api_store._writable(api_runtime):
+        threaded_loop.run(asyncio.wait_for(exercise(), timeout=20))
+
+
+@pytest.mark.parametrize(
+    ("result", "stage", "expected_code", "expected_media_type", "schema_case"),
+    (
+        (
+            BackendLifecycle.REJECTED,
+            BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED,
+            HTTPStatus.OK,
+            ContentType.MARKDOWN,
+            None,
+        ),
+        (
+            BackendLifecycle.REJECTED,
+            BackendLifecycle.FIELD_VALIDATION,
+            HTTPStatus.OK,
+            ContentType.MARKDOWN,
+            "unexpected",
+        ),
+        (
+            BackendLifecycle.REJECTED,
+            BackendLifecycle.FIELD_VALIDATION,
+            HTTPStatus.OK,
+            ContentType.MARKDOWN,
+            "comments_extra",
+        ),
+        (
+            BackendLifecycle.REJECTED,
+            BackendLifecycle.FIELD_VALIDATION,
+            HTTPStatus.OK,
+            ContentType.MARKDOWN,
+            "nested_evidence",
+        ),
+        (
+            BackendLifecycle.REJECTED,
+            BackendLifecycle.FIELD_VALIDATION,
+            HTTPStatus.OK,
+            ContentType.MARKDOWN,
+            None,
+        ),
+        (
+            BackendLifecycle.REJECTED,
+            BackendLifecycle.ROLLOUT_INDEX,
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            ContentType.JSON,
+            None,
+        ),
+        (
+            BackendLifecycle.REJECTED,
+            BackendLifecycle.APPENDWATCH_REPORT_VALIDATION,
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            ContentType.JSON,
+            None,
+        ),
+    ),
+)
+def test_post_commit_result_is_exposed_only_by_follow_up_pull(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    result: BackendLifecycle,
+    stage: BackendLifecycle,
+    expected_code: HTTPStatus,
+    expected_media_type: str,
+    schema_case: str | None,
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    api_push_capture: tuple[CodexRolloutRecord, aivm_audit._AivmAuditConfiguration],
+    threaded_loop: asyncio.Runner,
+) -> None:
+    caplog.set_level(logging.INFO, logger=api.__name__)
+    _rollout, configuration = api_push_capture
+    guest_run = subprocess.run
+
+    def scenario_guest_run(command: list[str], **kwargs: object) -> object:
+        if stage is BackendLifecycle.ROLLOUT_INDEX and command[-1].startswith(
+            AUDIT_READ_ROLLOUT_COMMAND
+        ):
+            cast(Any, kwargs["stdout"]).write(b"{}\n")
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if stage is BackendLifecycle.APPENDWATCH_REPORT_VALIDATION and command[-1] == (
+            f"{AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
+        ):
+            return SimpleNamespace(returncode=0, stdout=b"invalid\n", stderr=b"")
+        return cast(Any, guest_run)(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", scenario_guest_run)
+    submission_body = valid_submission_body()
+    if schema_case is not None:
+        if schema_case == "unexpected":
+            submission_body = {"unexpected": True}
+        elif schema_case == "comments_extra":
+            comments = submission_body[KTP_AI_AUGMENT_COMMENTS_COL]
+            assert isinstance(comments, dict)
+            comments[nameof(lambda: FieldSubmission.web_search_excerpts)] = []
+        else:
+            assert schema_case == "nested_evidence"
+            field = submission_body[KTP_AI_AUGMENT_EDUCATION_COL]
+            assert isinstance(field, dict)
+            excerpts = field[nameof(lambda: FieldSubmission.web_search_excerpts)]
+            assert isinstance(excerpts, list)
+            excerpt = excerpts[0]
+            assert isinstance(excerpt, dict)
+            excerpt[nameof(lambda: WebSearchExcerpt.excerpt)] = ""
+    elif stage is BackendLifecycle.FIELD_VALIDATION:
+        field = cast(dict[str, object], submission_body[KTP_AI_AUGMENT_EDUCATION_COL])
+        evidence = cast(list[dict[str, str]], field["web_search_excerpts"])
+        evidence[0]["excerpt"] = "fabricated excerpt"
+
+    with api_store._writable(api_runtime):
+        async def exercise() -> tuple[httpx.Response, BackendValidationRequestRecord]:
+            api_store._loop = asyncio.get_running_loop()
+            app = api_application_for_test(api_runtime, api_store)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://invalid",
+            ) as client:
+                await client.get(PULL_PATH)
+                push_response = await client.post(PUSH_PATH, json=submission_body)
+                assert push_response.status_code == HTTPStatus.ACCEPTED
+                await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+                validation_record = api_store.current_replayed_record
+                assert isinstance(validation_record, BackendValidationRequestRecord)
+                pull_response = await client.get(PULL_PATH)
+                if stage is BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED:
+                    assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
+                    assert api_store._execute(
+                        f"SELECT count(DISTINCT {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL}) "
+                        f"FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}"
+                    ).fetchone() == (1,)
+                    assert api_store._execute(
+                        f"SELECT count(*) FROM {CODEX_OUTPUT_ROWS_TABLE}"
+                    ).fetchone() == (0,)
+                    retry = await client.post(
+                        PUSH_PATH,
+                        json=standardized_submission_body(submission_body),
+                    )
+                    assert retry.status_code == HTTPStatus.ACCEPTED
+                    await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+                    final_validation = api_store.current_replayed_record
+                    assert isinstance(final_validation, BackendValidationRequestRecord)
+                    final = final_validation.validation_request_body.post_commit_validation
+                    assert final.result is BackendLifecycle.ACCEPTED
+                    assert final.submission_type == STANDARDIZED_SUBMISSION_TYPE
+                    completed_pull = await client.get(PULL_PATH)
+                    assert completed_pull.status_code == HTTPStatus.GONE
+                    assert api_store._execute(
+                        f"SELECT count(*) FROM {CODEX_OUTPUT_ROWS_TABLE}"
+                    ).fetchone() == (1,)
+            return pull_response, validation_record
+
+        response, current_validation = threaded_loop.run(
+            asyncio.wait_for(exercise(), timeout=20)
+        )
+    validation = current_validation.validation_request_body.post_commit_validation
+    assert validation.result is result
+    assert validation.stage is stage
+    commit_request_record = current_validation.validation_request_body.commit_request_record
+    assert response.status_code == expected_code
+    if expected_code is HTTPStatus.GONE:
+        assert response.headers[ETAG_HEADER] == f'"{current_validation.record_id}"'
+    else:
+        assert ETAG_HEADER not in response.headers
+    assert response.headers["content-type"].startswith(expected_media_type)
+    assert str(commit_request_record.record_id) in caplog.text
+    if expected_code == HTTPStatus.INTERNAL_SERVER_ERROR:
+        assert response.json() == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
+        assert Locale.PULL_WORKFLOW_FAILED_LOG in caplog.messages
+    elif result is BackendLifecycle.REJECTED:
+        assert isinstance(validation.detail, str)
+        assert response.text == validation.detail.rstrip() + "\n"
+        if stage is BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED:
+            assert response.text.startswith(
+                Locale.EVIDENCE_GOOD_PROGRESS_TEMPLATE.format(
+                    exact=len(AI_AUGMENT_EVIDENCE_COLUMNS),
+                    total=len(AI_AUGMENT_EVIDENCE_COLUMNS),
+                )
+            )
+            assert post_commit_validation._retry_submission_public_guidance(
+                commit_request_record.commit_request_body.pull_response_record
+            ) in response.text
+        if schema_case == "comments_extra":
+            assert response.text.startswith(
+                "1 submission issue needs correction:\n"
+                f"- {KTP_AI_AUGMENT_COMMENTS_COL}."
+                f"{nameof(lambda: FieldSubmission.web_search_excerpts)}: "
+                "Remove this field.\n"
+                "Correct these issues and resubmit the complete payload.\n"
+            )
+            assert Locale.EVIDENCE_PROGRESS_TEMPLATE.format(
+                exact=len(AI_AUGMENT_EVIDENCE_COLUMNS),
+                total=len(AI_AUGMENT_EVIDENCE_COLUMNS),
+            ) in response.text
+        elif schema_case == "nested_evidence":
+            assert response.text.startswith(
+                "1 submission issue needs correction:\n"
+                f"- {KTP_AI_AUGMENT_EDUCATION_COL}."
+                f"{nameof(lambda: FieldSubmission.web_search_excerpts)}[0]: "
+                "Check this field's format and value.\n"
+                "Correct these issues and resubmit the complete payload.\n"
+            )
+            assert "current evidence items exactly match" not in response.text
+    else:
+        assert validation.submission is not None
+        assert validation.submission_type == SUBMISSION_TYPE
+        assert validation.submission == Submission.model_validate(
+            submission_body
+        ).model_dump(mode="json", by_alias=True)
+        rows = [json.loads(line) for line in response.text.splitlines()]
+        assert isinstance(rows[0], dict)
+        education = validation.submission[KTP_AI_AUGMENT_EDUCATION_COL]
+        assert isinstance(education, dict)
+        assert rows[0][KTP_AI_AUGMENT_EDUCATION_COL] == (
+            education["value"]
+        )
+    if stage is BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED:
+        live_database = logical_database_snapshot(api_store._detour_db_path)
+        log_bytes = Path(api_store._replay_log).read_bytes()
+        replay = AiAugmentBackendStore._from_resources(
+            replay_log=api_store._replay_log.model_copy(update={
+                nameof(lambda: ReplayLogRegisteredResource.hash): (
+                    hashlib.sha256(log_bytes).hexdigest()
+                ),
+            }),
+            detour_db=api_store._detour_db.model_copy(update={
+                nameof(lambda: AiAugmentDetourDB.path): (
+                    api_store._detour_db_path.with_name("standardized-required-replay.duckdb")
+                ),
+            }),
+            rollout_cas=api_store.rollout_cas,
+        )
+        replay._rebuild_from_log(api_runtime, reset_confirmed=True, confirm_replay=lambda: True)
+        assert logical_database_snapshot(replay._detour_db_path) == live_database
+
+
+def test_evidence_retry_uses_original_pull_for_schema_and_projection(
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    api_push_capture: tuple[CodexRolloutRecord, aivm_audit._AivmAuditConfiguration],
+    threaded_loop: asyncio.Runner,
+) -> None:
+    assert api_push_capture[0].line_count > 0
+    rejected_evidence = valid_submission_body()
+    field = rejected_evidence[KTP_AI_AUGMENT_EDUCATION_COL]
+    assert isinstance(field, dict)
+    excerpts = field[FIELD_EVIDENCE_FIELD]
+    assert isinstance(excerpts, list)
+    excerpt = excerpts[0]
+    assert isinstance(excerpt, dict)
+    fabricated_excerpt = "fabricated excerpt"
+    excerpt[nameof(lambda: WebSearchExcerpt.excerpt)] = fabricated_excerpt
+    invalid_submission = {"unexpected": True}
+    plain = valid_submission_body()
+    standardized = standardized_submission_body(plain)
+    standardized_rejected = standardized_submission_body(rejected_evidence)
+    standardized_age_invalid = deepcopy(standardized)
+    standardized_changed = deepcopy(standardized)
+    standardized_fixed_age = deepcopy(standardized)
+    push_date = datetime.now(timezone.utc).date()
+    for candidate, as_of in (
+        (standardized_age_invalid, push_date - timedelta(days=1)),
+        (standardized_changed, push_date),
+        (standardized_fixed_age, push_date),
+    ):
+        age_field = candidate[KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL]
+        assert isinstance(age_field, dict)
+        age_field[FIELD_STANDARDIZED_VALUE_FIELD] = year_only_1968_age(as_of)
+    rejected_age = standardized_rejected[KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL]
+    invalid_age = standardized_age_invalid[KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL]
+    assert isinstance(rejected_age, dict) and isinstance(invalid_age, dict)
+    rejected_age[FIELD_STANDARDIZED_VALUE_FIELD] = deepcopy(
+        invalid_age[FIELD_STANDARDIZED_VALUE_FIELD]
+    )
+    changed_field = standardized_changed[KTP_AI_AUGMENT_EDUCATION_COL]
+    assert isinstance(changed_field, dict)
+    changed_field[FIELD_STANDARDIZED_VALUE_FIELD] = [
+        dict.fromkeys(EducationRecord.model_fields, NOT_REPORTED_VALUE)
+    ]
+
+    with api_store._writable(api_runtime):
+        async def exercise() -> None:
+            api_store._loop = asyncio.get_running_loop()
+            app = api_application_for_test(api_runtime, api_store)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url=f"{SYNTHETIC_COMMIT_SCHEME}://{SYNTHETIC_COMMIT_HOST}",
+            ) as client:
+                initial_response = await client.get(PULL_PATH)
+                assert initial_response.status_code == HTTPStatus.OK
+                original_pull = api_store.current_replayed_record
+                assert isinstance(original_pull, PullResponseRecord)
+                for submission, expected_stage, expected_result, expected_pull_status in (
+                    (
+                        invalid_submission, BackendLifecycle.FIELD_VALIDATION,
+                        BackendLifecycle.REJECTED, HTTPStatus.OK,
+                    ),
+                    (
+                        rejected_evidence, BackendLifecycle.FIELD_VALIDATION,
+                        BackendLifecycle.REJECTED, HTTPStatus.OK,
+                    ),
+                    (
+                        standardized, BackendLifecycle.FIELD_VALIDATION,
+                        BackendLifecycle.REJECTED, HTTPStatus.OK,
+                    ),
+                    (
+                        plain, BackendLifecycle.STANDARDIZED_SUBMISSION_REQUIRED,
+                        BackendLifecycle.REJECTED, HTTPStatus.OK,
+                    ),
+                    (
+                        standardized_rejected, BackendLifecycle.FIELD_VALIDATION,
+                        BackendLifecycle.REJECTED, HTTPStatus.OK,
+                    ),
+                    (
+                        standardized_age_invalid, BackendLifecycle.FIELD_VALIDATION,
+                        BackendLifecycle.REJECTED, HTTPStatus.OK,
+                    ),
+                    (
+                        standardized_changed, BackendLifecycle.FIELD_VALIDATION,
+                        BackendLifecycle.REJECTED, HTTPStatus.OK,
+                    ),
+                    (
+                        standardized_fixed_age, BackendLifecycle.ACCEPTED,
+                        BackendLifecycle.ACCEPTED, HTTPStatus.GONE,
+                    ),
+                ):
+                    push = await client.post(PUSH_PATH, json=submission)
+                    assert push.status_code == HTTPStatus.ACCEPTED
+                    await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+                    validation = api_store.current_replayed_record
+                    assert isinstance(validation, BackendValidationRequestRecord)
+                    outcome = validation.validation_request_body.post_commit_validation
+                    assert outcome.stage is expected_stage
+                    assert outcome.result is expected_result
+                    if expected_result is BackendLifecycle.ACCEPTED:
+                        assert outcome.submission_type == STANDARDIZED_SUBMISSION_TYPE
+                        assert outcome.submission == StandardizedSubmission.model_validate_json(
+                            json.dumps(standardized_fixed_age)
+                        ).model_dump(mode="json", by_alias=True)
+                    elif submission is standardized_rejected:
+                        assert outcome.submission_type == STANDARDIZED_SUBMISSION_TYPE
+                        assert outcome.submission == StandardizedSubmission.model_validate_json(
+                            json.dumps(standardized_rejected)
+                        ).model_dump(mode="json", by_alias=True)
+                        audit_count_row = api_store._execute(
+                            f"SELECT count(*) FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE}"
+                        ).fetchone()
+                        assert audit_count_row is not None
+                        assert audit_count_row[0] >= len(AI_AUGMENT_EVIDENCE_COLUMNS)
+                    elif submission is standardized:
+                        assert outcome.submission_type is None
+                    pull = await client.get(PULL_PATH)
+                    assert pull.status_code == expected_pull_status
+                    retry_guidance = post_commit_validation._retry_submission_public_guidance(
+                        validation.validation_request_body.commit_request_record
+                        .commit_request_body.pull_response_record
+                    )
+                    if submission is rejected_evidence:
+                        assert retry_guidance not in pull.text
+                    elif submission is invalid_submission:
+                        assert retry_guidance not in pull.text
+                    elif submission is standardized:
+                        assert retry_guidance not in pull.text
+                    elif submission is plain:
+                        assert retry_guidance in pull.text
+                    elif submission is standardized_age_invalid:
+                        assert (
+                            f"{KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL}: "
+                            f"{Locale.STANDARDIZED_VALUE_RETRY_VIOLATION}"
+                            in pull.text
+                        )
+                    elif submission is standardized_changed:
+                        assert (
+                            f"{KTP_AI_AUGMENT_EDUCATION_COL}.{FIELD_STANDARDIZED_VALUE_FIELD}"
+                            in pull.text
+                        )
+                        assert (
+                            f"{KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL}: "
+                            f"{Locale.STANDARDIZED_VALUE_RETRY_VIOLATION}"
+                            not in pull.text
+                        )
+            audit_rows = api_store._execute(
+                f"SELECT {POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL}, "
+                f"{POST_COMMIT_VALIDATION_FIELD_COL}, "
+                f"{POST_COMMIT_VALIDATION_FIELD_AUDIT_COL} "
+                f"FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE} "
+                f"ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}"
+            ).fetchall()
+            assert audit_rows
+            assert {row[0] for row in audit_rows} == {str(original_pull.record_id)}
+            latest = {column: json.loads(audit) for _, column, audit in audit_rows}
+            assert set(latest) == set(AI_AUGMENT_EVIDENCE_COLUMNS)
+            assert all(audit["state"]["pins"] == 7 for audit in latest.values())
+
+        threaded_loop.run(asyncio.wait_for(exercise(), timeout=60))
+
+    live_database = logical_database_snapshot(api_store._detour_db_path)
+    log_bytes = Path(api_store._replay_log).read_bytes()
+    replay = AiAugmentBackendStore._from_resources(
+        replay_log=api_store._replay_log.model_copy(update={
+            nameof(lambda: ReplayLogRegisteredResource.hash): (
+                hashlib.sha256(log_bytes).hexdigest()
+            ),
+        }),
+        detour_db=api_store._detour_db.model_copy(update={
+            nameof(lambda: AiAugmentDetourDB.path): (
+                api_store._detour_db_path.with_name("retry-phase-replay.duckdb")
+            ),
+        }),
+        rollout_cas=api_store.rollout_cas,
+    )
+    replay._rebuild_from_log(api_runtime, reset_confirmed=True, confirm_replay=lambda: True)
+    assert logical_database_snapshot(replay._detour_db_path) == live_database
+
+
+def test_rejected_retry_cannot_replace_unverified_field_narrative_pin(
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    api_push_capture: tuple[CodexRolloutRecord, aivm_audit._AivmAuditConfiguration],
+    threaded_loop: asyncio.Runner,
+) -> None:
+    """Keep the first narrative pin when a retry changes only its value.
+
+    Before 0bb0523, an evidence-rejected retry could still be applied to retry
+    history and replace the baseline value of a field whose evidence was not
+    fully accepted. Both pushes here are rejected for the same unmatched excerpt;
+    the regression is the baseline change, not the rejection status.
+    """
+    assert api_push_capture[0].line_count > 0
+    initial_submission = valid_submission_body()
+    initial_field = initial_submission[KTP_AI_AUGMENT_EDUCATION_COL]
+    assert isinstance(initial_field, dict)
+    initial_value = initial_field[FIELD_VALUE_FIELD]
+    assert isinstance(initial_value, str)
+    initial_excerpts = initial_field[FIELD_EVIDENCE_FIELD]
+    assert isinstance(initial_excerpts, list)
+    initial_excerpts.append({
+        EVIDENCE_EXCERPT_FIELD: "fabricated excerpt",
+        EVIDENCE_URL_FIELD: EXPECTED_EVIDENCE[0].url,
+    })
+    retry_submission = deepcopy(initial_submission)
+    retry_field = retry_submission[KTP_AI_AUGMENT_EDUCATION_COL]
+    assert isinstance(retry_field, dict)
+    retry_field[FIELD_VALUE_FIELD] = "Different education narrative"
+    assert retry_field[FIELD_EVIDENCE_FIELD] == initial_excerpts
+    immutable_detail = Locale.EVIDENCE_ACCEPTED_FIELD_IMMUTABLE_TEMPLATE.format(
+        immutable=KTP_AI_AUGMENT_EDUCATION_COL,
+    )
+
+    with api_store._writable(api_runtime):
+
+        async def exercise() -> None:
+            api_store._loop = asyncio.get_running_loop()
+            app = api_application_for_test(api_runtime, api_store)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url=f"{SYNTHETIC_COMMIT_SCHEME}://{SYNTHETIC_COMMIT_HOST}",
+            ) as client:
+                first_pull = await client.get(PULL_PATH)
+                assert first_pull.status_code == HTTPStatus.OK
+                first_push = await client.post(PUSH_PATH, json=initial_submission)
+                assert first_push.status_code == HTTPStatus.ACCEPTED
+                await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+                first_validation = api_store.current_replayed_record
+                assert isinstance(first_validation, BackendValidationRequestRecord)
+                assert (
+                    first_validation.validation_request_body.post_commit_validation.result
+                    is BackendLifecycle.REJECTED
+                )
+                first_retry_pull = await client.get(PULL_PATH)
+                assert first_retry_pull.status_code == HTTPStatus.OK
+
+                initial_audit_rows = api_store._execute(
+                    f"SELECT {POST_COMMIT_VALIDATION_FIELD_AUDIT_COL} "
+                    f"FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE} "
+                    f"WHERE {POST_COMMIT_VALIDATION_FIELD_COL} = ? "
+                    f"ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}",
+                    [KTP_AI_AUGMENT_EDUCATION_COL],
+                ).fetchall()
+                assert len(initial_audit_rows) == 1
+                initial_audit = json.loads(initial_audit_rows[0][0])
+                assert initial_audit["state"]["narrative_value"] == initial_value
+                assert [
+                    item["outcome"] for item in initial_audit["state"]["evidence_obligations"]
+                ] == [EVIDENCE_OUTCOME_V1_EXACT, EVIDENCE_OUTCOME_UNMATCHED]
+                assert initial_audit["violations"] == []
+
+                retry_push = await client.post(PUSH_PATH, json=retry_submission)
+                assert retry_push.status_code == HTTPStatus.ACCEPTED
+                await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+                retry_validation = api_store.current_replayed_record
+                assert isinstance(retry_validation, BackendValidationRequestRecord)
+                retry_result = retry_validation.validation_request_body.post_commit_validation
+                assert retry_result.result is BackendLifecycle.REJECTED
+                assert retry_result.stage is BackendLifecycle.FIELD_VALIDATION
+                assert retry_result.submission_type == SUBMISSION_TYPE
+                retry_pull = await client.get(PULL_PATH)
+                assert retry_pull.status_code == HTTPStatus.OK
+                assert immutable_detail in retry_pull.text
+
+                audit_rows = api_store._execute(
+                    f"SELECT {POST_COMMIT_VALIDATION_FIELD_AUDIT_COL} "
+                    f"FROM {POST_COMMIT_VALIDATION_FIELD_AUDITS_TABLE} "
+                    f"WHERE {POST_COMMIT_VALIDATION_FIELD_COL} = ? "
+                    f"ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}",
+                    [KTP_AI_AUGMENT_EDUCATION_COL],
+                ).fetchall()
+                assert len(audit_rows) == 2
+                retry_audit = json.loads(audit_rows[1][0])
+                assert retry_audit["state"]["narrative_value"] == initial_value
+                assert (
+                    retry_audit["state"]["evidence_obligations"]
+                    == initial_audit["state"]["evidence_obligations"]
+                )
+                assert retry_audit["violations"] == [
+                    {
+                        "submission_column": KTP_AI_AUGMENT_EDUCATION_COL,
+                        "message": immutable_detail,
+                    }
+                ]
+
+        threaded_loop.run(asyncio.wait_for(exercise(), timeout=30))
+
+
+def test_backend_stdin_accepts_one_canonical_session_id() -> None:
+    api.BACKEND_SESSION_ID = None
+    session_id = "019d0000-0000-7000-8000-000000000040"
+
+    api.read_backend_session_id(StringIO(session_id + "\n"))
+
+    assert api.BACKEND_SESSION_ID == UUID(session_id)
+    with pytest.raises(RuntimeError):
+        api.read_backend_session_id(
+            StringIO("019d0000-0000-7000-8000-000000000041\n")
+        )
+
+
+def test_explicit_probe_proves_report_and_remote_sessions_readable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report_path = tmp_path / "appendwatch.txt"
+    report_path.write_bytes(b"appendwatch\n")
+    for path in (tmp_path / "ssh.conf", tmp_path / "identity", tmp_path / "known-hosts"):
+        write_text(path, "fixture\n")
+    monkeypatch.setattr(aivm_audit, "APPENDWATCH_REPORT", "/mounted/appendwatch.txt")
+    monkeypatch.setattr(aivm_audit, "LIMA_SSH_CONFIG_PATH", tmp_path / "ssh.conf")
+    monkeypatch.setattr(aivm_audit, "AIVM_IDENTITY_FILE", tmp_path / "identity")
+    monkeypatch.setattr(aivm_audit, "AIVM_KNOWN_HOSTS_FILE", tmp_path / "known-hosts")
+    configuration = aivm_audit.audit_configuration(
+        str(CODEX_SESSIONS_ROOT / "rollout-startup-readability-probe.jsonl")
+    )
+    observed: list[list[str]] = []
+
+    def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        assert kwargs["check"] is True
+        observed.append(command)
+        stdout = (
+            b"appendwatch\n"
+            if command[-1].startswith(AUDIT_READ_APPENDWATCH_REPORT_COMMAND)
+            else ""
+        )
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    aivm_audit.prove_workflow_inputs_readable()
+
+    assert len(observed) == 2
+    assert all(command[-2] == configuration.ssh_target for command in observed)
+    assert observed[0][-1] == (
+        f"{AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
+    )
+    assert observed[1][-1] == AUDIT_PROBE_COMMAND
+
+
+def test_background_commit_failure_exits_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    api_store: AiAugmentBackendStore,
+) -> None:
+    exits: list[int] = []
+    monkeypatch.setattr(os, "_exit", exits.append)
+
+    async def exercise() -> None:
+        stores_push_promise = ResponseRecordPromise[PushResponseRecord]._resolved(
+            BackendStoreAcknowledgment.ACK,
+            (None, BackendStoreException("commit failed")),
+        )
+        api._continue_awaiting_on_stores_push_promise(stores_push_promise, api_store)
+        (task,) = tuple(api.AUTHORITATIVE_BACKGROUND_TASKS)
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)
+
+    asyncio.run(exercise())
+
+    assert exits == [1]
+
+
+def test_appendwatch_commit_lookup_requires_one_exact_filename(
+    tmp_path: Path,
+) -> None:
+    filename = "rollout-2026-08-31T00-00-00-019d0000-0000-7000-8000-000000000050.jsonl"
+    report_path = tmp_path / "appendwatch.txt"
+    report_path.write_text(
+        f".\n└── 2026/\n    └── 08/\n        └── "
+        f"{APPENDWATCH_OK_PREFIX}{filename}\n",
+        encoding=TEXT_ENCODING,
+    )
+
+    parse_appendwatch_report(report_path, PurePosixPath(filename))
+
+    report_path.write_text(
+        report_path.read_text(encoding=TEXT_ENCODING)
+        + f"└── {APPENDWATCH_OK_PREFIX}{filename}\n",
+        encoding=TEXT_ENCODING,
+    )
+    with pytest.raises(AppendwatchReportError):
+        parse_appendwatch_report(report_path, PurePosixPath(filename))
+
+
+def test_openapi_does_not_disclose_integrity_internals() -> None:
+    schema = server.app.openapi()
+    assert set(schema["paths"]) == {PULL_PATH, PUSH_PATH}
+    push_schema = schema["paths"][PUSH_PATH]["post"]
+    serialized = json.dumps(push_schema).lower()
+
+    assert push_schema["description"] == Locale.PUSH_DESCRIPTION
+    assert "appendwatch" not in serialized
+    assert "rollout" not in serialized
+    assert ROLLOUT_ENV_NAME.lower() not in serialized
+    assert set(push_schema["responses"]) == {"202", "409", "500", "503"}
+    conflict_schema = push_schema["responses"]["409"]
+    assert "current pull must be retrieved" in conflict_schema["description"]
+    assert set(conflict_schema["headers"]) == {LOCATION_HEADER}
+    assert set(schema["paths"][PULL_PATH]["get"]["responses"]) == {
+        "200",
+        "410",
+        "500",
+        "503",
+    }
+
+
+def test_dashboard_query_uses_scoped_store_reads(
+    api_runtime: AiAugmentBackendContext,
+    monkeypatch: pytest.MonkeyPatch,
+    threaded_loop: asyncio.Runner,
+) -> None:
+    monkeypatch.setattr(
+        ai_augment_detour_db,
+        "load_duckdb_extension",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with writable_backend_store(api_runtime) as store:
+        assert store._detour_db._conn is None
+        first = query_snapshot_for_test(store, threaded_loop)
+        replayed_pull = PullResponseRecord(
+            schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+            method=HTTP_GET_METHOD,
+            scheme="http",
+            host="127.0.0.1",
+            port=SERVER_PORT,
+            ready_to_respond_at_unix_usec=1,
+            path=PULL_PATH,
+            query="",
+            request_headers={},
+            request_body=None,
+            response_code=status.HTTP_200_OK,
+            response_headers={"content-type": ContentType.NDJSON_UTF8},
+            response_body="{}\n",
+            received_at_unix_usec=None,
+            duration_usec=1,
+        )
+        store._append_authoritative_record(replayed_pull)
+        second = query_snapshot_for_test(store, threaded_loop)
+        assert store._detour_db._conn is None
+        projected_count = store._execute(
+            f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
+        ).fetchone()
+
+    assert first.model_dump(mode="json") == second.model_dump(mode="json")
+    assert tuple(
+        item.serialize() for item in first.ai_augment_singular_outerdicts
+    ) == tuple(
+        item.serialize() for item in api_runtime.ai_augment_singular_outerdict_blueprints
+    )
+    assert projected_count == (2,)
+
+
+def test_dashboard_query_has_no_route_on_the_public_fastapi_application() -> None:
+    route_paths = {getattr(route, "path", None) for route in server.app.routes}
+
+    assert DASHBOARD_QUERY_PATH not in route_paths
+    assert not any(isinstance(path, str) and path.startswith("/_control/") for path in route_paths)
+
+
+@pytest.mark.parametrize("mode", ("--new", "--resume", "--continue"))
+def test_startup_modes_require_confirmation_or_yes(
+    mode: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = server.parse_args(["--config", "unused.json", mode])
+    assert args.new is (mode == "--new")
+    assert args.resume is (mode != "--new")
+    prompts: list[str] = []
+
+    def answer(_console: object, prompt: str, **_kwargs: object) -> str:
+        prompts.append(prompt)
+        return "y"
+
+    monkeypatch.setattr(Console, "input", answer)
+    assert server.confirm_startup(args)
+    assert len(prompts) == 1
+    assert "[y/N]" in prompts[0]
+    assert ("Recreate" in prompts[0]) is args.new
+    monkeypatch.setattr(Console, "input", lambda *_a, **_kw: pytest.fail("prompted"))
+    assert server.confirm_startup(server.parse_args(["--config", "unused.json", mode, "--yes"]))
+
+
+@pytest.mark.parametrize("mode", ("--new", "--resume", "--continue"))
+@pytest.mark.parametrize("eof", (False, True))
+def test_declined_startup_never_acquires_process_lock(
+    mode: str, eof: bool, monkeypatch: pytest.MonkeyPatch,
+    startup_files: StartupFiles,
+) -> None:
+    def decline(*_args: object, **_kwargs: object) -> str:
+        if eof:
+            raise EOFError
+        return "n"
+
+    monkeypatch.setattr(Console, "input", decline)
+    monkeypatch.setenv(
+        NAMEKEY_ENV_NAME,
+        NameKey(first_name="Case 000", last_name="Startup").to_json_key(),
+    )
+    assert not api.BACKEND_PROCESS_LOCK_PATH.exists()
+    with pytest.raises(ValueError, match="confirmation required"):
+        server.main(["--config", str(startup_files.config), mode])
+    assert api.BACKEND_PROCESS_LOCK_DESCRIPTOR is None
+    assert not api.BACKEND_PROCESS_LOCK_PATH.exists()
+
+
+def test_startup_mode_is_required_and_mutually_exclusive() -> None:
+    for modes in ([], ["--new", "--resume"], ["--new", "--continue"]):
+        with pytest.raises(SystemExit):
+            server.parse_args(["--config", "unused.json", *modes])
+
+
+@pytest.mark.parametrize("fails", (False, True))
+def test_clean_close_acknowledges_only_after_resource_cleanup(
+    fails: bool, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+    api_runtime: AiAugmentBackendContext,
+) -> None:
+    monkeypatch.setattr(
+        ai_augment_detour_db, "load_duckdb_extension", lambda *_args, **_kwargs: None,
+    )
+    if fails:
+        initialize = initialize_backend_store
+
+        @contextmanager
+        def fail_cleanup(
+            context: AiAugmentBackendContext, *, ipc_only: Literal[False],
+            init_request_record: BackendInitRequestRecord,
+            new: bool, confirmed: bool, confirm_replay: Callable[[], bool],
+        ) -> Generator[AiAugmentBackendStore, None, None]:
+            with initialize(
+                context, ipc_only=ipc_only, init_request_record=init_request_record,
+                new=new, confirmed=confirmed,
+                confirm_replay=confirm_replay,
+            ) as store:
+                yield store
+                assert BACKEND_STORE_CLOSED_CLEANLY not in capsys.readouterr().out
+                raise OSError("cleanup failed")
+
+        monkeypatch.setattr(server, "initialize_backend_store", fail_cleanup)
+
+    def exercise() -> None:
+        with server.backend_store_lifecycle(
+            api_runtime, init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+            new=True, confirmed=True, yes=True,
+        ) as store:
+            assert isinstance(store, AiAugmentBackendStore)
+            assert api.BACKEND_PROCESS_LOCK_DESCRIPTOR is not None
+            assert capsys.readouterr().out == ""
+
+    if fails:
+        with pytest.raises(OSError, match="cleanup failed"):
+            exercise()
+        assert capsys.readouterr().out == ""
+    else:
+        exercise()
+        assert capsys.readouterr().out == BACKEND_STORE_CLOSED_CLEANLY + "\n"
+    assert api.BACKEND_PROCESS_LOCK_DESCRIPTOR is None
+
+
+def test_rebuild_confirmation_and_invalid_log_preserve_existing_database(
+    tmp_path: Path, backend_test_paths: BackendTestPaths,
+) -> None:
+    runtime = runtime_for_test(tmp_path, backend_test_paths)
+    store = backend_store_for_test(runtime)
+    store._rebuild_from_log(runtime, reset_confirmed=True)
+    before = store._detour_db_path.read_bytes()
+    with pytest.raises(ValueError, match="confirmation"):
+        store._rebuild_from_log(runtime, reset_confirmed=False)
+    assert store._detour_db_path.read_bytes() == before
+    log = Path(runtime.pipeline_config.replay_log)
+    log.chmod(0o600)
+    log.write_bytes(b'{"unfinished":')
+    with pytest.raises(ValueError, match="Hash verification failed"):
+        store._rebuild_from_log(runtime, reset_confirmed=True)
+    assert log.read_bytes() == b'{"unfinished":'
+    assert store._detour_db_path.read_bytes() == before
+
+
+def test_log_descriptor_is_readonly_and_append_failure_closes_writer(
+    tmp_path: Path, backend_test_paths: BackendTestPaths, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = runtime_for_test(tmp_path, backend_test_paths)
+    store = backend_store_for_test(runtime)
+    store._rebuild_from_log(runtime, reset_confirmed=True)
+    record = persisted_http_record(
+        record_id=UUID("019d0000-0000-7000-8000-000000000020"),
+        method=HTTP_GET_METHOD, path=PULL_PATH,
+        response_code=HTTPStatus.SERVICE_UNAVAILABLE,
+    )
+    writer_fds: list[int] = []
+
+    def fail_fsync(fd: int) -> None:
+        assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_WRONLY
+        writer_fds.append(fd)
+        raise OSError("fsync interrupted")
+
+    with pytest.raises(RuntimeError, match="Store failed"):
+        with store._writable(runtime):
+            descriptor = store._replay_log._fd
+            assert descriptor is not None
+            assert fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
+            monkeypatch.setattr(os, "fsync", fail_fsync)
+            with pytest.raises(OSError, match="fsync interrupted"):
+                store._append_authoritative_record(record)
+            assert Path(runtime.pipeline_config.replay_log).stat().st_mode & 0o777 == 0o400
+            with pytest.raises(OSError):
+                os.fstat(writer_fds[0])
+            with pytest.raises(RuntimeError, match="Store failed"):
+                store._execute("SELECT 1")
+    assert store._replay_log._fd is None
+    assert store._detour_db._conn is None
+
+
+@pytest.mark.parametrize(
+    "digest", ("", "a" * 63, "A" * 64, "g" * 64, "../" + "a" * 61, "a" * 64 + "\n"),
+)
+def test_cas_rejects_noncanonical_digest(tmp_path: Path, digest: str) -> None:
+    cas = AiAugmentCAS(path=tmp_path / "cas")
+    reference = CodexRolloutRecord(sha256=digest, size=0, line_count=1)
+    with pytest.raises(ValueError, match=Locale.ROLLOUT_CAS_BLOB_INVALID):
+        cas.validated_rollout(reference)
+    assert not cas.path.exists()
+
+
+@pytest.mark.parametrize("changed", ("contents", "size", "lines", "missing", "legacy"))
+def test_cas_sharded_blob_verification(tmp_path: Path, changed: str) -> None:
+    content = b"one\ntwo\n"
+    digest = hashlib.sha256(content).hexdigest()
+    cas = AiAugmentCAS(path=tmp_path / "cas")
+    path = cas.path / digest[:2] / digest[2:4] / digest
+    path.parent.mkdir(parents=True)
+    path.write_bytes(content)
+    reference = CodexRolloutRecord(sha256=digest, size=len(content), line_count=2)
+    validated = cas.validated_rollout(reference)
+    assert validated.model_dump(exclude={"cas_path"}) == reference.model_dump()
+    assert validated.cas_path == path
+    if changed == "contents":
+        path.write_bytes(b"two\none\n")
+    elif changed == "size":
+        reference = reference.model_copy(update={"size": len(content) + 1})
+    elif changed == "lines":
+        reference = reference.model_copy(update={"line_count": 3})
+    elif changed == "legacy":
+        path.rename(cas.path / f"{digest}.jsonl")
+    else:
+        path.unlink()
+    with pytest.raises(ValueError, match=Locale.ROLLOUT_CAS_BLOB_INVALID):
+        cas.validated_rollout(reference)
+
+
+@pytest.mark.parametrize("level", (0, 1, 2))
+def test_cas_rejects_symlink_in_sharded_blob_path(tmp_path: Path, level: int) -> None:
+    content = b"one\n"
+    digest = hashlib.sha256(content).hexdigest()
+    cas = AiAugmentCAS(path=tmp_path / "cas")
+    path = cas.path / digest[:2] / digest[2:4] / digest
+    path.parent.mkdir(parents=True)
+    path.write_bytes(content)
+    component = (path.parent.parent, path.parent, path)[level]
+    outside = tmp_path / "outside"
+    component.rename(outside)
+    component.symlink_to(outside, target_is_directory=level < 2)
+    with pytest.raises(ValueError, match=Locale.ROLLOUT_CAS_BLOB_INVALID):
+        cas.validated_rollout(CodexRolloutRecord(sha256=digest, size=len(content), line_count=1))
+
+
+@pytest.mark.parametrize("symlink_level", (None, 0, 1))
+def test_cas_copy_shards_are_checked_and_durably_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, symlink_level: int | None,
+) -> None:
+    content = b"one\ntwo"
+    digest = hashlib.sha256(content).hexdigest()
+    cas = AiAugmentCAS(path=tmp_path / "cas")
+    path = cas.path / digest[:2] / digest[2:4] / digest
+    cas.initialize()
+    if symlink_level is not None:
+        component = (path.parent.parent, path.parent)[symlink_level]
+        component.parent.mkdir(parents=True, exist_ok=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        component.symlink_to(outside, target_is_directory=True)
+    synced: list[tuple[int, int]] = []
+    real_fsync = os.fsync
+
+    def fsync(fd: int) -> None:
+        info = os.fstat(fd)
+        synced.append((info.st_dev, info.st_ino))
+        real_fsync(fd)
+
+    def copy(_command: list[str], **kwargs: Any) -> None:
+        kwargs["stdout"].write(content)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(subprocess, "run", copy)
+    if symlink_level is not None:
+        with pytest.raises(ValueError, match=Locale.ROLLOUT_CAS_BLOB_INVALID):
+            cas.copy_rollout(rollout_relative_path=PurePosixPath("rollout.jsonl"),
+                             ssh_target="unused", ssh_options=())
+        assert list(outside.iterdir()) == []
+    else:
+        reference = cas.copy_rollout(rollout_relative_path=PurePosixPath("rollout.jsonl"),
+                                     ssh_target="unused", ssh_options=())
+        validated = cas.validated_rollout(reference)
+        assert validated.model_dump(exclude={"cas_path"}) == reference.model_dump()
+        assert validated.cas_path == path
+        assert path.read_bytes() == content and reference.line_count == 2
+        assert synced == [(p.stat().st_dev, p.stat().st_ino)
+                          for p in (path, path.parent, path.parent.parent, cas.path)]
+        assert cas.copy_rollout(rollout_relative_path=PurePosixPath("rollout.jsonl"),
+                                ssh_target="unused", ssh_options=()) == reference
+    assert not list(cas.path.glob(".*.tmp"))

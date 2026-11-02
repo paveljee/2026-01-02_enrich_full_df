@@ -28,12 +28,14 @@ from src.helpers.schema import (
     PARQUET_ALL_HITS_TABLE,
     PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW,
     PARQUET_AUTHOR_PAPERS_TABLE,
+    SAMPLES_WITH_NAMES_VIEW,
 )
 from src.helpers.vars import (
+    DRAW_LABEL,
     HCR_XLSX_KEY_PREFIX,
     KTP_FIRST_NAME_COL,
     KTP_LAST_NAME_COL,
-    KTP_SOURCE_KEY_COL,
+    KTP_NAMEKEY_COL,
     KTP_SSN_TOP_OLDEST_PAPERS_COL,
     KTP_SSN_TOP_PAPERS_HIT_1PCT_COL,
     KTP_SSNP_PAPERID_URL_COL,
@@ -142,7 +144,7 @@ def test_step_09_non_ok_title_batch_preserves_successful_log_and_parquet(
                 "output_dir": output_dir,
                 "output_format": "txt",
                 "pandoc_reference_docx": inputs / "reference.docx",
-                "docx_dir": inputs,
+                # "docx_dir": inputs,
                 "timezone": "UTC",
                 "sample_seed": 1,
                 "sample_draw_sizes": [1],
@@ -155,13 +157,23 @@ def test_step_09_non_ok_title_batch_preserves_successful_log_and_parquet(
         name_key = NameKey(first_name="Ada", last_name="Lovelace")
         conn.execute(
             f'CREATE TABLE {OUTERDICT_NAME_VIEW} ('
-            f'"{KTP_SOURCE_KEY_COL}" VARCHAR, '
+            f'"{KTP_NAMEKEY_COL}" VARCHAR, '
             f'"{KTP_FIRST_NAME_COL}" VARCHAR, '
             f'"{KTP_LAST_NAME_COL}" VARCHAR)'
         )
         conn.execute(
             f"INSERT INTO {OUTERDICT_NAME_VIEW} VALUES (?, ?, ?)",
             [name_key.to_json_key(), name_key.first_name, name_key.last_name],
+        )
+        conn.execute(
+            f'CREATE TABLE {SAMPLES_WITH_NAMES_VIEW} ('
+            f'"{KTP_FIRST_NAME_COL}" VARCHAR, '
+            f'"{KTP_LAST_NAME_COL}" VARCHAR, '
+            f'"{DRAW_LABEL}" VARCHAR)'
+        )
+        conn.execute(
+            f"INSERT INTO {SAMPLES_WITH_NAMES_VIEW} VALUES (?, ?, ?)",
+            [name_key.first_name, name_key.last_name, "1"],
         )
         context = PipelineContext(
             config=config,

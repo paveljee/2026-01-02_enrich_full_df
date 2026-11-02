@@ -1,0 +1,265 @@
+> [!NOTE]
+> Originally generated
+> using Codex CLI
+> gpt-5.6-sol xhigh
+> on 2026-09-03;
+> see corresponding rollout
+> in the chat directory for
+> `tasks/tasks-20260731-tighten-api`.
+>
+> Automated reference for this workflow:
+> `pixi run test-detour-ai-augment`.
+>
+> Signed-off: Pavel
+
+# How to manually reproduce the operator full workflow
+Compared to `pixi run test-detour-ai-augment-operator`,
+this manual contour omits only the
+Dashboard queue,
+Playwright interaction,
+Control Centre process supervision, and the
+operator test’s isolated-data sanctuary.
+
+Use the following sequence.
+
+> **Important:** using `config_ai_augment.json` operates on the real configured detour outputs. Unlike the operator test, this does not construct an isolated temporary database/replay/CAS environment.
+
+## 1. Start and check AIVM
+
+From the repository root:
+
+```bash
+cd /Volumes/home/aicode/2026-01-02_enrich_full_df
+
+pixi run -e detour-ai-augment limactl start aivm
+
+pixi run -e detour-ai-augment limactl shell --workdir=/ aivm \
+  sudo systemctl is-active --quiet aivm-appendwatch.service
+
+pixi run -e detour-ai-augment limactl shell --workdir=/ aivm \
+  sudo --user ai --set-home \
+  /home/ai/.local/bin/codex login status
+```
+
+If Codex is not authenticated:
+
+```bash
+pixi run -e detour-ai-augment limactl shell --workdir=/ aivm \
+  sudo --user ai --set-home \
+  /home/ai/.local/bin/codex login --device-auth
+```
+
+A complete redeployment, if intentionally desired, is:
+
+```bash
+export OPENALEX_API_KEY="$(
+  pixi run -e detour-ai-augment python -c '
+import os
+from dotenv import dotenv_values
+
+path = os.path.join(os.environ["PIXI_PROJECT_ROOT"], ".env")
+print(dotenv_values(path).get("OPENALEX_API_KEY", ""), end="")
+'
+)"
+
+pixi run -e detour-ai-augment \
+  bash src/detours/detour_ai_augment/protected/src/agent_runtime/deploy.sh
+```
+
+That deployment script may delete and recreate the existing `aivm`.
+
+## 2. Start Backend — terminal 1
+
+Choose the desired namekey and run:
+
+```bash
+cd /Volumes/home/aicode/2026-01-02_enrich_full_df
+
+export OPENALEX_API_KEY="$(
+  pixi run -e detour-ai-augment python -c '
+import os
+from dotenv import dotenv_values
+
+path = os.path.join(os.environ["PIXI_PROJECT_ROOT"], ".env")
+print(dotenv_values(path).get("OPENALEX_API_KEY", ""), end="")
+'
+)"
+
+test -n "$OPENALEX_API_KEY"
+
+export FASTAPI_DETOUR_NAMEKEY='{"ktp.first_name":"A.","ktp.last_name":"Sheikh"}'
+export FASTAPI_DETOUR_APPENDWATCH_REPORT='/Volumes/home/aicode/aivm/home/ai/.aivm-control/appendwatch/appendwatch-tree.txt'
+export FASTAPI_DETOUR_CODEX_SESSIONS_DIR='/home/ai/.codex/sessions'
+export FASTAPI_DETOUR_DASHBOARD_SOCKET="/tmp/detour-manual-${UID}.sock"
+export FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519"
+
+pixi run -e detour-ai-augment \
+  python -m src.detours.detour_ai_augment.protected.src.backend.server \
+  --config config_ai_augment.json --resume
+```
+
+Backend requires either `--new` (recreate the detour DB from the replay log) or
+`--resume`/`--continue` (reuse known-clean state). Both ask for confirmation;
+`--yes` bypasses it. The example uses `--resume`; use `--new` only when an
+explicit rebuild is intended. Recalculate and repin the replay-log hash in
+config before a verified restart. Dashboard verifies on startup and supplies
+the child flags itself. Each full Backend launch records and replays its selected
+NameKey in `/init` before serving `/pull`.
+
+Leave this terminal open. Backend is deliberately waiting for one line on stdin containing the Codex session UUID, while already serving requests.
+
+The appendwatch path above is the current default guest deployment path. If AIVM was deployed with a custom `--mount`, substitute the corresponding path below that guest mount point. Backend reads this path through the forced `aivm-audit` SSH protocol using the same host-held identity file as the `ai` connection.
+
+## 3. Start Codex with the reverse tunnel — terminal 2
+
+```bash
+cd /Volumes/home/aicode/2026-01-02_enrich_full_df
+
+pixi run -e detour-ai-augment bash -c '
+printf "%s\n" "http://127.0.0.1:8612/openapi.json" |
+ssh \
+  -F "$HOME/.lima/aivm/ssh.config" \
+  -o ProxyJump=lima-aivm \
+  -o HostName=127.0.0.1 \
+  -o Port=22022 \
+  -o User=ai \
+  -o IdentityFile="$HOME/.local/share/aivm/.ssh/id_ed25519" \
+  -o IdentitiesOnly=yes \
+  -o BatchMode=yes \
+  -o PasswordAuthentication=no \
+  -o KbdInteractiveAuthentication=no \
+  -o ForwardAgent=no \
+  -o ClearAllForwardings=no \
+  -o UserKnownHostsFile="$HOME/.local/share/aivm/.ssh/known_hosts" \
+  -o HostKeyAlias=lima-aivm-ai \
+  -o StrictHostKeyChecking=accept-new \
+  -o ExitOnForwardFailure=yes \
+  -R 127.0.0.1:8612:127.0.0.1:8612 \
+  aivm-ai \
+  "cd /home/ai &&
+   . /home/ai/workdir/.openalex.env &&
+   exec /home/ai/.local/bin/codex exec --skip-git-repo-check -"
+'
+```
+
+Codex should print something like:
+
+```text
+session id: 01xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+## 4. Supply the session ID to Backend
+
+Return to **terminal 1**, type only that UUID, and press Enter:
+
+```text
+01xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+This timing is intentional:
+
+1. Codex may already perform its first `GET /pull`.
+2. Backend has assigned and logged that pull’s `record_id`.
+3. The session ID only needs to be known before Codex’s first `POST /push`.
+4. Backend finds the corresponding rollout JSONL from the supplied session UUID.
+
+## 5. Let the workflow finish
+
+Codex should repeatedly:
+
+1. `GET /pull`
+2. perform the requested work
+3. `POST /push`
+4. follow the returned `Location`
+5. continue until Backend returns `410 Gone`
+
+For a completed run, retain the quoted `ETag` from a `410 Gone` `GET /pull`:
+it identifies the validation request record required by `POST /completed`.
+If the final response headers were not captured, probe once while Backend is
+still running (as the Dashboard does), and proceed only if it returns `410`:
+
+```bash
+curl --silent --show-error --dump-header - --output /dev/null \
+  http://127.0.0.1:8612/pull
+```
+
+On normal completion, the Codex/SSH command exits.
+
+For a cancellation, send the `OUTCOME="cancelled"`
+request in **terminal 3** (see below)
+**before** terminating Codex.
+
+## 6. Record the run-outcome snapshot — terminal 3
+
+Before stopping Backend,
+open a third host terminal and send the run-outcome request while Backend's Unix
+socket is still available:
+
+```bash
+cd /Volumes/home/aicode/2026-01-02_enrich_full_df
+
+NAMEKEY='{"ktp.first_name":"A.","ktp.last_name":"Sheikh"}'
+SOCKET_PATH="/tmp/detour-manual-${UID}.sock"
+OUTCOME="completed"
+SESSION_ID='01xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+ETAG='"<validation request record UUID from 410 /pull>"'
+NAME_KEY_HEADER="$(
+  pixi run -e detour-ai-augment python -c '
+import sys
+from src.detours.detour_ai_augment.protected.src.shared import name_key_header_value
+from src.helpers.data_models import NameKey
+print(name_key_header_value(NameKey.from_json_key(sys.argv[1])), end="")
+' "$NAMEKEY"
+)"
+
+OUTCOME_HEADERS=(
+  --header "NameKey: $NAME_KEY_HEADER"
+  --header "Session-ID: $SESSION_ID"
+)
+if test "$OUTCOME" = completed; then
+  OUTCOME_HEADERS+=(--header "ETag: $ETAG")
+fi
+
+curl --silent --show-error --include \
+  --unix-socket "$SOCKET_PATH" \
+  --request POST \
+  "${OUTCOME_HEADERS[@]}" \
+  "http://invalid/$OUTCOME"
+```
+
+Use the UUID supplied to Backend in terminal 1 as `SESSION_ID`. Keep the
+quotation marks around the `ETag` UUID; send that header only for
+`OUTCOME="completed"`. Use `OUTCOME="failed"` after an unsuccessful run.
+A `200 OK` response confirms that
+Backend captured the session rollout
+and appendwatch report;
+`400 Bad Request` means the request identity or headers did not match, and
+`409 Conflict` means the requested outcome conflicts with the validation result;
+`500 Internal Server Error` means the
+logged run-outcome snapshot is partial
+and should be reviewed in Backend logs.
+
+## 7. Wind down gracefully
+
+After this request and after Codex/SSH has exited, stop Backend with `Ctrl+C`.
+This manual contour bypasses Control Centre's automatic session archival, so
+archive the finished guest session from terminal 3, where `SESSION_ID` is set:
+
+```bash
+pixi run -e detour-ai-augment limactl shell --workdir=/ aivm \
+  sudo --user ai --set-home \
+  /home/ai/.local/bin/codex archive "$SESSION_ID"
+```
+
+Do this regardless of whether the run-outcome request returned `200` or `500`:
+archival keeps the finished JSONL out of the live `sessions` tree monitored by
+appendwatch. If the archive command fails, it does not change the recorded run
+outcome; the JSONL may remain live and continue to appear in appendwatch. If
+Codex cancellation or Backend shutdown failed, first establish that those
+processes have actually exited before attempting archival.
+
+To mirror the operator test, leave AIVM running. Otherwise stop it explicitly:
+
+```bash
+pixi run -e detour-ai-augment limactl stop aivm
+```

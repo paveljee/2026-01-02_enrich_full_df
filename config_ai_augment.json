@@ -1,0 +1,221 @@
+{
+  "db_file": "data/scisci_process.duckdb",
+  "duckdb_extensions": {
+    "splink_udfs": {
+      "repo": "https://github.com/RobinL/splink_udfs",
+      "bin": {
+        "linux_arm64": "/Volumes/home/aicode/.duckdb/extensions/v1.5.1/linux_arm64/splink_udfs.duckdb_extension",
+        "osx_arm64": "/Volumes/home/aicode/.duckdb/extensions/v1.5.1/osx_arm64/splink_udfs.duckdb_extension"
+      }
+    }
+  },
+  "state_file": "data/pipeline_state.json",
+  "output_dir": "data/output/ai_augment",
+  "output_format": "docx",
+  "card_subset_mode": 0,
+  "match_rule_version": {
+    "xlsx_name": 2,
+    "docx_name": 1,
+    "ssn_name": 2,
+    "ssn_hit": 2,
+    "codex_match": 2
+  },
+  "pandoc_reference_docx": "resources/pandoc-custom-reference.docx",
+  "rollout_cas_dir": "/Volumes/home/aicode/2026-01-02_enrich_full_df/tmp/test_merged_mqvjqjkk_onwards/merged-mqvjqjkk-onwards-cas",
+  "timezone": "America/Toronto",
+  "sample_seed": 42,
+  "sample_draw_sizes": [
+    { "size": 20, "replace": true },
+    { "size": 40, "replace": true },
+    { "size": 40, "replace": true },
+    { "size": 40, "replace": true },
+    { "size": 40, "replace": true },
+    { "size": 40, "replace": true },
+    { "size": 40, "replace": true },
+    { "size": 40, "replace": true }
+  ],
+  "pilot_xlsx_name": "2024_HCR.xlsx",
+  "total_draws": 310,
+  "files_config": {
+    "detour_ai_augment_backend_api_replay_log": {
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/tmp/test_merged_mqvjqjkk_onwards/merged-mqvjqjkk-onwards-backend-replay.jsonl",
+      "sha256": "5a03bae5397153aada95453ce3dd8498f5937ed639dfc747834a028bedb4f287",
+      "desc": "Detour AI Augment Backend API replay log"
+    },
+    "map_subset_0_to_batch": {
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/map_subset0_to_batch.csv",
+      "sha256": "3d18ce34f51b34287f4e86f73eb7e2bc5bebcae93db6af1797f51e9c259e65fe",
+      "desc": "map subset 0 to release batches"
+    },
+    "openalex_paper_title_parquet": {
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/output/openalex_paper_titles.parquet",
+      "sha256": "3511bf749a170086f92556fcd2fdf464d8fe1c44191b77c06cab414da5f99fb8",
+      "desc": "OpenAlex paper title parquet"
+    },
+    "openalex_paper_title_log": {
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/openalex_paper_title_log.jsonl",
+      "sha256": "a113fb5ea17b6cecc341113e81f0f7834f7c5d44ebaedbffa11ba89c1e61fd4e",
+      "desc": "OpenAlex paper title log"
+    },
+    "openalex_author_search_log": {
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/openalex_author_search_log.jsonl",
+      "sha256": "95544debe4bbd0638c913ddd718a68e80b90bab5fa2b9a7c65e7762d6900cbc6",
+      "desc": "OpenAlex author search log"
+    },
+    "ktp_author_details_unnest": {
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/output/ktp_author_details_unnest_v2.parquet",
+      "sha256": "40be4518298a7f51658131addbfb644f7dea749348342f8011a4d62568bf1636",
+      "desc": "SciSciNet author details unnested names"
+    },
+    "hit_papers_0": {
+      "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/hit_papers_level0.parquet",
+      "sha256": "453bf5e5fe4bd2427b467c35aaea36a9d5c1b8b61d1e01d84496fd7fd5e6d6aa",
+      "desc": "Hit Papers Level 0"
+    },
+    "hit_papers_1": {
+      "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/hit_papers_level1.parquet",
+      "sha256": "f79ddf6e417e9d601ae04e6c898c72bc7b60118d3967cb03fe6fc708eab953ae",
+      "desc": "Hit Papers Level 1"
+    },
+    "authors_paper": {
+      "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_authors_paperid.parquet",
+      "sha256": "c97f4552f22d8e05b1c2bb70746b5a16f29c41c2807738d3c49f3852573910f2",
+      "desc": "Authors -> Paper IDs"
+    },
+    "paper_author_affiliation": {
+      "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_paper_author_affiliation.parquet",
+      "sha256": "6b468f3f562b9e1292d8d656909990790ab8512d0a1e45dbec13b9d0900ca6ef",
+      "desc": "Paper-Author-Affiliation links"
+    },
+    "affiliations": {
+      "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_affiliations.parquet",
+      "sha256": "8cb50e952aceac7226bbed08828050e9c2af46f46e975c0638493d3d6a81f65e",
+      "desc": "Affiliation metadata"
+    },
+    "author_details": {
+      "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_author_details.parquet",
+      "sha256": "62c373c747d74879585c3b1cfbbe70971c86927ec4fbc601482d3c2513ad9c1a",
+      "desc": "Author Details (Names)"
+    },
+    "authors": {
+      "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_authors.parquet",
+      "sha256": "17669bf36ddfe2c6fcebd759bdbc292269d3651292792babe0211a6161ae492e",
+      "desc": "Authors"
+    },
+    "fields": {
+      "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_fields.parquet",
+      "sha256": "f78b1fc5287de26aee57665943a50c95aa980420449d7c099c351600cd584c7a",
+      "desc": "Field Definitions"
+    },
+    "papers": {
+      "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_papers.parquet",
+      "sha256": "6aa915684d32440978e80269d58ba4a19473a04b326ccc79c7e9bebc0e608bc9",
+      "desc": "Papers"
+    },
+    "world_bank_xlsx": {
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/tmp/OGHIST_2025_07_01.xlsx",
+      "sha256": "567d7646d2ac762b4058fcbc93f7df435ea7a3c441a1e666894e6d3e96128aa6",
+      "desc": "World Bank country list"
+    },
+    "hcr_xlsx_2014": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2014_HCR.xlsx",
+      "sha256": "4340ec4c63c35757cb87e39f5cfad64c7aa2b23b4717f127ca2caf4d6e15978f",
+      "desc": "HCR XLSX 2014"
+    },
+    "hcr_xlsx_2015": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2015_HCR.xlsx",
+      "sha256": "51ded7b3b8e67bae4807bf542adb64b6856a69bb93f44050eff422e5c3b998ff",
+      "desc": "HCR XLSX 2015"
+    },
+    "hcr_xlsx_2016": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2016_HCR.xlsx",
+      "sha256": "8932c854ea77cfe03d512e8140ebf6db67aa7e99477197f5952ae1f08e5af37b",
+      "desc": "HCR XLSX 2016"
+    },
+    "hcr_xlsx_2017": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2017_HCR.xlsx",
+      "sha256": "1bc25d154541da65763d104f15d04abf8a73644419dc2be077cf0ab0e7613d1e",
+      "desc": "HCR XLSX 2017"
+    },
+    "hcr_xlsx_2018": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2018_HCR.xlsx",
+      "sha256": "2dcded6bdcda99a9ae842cbf49a2327ff128914f1943fe8a693336caddf77b18",
+      "desc": "HCR XLSX 2018"
+    },
+    "hcr_xlsx_2019": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2019_HCR.xlsx",
+      "sha256": "052279561dd19628592bff7a5c8adb5f3c4b247054a2b4a2c7ec1ca25d1651af",
+      "desc": "HCR XLSX 2019"
+    },
+    "hcr_xlsx_2020": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2020_HCR.xlsx",
+      "sha256": "418c7142fa3be817f26a6e1caf3fd701dd45affe83f491838a26b4e8787dca9c",
+      "desc": "HCR XLSX 2020"
+    },
+    "hcr_xlsx_2021": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2021_HCR.xlsx",
+      "sha256": "eca6f94f18438e9be57bf9dbcfba613a4060284deef003581c2ccbdf63fa5896",
+      "desc": "HCR XLSX 2021"
+    },
+    "hcr_xlsx_2022": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2022_HCR.xlsx",
+      "sha256": "d0799080838fc6135453280ead2660a0a9de5272a9603eef35ff28e30253c734",
+      "desc": "HCR XLSX 2022"
+    },
+    "hcr_xlsx_2023": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2023_HCR.xlsx",
+      "sha256": "672b6774d1e39b4bbde2a8414f4fdeb73ea6c3dd777ac17b7d0f4fc3716f9ab0",
+      "desc": "HCR XLSX 2023"
+    },
+    "hcr_xlsx_2024": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2024_HCR.xlsx",
+      "sha256": "dabf094643254a8c6de84f08f6d6774388e1b9d2f090935a85084bdde44ec294",
+      "desc": "HCR XLSX 2024"
+    },
+    "ri_pilot_extraction": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions/RI_pilot_extraction_2025AUG19_HI (n=10)_fixed_space_norm_header_fixed_edu.docx",
+      "sha256": "917c15542c9408467989e00baff9b31254862c2063ffdb8eb5a15f45db559361",
+      "desc": "RI pilot extraction 2025 AUG 19 HI (n=10) + fixed space + norm header + fixed edu"
+    },
+    "ri_sample_1": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions/RI_sample_1_2025AUG22_HI (n=20)_from_HI_2026-10-15.docx",
+      "sha256": "1c72668bf1bc0a0fffa80a400b50297d04473183e9359b9368f6e6831eb226ec",
+      "desc": "RI sample 1 2025 AUG 22 HI (n=20) from HI 2026-10-15"
+    },
+    "ri_sample_2": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions/RI_sample_2_2025SEPT16_DR_fixed_names.docx",
+      "sha256": "8dc16104a777d247ad246eb374d1b969fca9029916848475f478dc6180c293eb",
+      "desc": "RI sample 2 2025 SEPT 16 DR + fixed names"
+    },
+    "ri_sample_3": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions/RI_sample_3_2025SEPT27_HI (n=40)_added_fei_wang_fixed_edu.docx",
+      "sha256": "212ade6e66456a108466f9423e9bd22cfcee4a21b2ea0141738b9b8a162ddf12",
+      "desc": "RI sample 3 2025 SEPT 27 HI (n=40) + added Fei Wang + fixed edu"
+    },
+    "ri_sample_4": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions/RI_sample_4_2025OCT14_DR (n=40).docx",
+      "sha256": "3f899ed96d38474d9a0e5f6606bca04ddb59fb44797d7fc9315042c27a09d074",
+      "desc": "RI sample 4 2025 OCT 14 DR (n=40)"
+    },
+    "ri_sample_5": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions/RI_sample_5_2025OCT24_DR (n=40)_clarified_nielsenlo.docx",
+      "sha256": "80452d4046b5f8c2821dc437935559d0c94ab8b62e7bce8637c7480a73cfc432",
+      "desc": "RI sample 5 2025 OCT 24 DR (n=40) + clarified Nielsenlo"
+    },
+    "ri_sample_6": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions/RI_sample_6_2025NOV01_HI (n=40)_norm_header_fixed_edu.docx",
+      "sha256": "393a788a5780a67609f84fa28a96612341fd4db16676d42066a55cf46cb9049f",
+      "desc": "RI sample 6 2025 NOV 01 HI (n=40) + norm header + fixed edu"
+    },
+    "ri_sample_7": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions/RI_sample_7_2025NOV04_DR (n=40).docx",
+      "sha256": "dc9a163dd8b561018b637947a8bf4f19637e74e3a66530d31b7da6cda199ae56",
+      "desc": "RI sample 7 2025 NO 04 DR (n=40)"
+    },
+    "ri_sample_8": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions/RI_sample_8_2025NOV18_HI (n=40)_norm_header_fixed_names_fixed_edu.docx",
+      "sha256": "156464976df08939df84b85d696e8e45bb80b90db457a89eb7be386fbd8ea36b",
+      "desc": "RI sample 8 2025 NOV 18 HI (n=40) + norm header + fixed names + fixed edu"
+    }
+  }
+}
