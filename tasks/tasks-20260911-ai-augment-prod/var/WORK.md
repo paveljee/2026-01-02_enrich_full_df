@@ -1,3 +1,8 @@
+# OpenAlex paper-title log rebuild — 2026-11-02
+
+- A main-pipeline Step 01 rebuild from an existing OpenAlex paper-title JSONL failed on line 1 with numeric `schema_version=1`. **Original v1 was numeric**: in `f8536fe`, the constant was integer `1` and the HTTP record's version type was `int`; immediately before `d5b5c85`, v1 was still `Literal[1]`. The v1.1-era change `d5b5c85` introduced string `"1"` into the constant and model, leaving the title reader's equality gate unchanged. Current code consequently rejects the original numeric v1 log at that gate. Do not describe string `"1"` as the original v1 format.
+- **Failed attempt, 2026-11-02:** The operator rolled back all those code edits.
+
 # Dashboard snapshot authority — 2026-10-30
 
 For the **researcher/card snapshot**, yes: `storage-general.json` is the dashboard’s sole persisted copy. I was imprecise.
