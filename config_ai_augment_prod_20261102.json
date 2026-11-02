@@ -38,8 +38,8 @@
   "total_draws": 310,
   "files_config": {
     "detour_ai_augment_backend_api_replay_log": {
-      "path": "./data/detour_ai_augment_backend_api_replay_log.jsonl",
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "path": "/Users/anonymous/2026-01-02_enrich_full_df_20261102/data/ai_augment/replay_log copy.jsonl",
+      "sha256": "8977e729fb780bad5f53fb1019ed12fff49f402e776bc81455ff6dd393a71742",
       "desc": "Detour AI Augment Backend API replay log"
     },
     "map_subset_0_to_batch": {
