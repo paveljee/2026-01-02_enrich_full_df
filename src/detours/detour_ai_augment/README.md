@@ -763,7 +763,7 @@ dashboard_log="logs/dashboard_runs_20261102.log" && script -a "$dashboard_log" p
 # Press Start queue processing.
 
 # After processing, status bar:
-# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 263 · queued 2 · running 1 · completed 8 · failed 0 · cancelled 0
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 263 · queued 0 · running 0 · completed 11 · failed 0 · cancelled 0
 # Press Stop queue processing.
 
 # Press Query IPC.
@@ -771,7 +771,7 @@ dashboard_log="logs/dashboard_runs_20261102.log" && script -a "$dashboard_log" p
 
 # Some artifacts:
 # - 27513d592af66d73442c8958d95a3393701d9b5c7e34d0aae943d74c11834366  dashboard_runs_20261102.log
-# - 9af710eeef887dab737ff7834a73cff21e2d30c93958fd20e4e67f2bb9f96f88 replay.log
+# - 9af710eeef887dab737ff7834a73cff21e2d30c93958fd20e4e67f2bb9f96f88  replay.log
 
 # Export output artifacts:
 pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui publish completed --config ./config_ai_augment_prod_20261102.json
