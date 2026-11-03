@@ -1,3 +1,9 @@
+# Minimal detour config review — 2026-11-02
+
+- `tmp/config.json` is insufficient for `AiAugmentDetourConfig`: it omits required top-level `state_file`, `output_format`, `sample_draw_sizes`, `pilot_xlsx_name`, `total_draws`, and `card_subset_mode`, and `files_config` omits main-pipeline required resource keys and any `hcr_xlsx_` entry. The AI-specific map and replay entries are present. Configured resource hashes, DB content, and platform binaries were not inspected.
+- `state_file` is required only by the inherited `PipelineConfig` schema; production AI-augment source does not read or write it. The main pipeline uses it via `PipelineManager`. Operator test code populates an isolated path and preflight includes that path in its protected-path check.
+- The paid/operator E2E Pixi task does not read `tmp/config.json`; its fixture copies root `config_ai_augment.json` and rewrites DB, replay log, CAS, state, and output paths into a temporary config before launch.
+
 # Dashboard snapshot authority — 2026-10-30
 
 For the **researcher/card snapshot**, yes: `storage-general.json` is the dashboard’s sole persisted copy. I was imprecise.
