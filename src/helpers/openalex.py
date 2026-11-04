@@ -27,6 +27,7 @@ from .duckdb_utils import duckdb_string_literal
 from .files import file_sha256
 from .vars import (
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_LEGACY,
     KTP_OPENALEX_RECEIVED_AT_UNIX_USEC_COL,
     OPENALEX_AUTHOR_SEARCH_LOG_PATH,
     OPENALEX_PAPER_TITLE_LOG_KEY,
@@ -210,7 +211,10 @@ def _validate_openalex_work_title_log_record(
     *,
     line_number: int,
 ) -> tuple[str, ...]:
-    if record.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION:
+    if record.schema_version not in (
+        KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_LEGACY,
+    ):
         raise ValueError(
             f"Invalid {OPENALEX_PAPER_TITLE_LOG_KEY} line {line_number}: "
             f"schema_version={record.schema_version!r}."

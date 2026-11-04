@@ -256,6 +256,28 @@ def test_openalex_paper_title_parquet_rebuilds_strict_batch_log(
         paperids=["W123"],
         api_key="REDACTED",
     )
+    original_v1_query = openalex_work_titles_batch_query(
+        paperids=["W777"],
+        api_key="REDACTED",
+    )
+    append_http_request_log_record(
+        log_path=log_path,
+        record=http_request_log_record(
+            schema_version=1,
+            method="GET",
+            scheme="https",
+            host="api.openalex.org",
+            path="/works",
+            redacted_query=original_v1_query,
+            response_code=200,
+            response_body=(
+                '{"results":[{"id":"https://openalex.org/W777",'
+                '"title":"Numeric v1 Title"}]}'
+            ),
+            received_at_unix_usec=50,
+            duration_usec=10,
+        ),
+    )
     append_http_request_log_record(
         log_path=log_path,
         record=http_request_log_record(
@@ -323,7 +345,11 @@ def test_openalex_paper_title_parquet_rebuilds_strict_batch_log(
         conn.close()
 
     assert log_hash == _sha256(log_path)
-    assert rows == [("W123", "Updated Title", 200), ("W999", None, 100)]
+    assert rows == [
+        ("W123", "Updated Title", 200),
+        ("W777", "Numeric v1 Title", 50),
+        ("W999", None, 100),
+    ]
     assert (OPENALEX_PAPER_TITLE_LOG_SHA256_METADATA_KEY, log_hash) in metadata_rows
     assert (
         OPENALEX_PAPER_TITLE_PARQUET_SCHEMA_VERSION_METADATA_KEY,

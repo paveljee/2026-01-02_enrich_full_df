@@ -21,6 +21,7 @@ from pydantic_core import InitErrorDetails
 from src.helpers.architecture import implements, nameof
 from src.helpers.vars import (
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_LEGACY,
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
 )
 
@@ -98,7 +99,9 @@ class HttpRequestLogRecordProtocol(Protocol):
 
 def _is_http_request_log_schema_version_1(value: object) -> bool:
     return value == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION or (
-        isinstance(value, int) and not isinstance(value, bool) and value == 1
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and value == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_LEGACY
     )
 
 
