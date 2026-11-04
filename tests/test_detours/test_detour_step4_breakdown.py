@@ -639,6 +639,9 @@ def _resource_paths_from_config(config_path: Path) -> list[Path]:
 def _write_slow_config(base_config_path: Path, out_path: Path) -> Path:
     raw = json.loads(base_config_path.read_text(encoding="utf-8"))
     cfg = deepcopy(raw)
+    cfg["files_config"]["world_bank_xlsx"]["path"] = str(
+        base_config_path.absolute().parent / cfg["files_config"]["world_bank_xlsx"]["path"]
+    )
     cfg["db_file"] = str(out_path.parent / "slow_main.duckdb")
     cfg["state_file"] = str(out_path.parent / "slow_main_state.json")
     cfg["output_dir"] = str(out_path.parent / "slow_output")
