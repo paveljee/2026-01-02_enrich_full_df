@@ -8,6 +8,7 @@ embargoed/
 .nicegui
 logs/
 node_modules
+.duckdb
 
 # pixi environments
 .pixi/*

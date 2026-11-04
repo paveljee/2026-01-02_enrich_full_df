@@ -407,6 +407,385 @@ The rollouts can be reviewed with this tool: `src/github.com/simonw/tools/blob/2
 
 Note that the runs were done on a “dirty” virtual machine (i.e., an AIVM instance already provisioned earlier), hence the documented GPT OSS’s behaviour when it detected unrelated files in the working directory.
 
+## Production runs
+### 2026-11-02
+
+```shell
+#!/bin/zsh
+
+# ===============================================
+# KTP RI pipeline: AI augmentation detour.
+# Production runs on 2026-11-02 UTC-5.
+# All commands are shown as run; illustrative
+# commands are all shown as comments only.
+# As such, this is not supposed to run end to end
+# if launched but rather is a report. Overall, this
+# does not represent an excrutiatingly verbose
+# log of all events as they happened; these are
+# condensed for narrative purposes. The report as
+# written is intended to be reproducible, though.
+#
+# Note that this deploy still requires the Internet
+# and some online sources like Conda repos to be
+# available online; it's not fully localized.
+# ================================================
+
+git clone https://github.com/paveljee/2026-01-02_enrich_full_df.git
+
+# Then done this via GUI:
+# mv ~/2026-01-02_enrich_full_df ~/2026-01-02_enrich_full_df_20261102
+cd ~/2026-01-02_enrich_full_df_20261102
+
+# Merged aicode/feat/detour-ai-augment into main via a GitHub PR.
+git pull
+git show HEAD
+# commit 3200cf03e29f3387bce324ddf34f5d201a3aea9b (HEAD -> aicode/staging, origin/aicode/staging, origin/HEAD)
+# Merge: ac81b44 d88f13c
+# Author: Pavel Zhelnov <pzhelnov@p1m.org>
+# Date:   Mon Nov 2 09:12:26 2026 -0500
+#
+#     Merge pull request #21 from paveljee/aicode/feat/detour-ai-augment
+#    
+#     Ready for merge: aicode/feat/detour-ai-augment branch
+#    
+#     - All tests green under `pre-commit-operator`
+#     - Replay logs merged over 5 test launches, over several days, and replayed successfully
+#     - 6 random, eligible namekeys run via dashboard successfully, of
+#     which one was missing ground truth
+#     - A replay log demerged from the merged log and replayed successfully
+#     - Data reviewed in dashboard and raw (cursorily at this point
+#     because no new concerns were anticipated) and no issues that require addressing
+#     - 11 namekeys prepared for the release batch 9 and ready to run
+#     - All planned steps before the planned production runs are cleared,
+#     ready to launch
+
+# Prefer Linux over macOS for prod runs for reproducibility.
+# Provision a fresh Lima instance while using some known
+# image - just reuse the config we already have; resources
+# there should be enough for everything:
+mkdir ./tmp
+export MOUNT_DIR_YAML="$PWD"
+export GUEST_MOUNTPOINT_YAML="$MOUNT_DIR_YAML"
+export LIMA_INSTANCE="detour-ai-augment-prod-20261102"
+export LIMA_START_TIMEOUT="25m"  # as in deploy.sh
+# The below are read-only mounts for config:
+export SSN_V2="/Volumes/home/anonymous/sciscinet/v2/hf/xet"
+export HCR_XLSX="/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final"
+export KTP_DOCX="/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions"
+# Reuse some of heaviest artifacts from prebuilt prior:
+export PIPELINE_HEAVY="/Volumes/home/aicode/2026-01-02_enrich_full_df/data/output"
+# These lines cover the YAML template and start command:
+sed -n '293,385p' src/detours/detour_ai_augment/protected/src/agent_runtime/deploy.sh | awk '
+  /^param:/ || /^portForwards:/ || /^provision:/ { skip=1; next }
+  /^EOF$/ { skip=0; print; next }
+  skip && /^[^[:space:]#]/ { skip=0 }
+  !skip && /^mountType:/ {
+    for (i = 1; i <= 4; i++) {
+      name = (i == 1 ? "SSN_V2" : i == 2 ? "HCR_XLSX" : i == 3 ? "KTP_DOCX" : "PIPELINE_HEAVY")
+      print "  - location: \"$" name "\""
+      print "    mountPoint: \"$" name "\""
+      print "    writable: false"
+    }
+  }
+  !skip { print }
+' > ./tmp/start-lima.sh
+which bash  # /opt/homebrew/bin/bash
+bash --version  # GNU bash, version 5.3.8(1)-release (aarch64-apple-darwin24.6.0)
+which limactl  # /opt/homebrew/bin/limactl
+limactl --version  # limactl version 2.2.0
+bash ./tmp/start-lima.sh  # success
+
+# Log into the provisioned Lima instance and use it moving forward:
+limactl shell detour-ai-augment-prod-20261102
+which bash  # /usr/bin/bash
+bash --version  # GNU bash, version 5.2.21(1)-release (aarch64-unknown-linux-gnu)
+
+# Copy pipeline config to provide repro-friendly values:
+# cp ~/2026-01-02_enrich_full_df_20261102/config_ai_augment.json ~/2026-01-02_enrich_full_df_20261102/config_ai_augment_prod_20261102.json
+# Edited it via GUI, including new values obtained from 
+# the below commands - will commit the config to repo.
+
+# Copied via macOS (!) GUI the binary linux_arm64 duckdb extension
+# splink_udfs v1.5.1 into the working directory:
+# mkdir -p ~/.duckdb/extensions/v1.5.1/linux_arm64
+# cp /Volumes/home/aicode/.duckdb/extensions/v1.5.1/linux_arm64/splink_udfs.duckdb_extension ~/.duckdb/extensions/v1.5.1/linux_arm64/splink_udfs.duckdb_extension
+# cp /Volumes/home/aicode/.duckdb/extensions/v1.5.1/linux_arm64/splink_udfs.duckdb_extension.info ~/.duckdb/extensions/v1.5.1/linux_arm64/splink_udfs.duckdb_extension.info
+
+# Did not redownload the SciSciNet v2 and Clarivate's HCR data
+# because they are publicly available and the hashes were pinned.
+#
+# Also, I did not change the paths to the internal DOCX files and
+# pipeline files like OpenAlex paper title and author search logs
+# because they are expensive and unnecessary to rebuild; they are
+# raw data that are shared as part of this repository anyway.
+#
+# I did reset the internal parquet files (specifically OpenAlex
+# paper titles parquet and SciSciNet v2 unnested names parquet)
+# to rebuild them from source JSONL.
+
+# Created and hashed an empty file for each of:
+# - AI augmentation detour's replay log
+mkdir ./data/ai_augment
+replay_log="./data/ai_augment/replay_log.jsonl" && touch "$replay_log" && sha256sum "$replay_log"
+# - OpenAlex paper-title parquet
+# no file creation is necessary - pipeline does this
+# - SciSciNet v2 unnested names parquet
+# no file creation is necessary - pipeline does this
+
+# Download appropriate pixi binary:
+PIXI_VERSION=$(awk '$1 == "pixi" {print $2; exit}' .tool-versions)
+PIXI_TGZ="./tmp/pixi-aarch64-unknown-linux-musl-${PIXI_VERSION}.tar.gz"
+PIXI_URL="https://github.com/prefix-dev/pixi/releases/download/v${PIXI_VERSION}/pixi-aarch64-unknown-linux-musl.tar.gz"
+curl -fL -o "$PIXI_TGZ" "$PIXI_URL"
+curl -fL -o "${PIXI_TGZ}.sha256" "${PIXI_URL}.sha256"
+read -r PIXI_SHA256 _ < "${PIXI_TGZ}.sha256"
+printf '%s *%s\n' "$PIXI_SHA256" "$PIXI_TGZ" | sha256sum -c -
+# Reminder: Inside Lima VM.
+# Install pixi:
+mkdir -p ~/.local/bin
+tar -xzf "$PIXI_TGZ" -C ~/.local/bin pixi
+chmod +x ~/.local/bin/pixi
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+pixi --version  # pixi 0.62.2
+# Install pixi deps from lockfile:
+rm -rf ./.pixi && pixi install --all --locked
+# ✔ The following environments have been installed: default, detour-mode0-econ-stats, detour-ai-augment.
+
+# Create config for main pipeline - different from detour's:
+# cp ~/config_ai_augment_prod_20261102.json ~/config_repl_20261102.json
+# Manually edited to update output path and remove
+# the unsupported/unused keys - will commit this config.
+
+# Add OpenAlex key in `.env`:
+# cp ./.env.example ./.env
+# Edited manually.
+
+# Run the main pipeline using the new config:
+pixi run python -m src.repl --config ./config_repl_20261102.json --new
+# Note: Supply Yes manually in an interactive mode.
+#
+# =============== Attempt 1 ====================
+# This failed to run because the resources were too small.
+# So I decided to reuse the existing artifact given that
+# its generation logic should not have changed in the slightest
+# because it represents only a permutation on SciSciNet v2 data,
+# and I will reserve the verification of this artifact for another
+# time; it requires 20+ GB RAM and 20+ GB free disk space.
+#
+# =============== Attempt 2 ====================
+# Then after restoring the path to `ktp_author_details_unnest`
+# in the config, the same command failed again - this time due
+# to a stale schema version check in `openalex.py`. I did not
+# proceed to regenerate it, therefore, and reused the older
+# artifact because this was a clear problem - a regression
+# introduced during schema v1.1 implementation; it is fixable
+# and does not affect the detour runs; it must be addressed
+# separately therefore.
+#
+# =============== Attempt 3 ====================
+# Reran again; success - last step's log lines:
+#      Execution Metrics      
+#                            
+#   Metric           Value    
+#  ────────────────────────── 
+#   Peak RAM Usage   3.48 GB  
+#   Cards            307      
+#                            
+# Execution Metrics
+# Peak RAM Usage: 3.48 GB
+# Cards: 307
+# Diagnostics report saved to: 
+# data/diagnostics/20261102_131723/repl_diagnostics.md
+# Success! Output saved to: 
+# data/output/2024-Historical-Highly-Cited-Researchers-lists - 
+# final_combined_cards.zip
+#
+# =============== Follow-up ====================
+# Manually changed the rights for the database file
+# `scisci_process_20261102.duckdb` to read-only.
+# 
+# Some checks:
+#
+# - `diff -qr` of unzipped TXT outputs from output dir
+#   against a run after git tag `detour-ai-augment-rc1`,
+#   on 2026-10-28T1826Z, after normalizing the date of
+#   report, exited 0, indicating they are identical;
+# - Diffs (through VS Code's Select for compare/Compare
+#   with selected feature) of the diagnostic artifacts
+#   across these two same runs were unremarkable:
+#    
+#   step artifact `10_build_cards_card_partitions_df.csv`
+#   and `repl_diagnostics.md` were the same, and the
+#   `repl_session.log` only differed on timestamps and
+#   RAM usage.
+#
+# All in all, these checks are the same as the usual
+# gates that were used to establish the absence of
+# main pipeline regressions across code iterations, so
+# I interpret these as strong evidence of equivalence.
+
+# The next step will be running the dashboard, which
+# requires the macOS because the dashboard manages the
+# Backend and the AI Agent Runtime (via Lima).
+# Therefore, I had to quit Lima and use maCOS.
+
+# As run on macOS, under Terminal, `/bin/zsh`:
+rm -rf ./.pixi && pixi install --all --locked
+# ✔ The following environments have been installed: default, detour-mode0-econ-stats, detour-ai-augment in '/Users/anonymous/Library/Caches/rattler/cache/envs'.
+
+# Initialize AI Agent Runtime (on macOS):
+export OPENALEX_API_KEY="$(pixi run python -c '
+import os
+from dotenv import dotenv_values
+env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
+print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
+')"
+REPO_DIR="$PWD" bash src/detours/detour_ai_augment/protected/src/agent_runtime/deploy.sh
+# Supply Yes manually when prompted.
+# ✅ Lima instance created successfully
+# ✅ SSH access to Lima jump host works
+# Warning: Permanently added 'lima-aivm-ai' (ED25519) to the list of known hosts.
+# ✅ SSH access to 'ai' through jump host works
+# Warning: Permanently added 'lima-aivm-aivm-audit' (ED25519) to the list of known hosts.
+# ✅ SSH access to 'aivm-audit' audit protocol works
+# ✅ 'aivm-audit' rejects commands outside its read protocol
+# ✅ Connected as 'ai'
+# ✅ Home is '/home/ai'
+# ✅ 'ai' has no passwordless sudo
+# ✅ Project directory is mounted at '/Volumes/home/aicode/aivm/home/ai'
+# ✅ Mounted project is writable for the Lima jump user at '/Volumes/home/aicode/aivm/home/ai'
+# ✅ Mounted project is inaccessible to 'ai'
+# ✅ Appendwatch is active and inaccessible to 'ai'
+# ✅ Appendwatch report is readable only through 'aivm-audit' audit protocol
+# ✅ Codex config exists at '/home/ai/.codex/config.toml'
+# ✅ VS Code 1.130.0 installed
+# ✅ VS Code extension openai.chatgpt@26.721.41059 installed
+# ✅ Codex CLI 0.146.0-alpha.3.1 installed
+# ✅ OPENALEX_API_KEY round-trips into the AIVM environment
+
+# Log into Codex:
+ssh lima-aivm-ai
+codex auth
+codex login status
+# Logged in using ChatGPT
+
+# Initialize Backend in IPC-only mode to hydrate dashboard:
+# ============ Initialize full Backend ====================
+# Note that OPENALEX_API_KEY above and these env vars are
+# reused by Backend and Control Centre dashboard later.
+export FASTAPI_DETOUR_DASHBOARD_SOCKET="/tmp/detour-manual-$(id -u).sock"
+export FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519"
+export FASTAPI_DETOUR_NAMEKEY='{"ktp.first_name":"Gaoquan ","ktp.last_name":"Shi"}'  # any eligible key
+export FASTAPI_DETOUR_APPENDWATCH_REPORT='"'"'/Volumes/home/aicode/aivm/home/ai/.aivm-control/appendwatch/appendwatch-tree.txt'"'"'
+export FASTAPI_DETOUR_CODEX_SESSIONS_DIR='"'"'/home/ai/.codex/sessions'"'"'
+pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.protected.src.backend.server --config ./config_ai_augment_prod_20261102.json --new --yes
+# INFO:__main__:Starting Backend: config=config_ai_augment_prod_20261102.json; ipc_only=False; new=True; resume=False
+# INFO:__main__:Loading Backend configuration/resources: config_ai_augment_prod_20261102.json; verify_hashes=True
+# INFO:src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context:Loading researchers from read-only source DB: data/scisci_process_20261102.duckdb
+# INFO:__main__:Backend configuration and source validated: 307 researchers
+# INFO:__main__:Starting Backend HTTP API at 127.0.0.1:8612
+# INFO:     Started server process [49497]
+# INFO:     Waiting for application startup.
+# INFO:__main__:Opening writable Backend Store: new=True
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Replaying 0 lines (0 bytes) into new detour DB
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Replay complete; accepted hash e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 at line 0, byte 0
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Verifying replay log: stored hash e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 at line 0 byte 0; config hash e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; 0 bytes
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Verifying prefix: 0 lines, 0 bytes
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Prefix hash matches stored anchor
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:DB/log ordinal and byte coverage verified: 0 lines, 0 bytes
+# INFO:__main__:Writable Backend Store ready
+# Dashboard IPC running on unix:///tmp/detour-manual-501.sock
+# INFO:     Application startup complete.
+# INFO:     Uvicorn running on http://127.0.0.1:8612 (Press CTRL+C to quit)
+# ============ Update hash sum for replay log in config ====================
+sha256sum ./data/ai_augment/replay_log.jsonl
+# a2f639e28518e7a94b3b31777672b6e65b35c0b315e0e7ebe231564ab01d12af
+# ============ Restart Backend as IPC-only ====================
+# Press CTRL+C to quit
+pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.protected.src.backend.server --config ./config_ai_augment_prod_20261102.json --ipc-only
+# INFO:__main__:Starting Backend: config=config_ai_augment_prod_20261102.json; ipc_only=True; new=False; resume=False
+# INFO:__main__:Loading Backend configuration/resources: config_ai_augment_prod_20261102.json; verify_hashes=True
+# INFO:src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context:Loading researchers from read-only source DB: data/scisci_process_20261102.duckdb
+# INFO:__main__:Backend configuration and source validated: 307 researchers
+# INFO:__main__:Opening read-only Backend Store
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Verifying replay log: stored hash e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 at line 0 byte 0; config hash a2f639e28518e7a94b3b31777672b6e65b35c0b315e0e7ebe231564ab01d12af; 428 bytes
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Verifying prefix: 0 lines, 0 bytes
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Prefix hash matches stored anchor
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Verifying suffix line 1
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:DB/log ordinal and byte coverage verified: 1 lines, 428 bytes
+# INFO:__main__:Read-only Backend Store ready; starting query-only IPC
+# Dashboard IPC running on unix:///tmp/detour-manual-501.sock
+
+# In a second Terminal, on macOS, run Control Centre dashboard:
+# Re-supply these env vars in the new terminal.
+export OPENALEX_API_KEY="$(pixi run python -c '
+import os
+from dotenv import dotenv_values
+env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
+print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
+')"
+export FASTAPI_DETOUR_DASHBOARD_SOCKET="/tmp/detour-manual-$(id -u).sock"
+export FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519"
+dashboard_log="logs/dashboard_runs_20261102.log" && script -a "$dashboard_log" pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui --config ./config_ai_augment_prod_20261102.json
+# [control-centre] Starting Dashboard with config config_ai_augment_prod_20261102.json
+# [control-centre] persisted Dashboard state restored
+# [control-centre] queue worker ready
+# [control-centre] ready at http://127.0.0.1:8611
+
+# Web browser: Chrome for macOS,
+# Version 156.0.8078.74 (Official Build) (arm64).
+# Open the dashboard UI in the browser, press Query IPC.
+# Popup: Dashboard query snapshot replaced
+
+# Important! Press CTRL+C to quit to quit the Backend;
+# else Control Centre dashboard queue processing will fail.
+
+# In dashboard UI, press Probe.
+#
+# Backend API: unavailable
+# IPC: unavailable
+# Lima/SSH: available
+# Codex/auth: available
+# Probed: 2026-11-02T19:54:31+00:00
+#
+# Both the Backend API and IPC must be unavailable to
+# allow the dashboard to manage Backend launches.
+
+# Following `data/map_subset0_to_batch.csv`, find
+# subset 9 namekeys by inputting the draw numbers
+# in the UI search box, queue them. In fact, these
+# all come in order if sorted by ktp.draw_number,
+# ascending, and skipping pilots and ineligible.
+
+# After queueuing, status bar:
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 263 · queued 11 · running 0 · completed 0 · failed 0 · cancelled 0
+# Press Start queue processing.
+
+# After processing, status bar:
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 263 · queued 0 · running 0 · completed 11 · failed 0 · cancelled 0
+# Press Stop queue processing.
+
+# Press Query IPC.
+# Press CTRL+C to quit to quit the dashboard.
+
+# Some artifacts:
+# - 27513d592af66d73442c8958d95a3393701d9b5c7e34d0aae943d74c11834366  dashboard_runs_20261102.log
+# - 9af710eeef887dab737ff7834a73cff21e2d30c93958fd20e4e67f2bb9f96f88  replay.log
+
+# Export output artifacts:
+pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui publish completed --config ./config_ai_augment_prod_20261102.json
+pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui markdown completed --config ./config_ai_augment_prod_20261102.json
+pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui spreadsheet completed martin --config ./config_ai_augment_prod_20261102.json
+
+# Replay into a throwaway database was successful;
+# for this I needed to create a copy of the replay log
+# (because it would be spoiled by a new `/init` record)
+# and create a backup of the detour database file, then
+# rerun the full Backend launch command above.
+
+```
+
 <!--- Markdown references --->
 
 [paveljee]: https://github.com/paveljee "paveljee (Pavel Zhelnov) | GitHub"
