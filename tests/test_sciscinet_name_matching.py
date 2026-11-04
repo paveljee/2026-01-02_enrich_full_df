@@ -23,6 +23,7 @@ from src.helpers.openalex import (
     _OpenAlexNonOKResponse,
     check_openalex_author,
     fetch_openalex_work_titles_batch,
+    load_openalex_author_search_log_cache,
     openalex_author_search_query,
     openalex_work_title_paperids_from_query,
     openalex_work_titles_batch_query,
@@ -629,6 +630,125 @@ def test_openalex_author_check_reuses_jsonl_cache(tmp_path: Path) -> None:
     assert result.query == query
     assert result.top_author_id == "A123"
     assert result.received_at_unix_usec == 111
+
+
+def test_openalex_author_loaded_cache_reuses_and_updates_jsonl(tmp_path: Path) -> None:
+    log_path = tmp_path / "openalex.jsonl"
+    ada_query = openalex_author_search_query(
+        first_name="Ada", last_name="Lovelace", api_key="REDACTED"
+    )
+    grace_query = openalex_author_search_query(
+        first_name="Grace", last_name="Hopper", api_key="REDACTED"
+    )
+    base_record: dict[str, object] = {
+        "method": "GET",
+        "scheme": "https",
+        "host": "api.openalex.org",
+        "path": "/authors",
+        "request_headers": {},
+        "request_body": None,
+        "response_code": 200,
+        "response_headers": {},
+        "duration_usec": 222,
+    }
+    initial_lines = [
+        "{not json}",
+        json.dumps(base_record | {
+            "schema_version": 1,
+            "query": ada_query,
+            "response_body": '{"results":[{"id":"https://openalex.org/A111"}]}',
+            "received_at_unix_usec": 111,
+        }),
+        json.dumps(base_record | {
+            "schema_version": "1",
+            "query": ada_query,
+            "response_body": '{"results":[{"id":"https://openalex.org/A123"}]}',
+            "received_at_unix_usec": 123,
+        }),
+        json.dumps(base_record | {
+            "schema_version": 1,
+            "query": grace_query,
+            "response_body": '{"results":[{"id":"https://openalex.org/A456"}]}',
+            "received_at_unix_usec": 456,
+        }),
+        json.dumps(base_record | {
+            "schema_version": "1",
+            "path": "/works",
+            "query": ada_query,
+            "response_body": '{"results":[{"id":"https://openalex.org/A999"}]}',
+            "received_at_unix_usec": 999,
+        }),
+        json.dumps(base_record | {
+            "schema_version": "1.1",
+            "query": ada_query,
+            "response_body": '{"results":[{"id":"https://openalex.org/A888"}]}',
+            "received_at_unix_usec": 888,
+        }),
+    ]
+    original_log = "\n".join(initial_lines) + "\n"
+    log_path.write_text(original_log, encoding="utf-8")
+
+    cached_records = load_openalex_author_search_log_cache(log_path)
+    assert set(cached_records) == {ada_query, grace_query}
+
+    response = requests.Response()
+    response.status_code = 200
+    response._content = b'{"results":[{"id":"https://openalex.org/A789"}]}'
+    with patch.object(requests, "get", return_value=response) as request_get:
+        ada = check_openalex_author(
+            source_key="Ada Lovelace",
+            first_name="Ada",
+            last_name="Lovelace",
+            selected_author_id="A123",
+            log_path=log_path,
+            api_key="test-key",
+            cached_records=cached_records,
+        )
+        grace = check_openalex_author(
+            source_key="Grace Hopper",
+            first_name="Grace",
+            last_name="Hopper",
+            selected_author_id="A456",
+            log_path=log_path,
+            api_key="test-key",
+            cached_records=cached_records,
+        )
+        request_get.assert_not_called()
+        assert log_path.read_text(encoding="utf-8") == original_log
+
+        fresh = check_openalex_author(
+            source_key="Emmy Noether",
+            first_name="Emmy",
+            last_name="Noether",
+            selected_author_id="A789",
+            log_path=log_path,
+            api_key="test-key",
+            cached_records=cached_records,
+        )
+        reused = check_openalex_author(
+            source_key="Emmy Noether",
+            first_name="Emmy",
+            last_name="Noether",
+            selected_author_id="A789",
+            log_path=log_path,
+            api_key="test-key",
+            cached_records=cached_records,
+        )
+        request_get.assert_called_once()
+
+    assert ada.reused and ada.matched and ada.top_author_id == "A123"
+    assert ada.received_at_unix_usec == 123
+    assert grace.reused and grace.matched and grace.top_author_id == "A456"
+    assert grace.received_at_unix_usec == 456
+    assert not fresh.reused and fresh.matched and fresh.top_author_id == "A789"
+    assert reused.reused and reused.matched and reused.top_author_id == "A789"
+    assert reused.received_at_unix_usec == fresh.received_at_unix_usec
+    lines = log_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    assert "".join(lines[:-1]) == original_log
+    appended = json.loads(lines[-1])
+    assert appended["schema_version"] == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION
+    assert appended["query"] == fresh.query
+    assert "test-key" not in appended["query"]
 
 
 def test_openalex_author_check_appends_response_and_parses_mismatch(tmp_path: Path) -> None:

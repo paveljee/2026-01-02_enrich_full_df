@@ -25,6 +25,7 @@ from ..helpers.openalex import (
     check_openalex_author,
     chunk_openalex_work_title_paperids,
     fetch_openalex_work_titles_batch,
+    load_openalex_author_search_log_cache,
     openalex_paper_title_read_model_log_sha256,
     write_openalex_paper_title_read_model,
 )
@@ -627,6 +628,7 @@ def run(context: PipelineContext) -> StepResult:
             "SSN hit v2 OpenAlex confidence gate: checking "
             f"{len(check_candidates):,} unique max-work selections against current OpenAlex.",
         )
+        cached_records = load_openalex_author_search_log_cache(openalex_log_path)
         check_rows: list[tuple[str, str, str | None, bool, bool, int | None, int | None]] = []
         for name_key, first_name, last_name, selected_author_id in check_candidates:
             selected_author_id_str = str(selected_author_id)
@@ -636,6 +638,7 @@ def run(context: PipelineContext) -> StepResult:
                 last_name=str(last_name or ""),
                 selected_author_id=selected_author_id_str,
                 log_path=openalex_log_path,
+                cached_records=cached_records,
             )
             check_rows.append(
                 (

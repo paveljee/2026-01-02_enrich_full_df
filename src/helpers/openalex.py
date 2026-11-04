@@ -29,6 +29,7 @@ from .vars import (
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_LEGACY,
     KTP_OPENALEX_RECEIVED_AT_UNIX_USEC_COL,
+    OPENALEX_AUTHOR_SEARCH_LOG_KEY,
     OPENALEX_AUTHOR_SEARCH_LOG_PATH,
     OPENALEX_PAPER_TITLE_LOG_KEY,
     OPENALEX_PAPER_TITLE_LOG_PATH,
@@ -88,6 +89,33 @@ class OpenAlexWorkTitleBatchResult:
 
 def openalex_author_search_log_path() -> Path:
     return Path(OPENALEX_AUTHOR_SEARCH_LOG_PATH)
+
+
+def load_openalex_author_search_log_cache(
+    log_path: Path,
+) -> dict[str, HttpRequestLogRecord]:
+    cache: dict[str, HttpRequestLogRecord] = {}
+    if not log_path.exists():
+        return cache
+    with log_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = HttpRequestLogRecord.model_validate_json(line)
+            except ValidationError:
+                continue
+            try:
+                _validate_openalex_log_record_route(
+                    record,
+                    line_number=line_number,
+                    log_key=OPENALEX_AUTHOR_SEARCH_LOG_KEY,
+                    expected_path=OPENALEX_AUTHOR_SEARCH_PATH,
+                )
+            except ValueError:
+                continue
+            cache[redact_http_request_log_query(record.query)] = record
+    return cache
 
 
 def openalex_paper_title_log_path() -> Path:
@@ -206,29 +234,44 @@ def chunk_openalex_work_title_paperids(
     ]
 
 
-def _validate_openalex_work_title_log_record(
+def _validate_openalex_log_record_route(
     record: HttpRequestLogRecord,
     *,
     line_number: int,
-) -> tuple[str, ...]:
+    log_key: str,
+    expected_path: str,
+) -> None:
     if record.schema_version not in (
         KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
         KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_LEGACY,
     ):
         raise ValueError(
-            f"Invalid {OPENALEX_PAPER_TITLE_LOG_KEY} line {line_number}: "
+            f"Invalid {log_key} line {line_number}: "
             f"schema_version={record.schema_version!r}."
         )
     if (
         record.method != "GET"
         or record.scheme != OPENALEX_SCHEME
         or record.host != OPENALEX_HOST
-        or record.path != OPENALEX_WORKS_PATH
+        or record.path != expected_path
     ):
         raise ValueError(
-            f"Invalid {OPENALEX_PAPER_TITLE_LOG_KEY} line {line_number}: "
-            "expected GET https://api.openalex.org/works."
+            f"Invalid {log_key} line {line_number}: "
+            f"expected GET {OPENALEX_SCHEME}://{OPENALEX_HOST}{expected_path}."
         )
+
+
+def _validate_openalex_work_title_log_record(
+    record: HttpRequestLogRecord,
+    *,
+    line_number: int,
+) -> tuple[str, ...]:
+    _validate_openalex_log_record_route(
+        record,
+        line_number=line_number,
+        log_key=OPENALEX_PAPER_TITLE_LOG_KEY,
+        expected_path=OPENALEX_WORKS_PATH,
+    )
     query_values = dict(parse_qsl(record.query, keep_blank_values=True))
     if (
         query_values.get("select") != "id,title"
@@ -474,6 +517,7 @@ def check_openalex_author(
     env_path: Path = Path(".env"),
     api_key: str | None = None,
     request_get: _RequestGet | None = None,
+    cached_records: dict[str, HttpRequestLogRecord] | None = None,
 ) -> OpenAlexAuthorCheckResult:
     resolved_log_path = log_path or openalex_author_search_log_path()
     resolved_api_key = api_key or _api_key_from_env(env_path)
@@ -483,15 +527,18 @@ def check_openalex_author(
         api_key=resolved_api_key,
     )
     redacted_query = redact_http_request_log_query(query)
-    cached_record = matching_http_request_log_record(
-        log_path=resolved_log_path,
-        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
-        method="GET",
-        scheme=OPENALEX_SCHEME,
-        host=OPENALEX_HOST,
-        path=OPENALEX_AUTHOR_SEARCH_PATH,
-        redacted_query=redacted_query,
-    )
+    if cached_records is None:
+        cached_record = matching_http_request_log_record(
+            log_path=resolved_log_path,
+            schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+            method="GET",
+            scheme=OPENALEX_SCHEME,
+            host=OPENALEX_HOST,
+            path=OPENALEX_AUTHOR_SEARCH_PATH,
+            redacted_query=redacted_query,
+        )
+    else:
+        cached_record = cached_records.get(redacted_query)
     if cached_record is not None:
         return _result_from_record(
             source_key=source_key,
@@ -525,6 +572,8 @@ def check_openalex_author(
     top_author_id = parse_openalex_top_author_id(response_body)
     matched = top_author_id == selected_author_id
     append_http_request_log_record(log_path=resolved_log_path, record=record)
+    if cached_records is not None:
+        cached_records[redacted_query] = record
     return OpenAlexAuthorCheckResult(
         source_key=source_key,
         selected_author_id=selected_author_id,
