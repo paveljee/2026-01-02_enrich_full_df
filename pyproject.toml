@@ -150,6 +150,9 @@ duckdb = "==1.5.1"
 pandoc = "==3.7.0.2"
 bun = "==1.4.2"
 
+[tool.pixi.target.linux.dependencies]
+nim = "==2.2.6"
+
 [tool.pixi.feature.detour-ai-augment.target.linux.dependencies]
 alsa-lib = "*"
 at-spi2-atk = "*"
