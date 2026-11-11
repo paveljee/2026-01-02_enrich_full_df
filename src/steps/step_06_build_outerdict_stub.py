@@ -26,6 +26,7 @@ from ..helpers.vars import (
     STEP_BUILD_OUTERDICT,
     STEP_BUILD_OUTERDICT_EXCLUDED_LOG_MAX_ROWS,
 )
+from .shared import archived_outerdict_message, more_excluded_message, outerdict_keys_message
 
 
 def run(context: PipelineContext) -> StepResult:
@@ -118,7 +119,7 @@ def run(context: PipelineContext) -> StepResult:
                 f"last={_fmt_name_part(row_map[KTP_LAST_NAME_COL])}"
             )
         if excluded_name_rows > max_logged_rows:
-            log(f"...and {excluded_name_rows - max_logged_rows} more excluded row(s).")
+            log(more_excluded_message(excluded_name_rows - max_logged_rows, "row"))
 
     excluded_stub_df = pd.DataFrame(
         {
@@ -158,9 +159,11 @@ def run(context: PipelineContext) -> StepResult:
     )
     if excluded_name_pairs:
         log(
-            "Archive excluded-name OuterDict stub: "
-            f"{excluded_name_pairs} key(s) in "
-            f"{OUTERDICT_EXCLUDED_STUB_TABLE} / {OUTERDICT_EXCLUDED_NAME_VIEW}."
+            archived_outerdict_message(
+                "excluded-name OuterDict stub",
+                excluded_name_pairs,
+                f"{OUTERDICT_EXCLUDED_STUB_TABLE} / {OUTERDICT_EXCLUDED_NAME_VIEW}",
+            )
         )
 
     names_df = conn.execute(
@@ -215,7 +218,7 @@ def run(context: PipelineContext) -> StepResult:
     return StepResult(
         step_id=STEP_BUILD_OUTERDICT,
         artifacts={"outer_dict": outer_dict, "outer_dict_excluded": outer_dict_excluded},
-        messages=[f"OuterDict keys: {len(name_keys)}"],
+        messages=[outerdict_keys_message(len(name_keys))],
         diagnostics=[
             f"Unique name keys: {len(name_keys)}",
             f"Excluded null/empty-name rows: {excluded_name_rows}",

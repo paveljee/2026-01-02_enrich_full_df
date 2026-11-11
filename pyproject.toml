@@ -345,8 +345,10 @@ from src.steps.step_10_build_cards import (
     _launcher_subset_items_and_states,
     _launcher_write_cards_zip,
     _make_card_progress_callbacks,
+    _exclude_later_equal_source_sets,
     _resolve_subset_mode,
 )
+from src.steps.shared import outerdict_keys_message
 
 parser = argparse.ArgumentParser(prog="pixi run publish")
 parser.add_argument("target", choices=["all"])
@@ -377,6 +379,9 @@ try:
         append_innerdicts_from_jsonlines_table(
             conn, table_name=table_name, outer_dict=outer_dict, procedure=procedure
         )
+
+    log(outerdict_keys_message(len(list(outer_dict.keys()))))
+    outer_dict, _excluded = _exclude_later_equal_source_sets(outer_dict, log)
 
     registry = conn.execute(
         "SELECT resource_name, resource_group, fragment_type FROM registered_resources"

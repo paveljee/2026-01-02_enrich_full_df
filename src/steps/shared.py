@@ -26,6 +26,18 @@ def hcr_excluded_columns(population_columns: list[str]) -> set[str]:
     return excluded
 
 
+def outerdict_keys_message(key_count: int) -> str:
+    return f"OuterDict keys: {key_count}"
+
+
+def archived_outerdict_message(description: str, key_count: int, location: str) -> str:
+    return f"Archive {description}: {key_count} key(s) in {location}."
+
+
+def more_excluded_message(count: int, unit: str) -> str:
+    return f"...and {count} more excluded {unit}(s)."
+
+
 def draw_sort_ctes_sql(*, draw_col: str, source_key_col: str) -> str:
     return f"""
         row_ranked AS (
@@ -78,6 +90,9 @@ def draw_sort_order_by_sql(*, source_key_col: str, filename_col: str, fragment_c
 
 __all__ = [
     "hcr_excluded_columns",
+    "outerdict_keys_message",
+    "archived_outerdict_message",
+    "more_excluded_message",
     "draw_sort_ctes_sql",
     "draw_sort_order_by_sql",
 ]

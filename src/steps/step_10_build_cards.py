@@ -19,11 +19,14 @@ from ..helpers.duckdb_utils import (
     duckdb_quote_identifier,
     register_frame,
 )
+from ..helpers.jsonlines import dumps_jsonlines
 from ..helpers.schema import (
     CARD_PARTITION_REVIEW_ROWS_TABLE,
     CARD_PARTITION_REVIEW_VIEW,
     CARD_PARTITION_TABLE,
     DOCX_OUTPUT_VIEW,
+    OUTERDICT_MASK_EXCLUDED_NAME_VIEW,
+    OUTERDICT_MASK_EXCLUDED_TABLE,
     PARQUET_OUTPUT_VIEW,
     XLSX_OUTPUT_VIEW,
 )
@@ -52,6 +55,7 @@ from ..helpers.vars import (
     KTP_FRAGMENT_TYPE_COL,
     KTP_HCR_PRIMARY_AFFILIATIONS_COL,
     KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+    KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
     KTP_PARTITION_COL,
@@ -92,8 +96,15 @@ from ..helpers.vars import (
     SSNAD_WORKS_API_URL_COL,
     SSNAD_WORKS_COUNT_COL,
     STEP_BUILD_CARDS,
+    STEP_BUILD_OUTERDICT_EXCLUDED_LOG_MAX_ROWS,
 )
-from .shared import draw_sort_ctes_sql, draw_sort_order_by_sql
+from .shared import (
+    archived_outerdict_message,
+    draw_sort_ctes_sql,
+    draw_sort_order_by_sql,
+    more_excluded_message,
+    outerdict_keys_message,
+)
 
 CARD_PARTITION_FRAME_TABLE = "card_partition_frame"
 XLSX_REVIEW_SOURCE_TABLE = "card_partition_review_xlsx_source"
@@ -1328,6 +1339,125 @@ def _build_selected_outer_dict(
     return subset_outer
 
 
+def _exclude_later_equal_source_sets(
+    outer_dict: OuterDict,
+    log: Callable[[str], None],
+) -> tuple[OuterDict, OuterDict]:
+    items = list(outer_dict.items())
+    owner_by_sources: dict[frozenset[tuple[str, str, str]], NameKey] = {}
+    kept: dict[tuple[str, str], NameKey] = {}
+    excluded_owner: dict[tuple[str, str], NameKey] = {}
+
+    ordered_items = sorted(
+        items,
+        key=lambda item: (
+            min(
+                (_draw_sort_key(inner.data.get(DRAW_LABEL)) for inner in item[1]),
+                default=_draw_sort_key(None),
+            ),
+            item[0].first_name,
+            item[0].last_name,
+        ),
+    )
+    for namekey, inners in ordered_items:
+        if not inners:
+            continue
+        sources = frozenset(
+            (
+                str(inner.data[KTP_FILENAME_COL]),
+                str(inner.data[KTP_FRAGMENT_TYPE_COL]),
+                str(inner.data[KTP_FRAGMENT_COL]),
+            )
+            for inner in inners
+        )
+        owner = owner_by_sources.get(sources)
+        if owner is None:
+            owner_by_sources[sources] = namekey
+            kept[(namekey.first_name, namekey.last_name)] = namekey
+        else:
+            excluded_owner[(namekey.first_name, namekey.last_name)] = owner
+
+    excluded_items = [
+        (namekey, inners)
+        for namekey, inners in ordered_items
+        if (namekey.first_name, namekey.last_name) not in kept
+    ]
+    active = OuterDict(data={
+        namekey.to_json_key(): inners
+        for namekey, inners in items
+        if (namekey.first_name, namekey.last_name) in kept
+    })
+    excluded = OuterDict.from_name_keys(namekey for namekey, _ in excluded_items)
+    for namekey, inners in excluded_items:
+        for inner in inners:
+            fragment_type = str(inner.data[KTP_FRAGMENT_TYPE_COL])
+            excluded.add_inner(
+                namekey,
+                InnerDict.from_mapping(
+                    {
+                        KTP_FILENAME_COL: inner.data[KTP_FILENAME_COL],
+                        KTP_FRAGMENT_COL: {
+                            "type": fragment_type,
+                            fragment_type: inner.data[KTP_FRAGMENT_COL],
+                        },
+                    },
+                    inner.procedure,
+                ),
+            )
+
+    empty_count = len(excluded_items) - len(excluded_owner)
+    log(
+        f"Exclude NameKeys before card build: {len(excluded_items)} key(s) "
+        f"({empty_count} with no InnerDicts; "
+        f"{len(excluded_owner)} with a duplicate set of InnerDicts)."
+    )
+    max_logged_rows = STEP_BUILD_OUTERDICT_EXCLUDED_LOG_MAX_ROWS
+    for namekey, _ in excluded_items[:max_logged_rows]:
+        owner = excluded_owner.get((namekey.first_name, namekey.last_name))
+        excluded_label = f"first={namekey.first_name}, last={namekey.last_name}"
+        if owner is None:
+            log(f"Excluded NameKey: {excluded_label}; no InnerDicts")
+        else:
+            log(
+                f"Excluded NameKey: {excluded_label}; "
+                f"kept NameKey: first={owner.first_name}, last={owner.last_name}"
+            )
+    if len(excluded_items) > max_logged_rows:
+        log(more_excluded_message(len(excluded_items) - max_logged_rows, "key"))
+    return active, excluded
+
+
+def _persist_excluded_mask(conn: duckdb.DuckDBPyConnection, excluded: OuterDict) -> None:
+    serialized = excluded.to_serializable()
+    mask_df = pd.DataFrame(
+        {
+            KTP_NAMEKEY_COL: list(serialized),
+            KTP_INNERDICT_JSONLINES_COL: [dumps_jsonlines(rows) for rows in serialized.values()],
+        },
+        dtype="string",
+    )
+    register_frame(conn, "outerdict_mask_excluded_frame", mask_df)
+    conn.execute(
+        f"CREATE OR REPLACE TABLE {OUTERDICT_MASK_EXCLUDED_TABLE} "
+        "AS SELECT * FROM outerdict_mask_excluded_frame"
+    )
+    conn.execute("DROP TABLE IF EXISTS outerdict_mask_excluded_frame")
+    conn.execute(
+        f"""
+        CREATE OR REPLACE VIEW {OUTERDICT_MASK_EXCLUDED_NAME_VIEW} AS
+        SELECT
+            "{KTP_NAMEKEY_COL}",
+            json_extract_string(
+                "{KTP_NAMEKEY_COL}", '$."{KTP_FIRST_NAME_COL}"'
+            ) AS "{KTP_FIRST_NAME_COL}",
+            json_extract_string(
+                "{KTP_NAMEKEY_COL}", '$."{KTP_LAST_NAME_COL}"'
+            ) AS "{KTP_LAST_NAME_COL}"
+        FROM {OUTERDICT_MASK_EXCLUDED_TABLE}
+        """
+    )
+
+
 def run(context: PipelineContext) -> StepResult:
     if context.outer_dict is None:
         raise ValueError("OuterDict not initialized. Run build_outerdict first.")
@@ -1343,6 +1473,17 @@ def run(context: PipelineContext) -> StepResult:
         if context_log:
             context_log(msg, "cyan")
 
+    if context_log:
+        context_log(outerdict_keys_message(len(list(outer_dict.keys()))), "green")
+    outer_dict, outer_dict_excluded = _exclude_later_equal_source_sets(outer_dict, log)
+    _persist_excluded_mask(conn, outer_dict_excluded)
+    log(
+        archived_outerdict_message(
+            "excluded-NameKey OuterDict mask",
+            len(list(outer_dict_excluded.keys())),
+            f"{OUTERDICT_MASK_EXCLUDED_TABLE} / {OUTERDICT_MASK_EXCLUDED_NAME_VIEW}",
+        )
+    )
     on_build_progress, on_conversion_progress = _make_card_progress_callbacks(config, log)
 
     subset_items, state_by_source_key = _launcher_subset_items_and_states(
@@ -1354,7 +1495,7 @@ def run(context: PipelineContext) -> StepResult:
         log=log,
     )
 
-    artifacts: dict[str, Any] = {}
+    artifacts: dict[str, Any] = {"outer_dict_excluded": outer_dict_excluded}
     messages: list[str] = []
     diagnostics: list[str] = []
     if subset_mode in CARD_PARTITION_ARTIFACT_MODES:

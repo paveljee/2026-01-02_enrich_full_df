@@ -17,6 +17,8 @@ from src.helpers.schema import (
     CARD_PARTITION_REVIEW_VIEW,
     CARD_PARTITION_TABLE,
     DOCX_OUTPUT_VIEW,
+    OUTERDICT_MASK_EXCLUDED_NAME_VIEW,
+    OUTERDICT_MASK_EXCLUDED_TABLE,
     PARQUET_OUTPUT_VIEW,
     XLSX_OUTPUT_VIEW,
 )
@@ -36,6 +38,7 @@ from src.helpers.vars import (
     KTP_FRAGMENT_TYPE_COL,
     KTP_HCR_PRIMARY_AFFILIATIONS_COL,
     KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+    KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
     KTP_PARTITION_COL,
@@ -132,6 +135,7 @@ def _docx_inner(*, complete: bool = True) -> InnerDict:
 def _sciscinet_inner(fragment: str = "A1") -> InnerDict:
     return _inner(
         {
+            KTP_FILENAME_COL: json.dumps(["author_details.parquet"]),
             KTP_SSNAD_FILENAME_COL: "author_details.parquet",
             KTP_FRAGMENT_COL: fragment,
             KTP_FRAGMENT_TYPE_COL: "author_id",
@@ -379,7 +383,12 @@ def test_run_mode4_selects_and_publishes_without_partition_db_writes(
         pandoc_reference_docx=Path("/fake/reference.docx"),
     )
     log_messages: list[str] = []
+    log_styles: list[str] = []
     zip_names: list[str] = []
+
+    def capture_log(message: str, style: str) -> None:
+        log_messages.append(message)
+        log_styles.append(style)
 
     def fake_write_cards_zip(
         cards: dict[str, str],
@@ -402,18 +411,25 @@ def test_run_mode4_selects_and_publishes_without_partition_db_writes(
         return output_dir / zip_name
 
     monkeypatch.setattr(step10, "write_cards_zip", fake_write_cards_zip)
-    context = cast(
-        PipelineContext,
-        SimpleNamespace(
-            outer_dict=outer_dict,
-            config=config,
-            conn=None,
-            resources=resources,
-            log=lambda message, _style: log_messages.append(message),
-        ),
-    )
-
-    result = step10.run(context)
+    conn = duckdb.connect(":memory:")
+    try:
+        context = cast(
+            PipelineContext,
+            SimpleNamespace(
+                outer_dict=outer_dict,
+                config=config,
+                conn=conn,
+                resources=resources,
+                log=capture_log,
+            ),
+        )
+        result = step10.run(context)
+        mask_rows = conn.execute(f"SELECT * FROM {OUTERDICT_MASK_EXCLUDED_TABLE}").fetchall()
+        mask_view_rows = conn.execute(
+            f"SELECT * FROM {OUTERDICT_MASK_EXCLUDED_NAME_VIEW}"
+        ).fetchall()
+    finally:
+        conn.close()
 
     cards = result.artifacts["cards"]
     assert len(cards) == 1
@@ -421,6 +437,19 @@ def test_run_mode4_selects_and_publishes_without_partition_db_writes(
     assert "Subset applied: mode 4" in next(iter(cards.values()))
     assert zip_names == ["HCR_combined_cards.zip"]
     assert result.artifacts["zip_path"] == Path("/no-write/HCR_combined_cards.zip")
+    assert result.artifacts["outer_dict_excluded"].to_serializable() == {}
+    assert mask_rows == []
+    assert mask_view_rows == []
+    assert log_messages[0] == "OuterDict keys: 2"
+    assert log_styles[:3] == ["green", "cyan", "cyan"]
+    assert log_messages[1] == (
+        "Exclude NameKeys before card build: 0 key(s) "
+        "(0 with no InnerDicts; 0 with a duplicate set of InnerDicts)."
+    )
+    assert log_messages[2] == (
+        "Archive excluded-NameKey OuterDict mask: 0 key(s) in "
+        "outerdict_mask_excluded / outerdict_mask_namekeys_excluded."
+    )
     assert result.messages[-2:] == [
         "Cards generated: 1",
         "Output zip: /no-write/HCR_combined_cards.zip",
@@ -430,6 +459,74 @@ def test_run_mode4_selects_and_publishes_without_partition_db_writes(
     assert "Building cards from selected subset" in log_messages
     assert any("Card build progress" in message for message in log_messages)
     assert any("Output write progress" in message for message in log_messages)
+
+
+def test_equal_source_sets_keep_first_pilot_draw_and_exclude_empty_keys() -> None:
+    first = _name("Ada", "First")
+    later = _name("Ada", "Later")
+    different = _name("Ada", "Different")
+    empty = _name("Ada", "Empty")
+    outer = OuterDict.from_name_keys([later, different, empty, first])
+
+    for namekey, draw in ((first, "pilot.2"), (later, "pilot.10"), (different, "1")):
+        outer.add_inner(namekey, _inner({
+            KTP_FILENAME_COL: "hcr.xlsx",
+            KTP_FRAGMENT_TYPE_COL: "excel_row",
+            KTP_FRAGMENT_COL: 11,
+            DRAW_LABEL: draw,
+        }))
+    for namekey, draw in ((first, "pilot.2"), (later, "pilot.10")):
+        outer.add_inner(namekey, _inner({
+            KTP_FILENAME_COL: "extra.docx",
+            KTP_FRAGMENT_TYPE_COL: "docx_row",
+            KTP_FRAGMENT_COL: 7,
+            DRAW_LABEL: draw,
+        }))
+
+    messages: list[str] = []
+    active, excluded = step10._exclude_later_equal_source_sets(outer, messages.append)
+
+    assert list(active.keys()) == [different.to_json_key(), first.to_json_key()]
+    assert list(excluded.keys()) == [later.to_json_key(), empty.to_json_key()]
+    assert excluded.to_serializable() == {
+        later.to_json_key(): [
+            {
+                KTP_FILENAME_COL: "hcr.xlsx",
+                KTP_FRAGMENT_COL: {"type": "excel_row", "excel_row": 11},
+            },
+            {
+                KTP_FILENAME_COL: "extra.docx",
+                KTP_FRAGMENT_COL: {"type": "docx_row", "docx_row": 7},
+            },
+        ],
+        empty.to_json_key(): [],
+    }
+    assert messages == [
+        "Exclude NameKeys before card build: 2 key(s) "
+        "(1 with no InnerDicts; 1 with a duplicate set of InnerDicts).",
+        "Excluded NameKey: first=Ada, last=Later; kept NameKey: first=Ada, last=First",
+        "Excluded NameKey: first=Ada, last=Empty; no InnerDicts",
+    ]
+
+    conn = duckdb.connect(":memory:")
+    try:
+        step10._persist_excluded_mask(conn, excluded)
+        row = conn.execute(
+            f'SELECT "{KTP_INNERDICT_JSONLINES_COL}" FROM {OUTERDICT_MASK_EXCLUDED_TABLE} '
+            f'WHERE "{KTP_NAMEKEY_COL}" = ?',
+            [later.to_json_key()],
+        ).fetchone()
+        assert row is not None
+        assert [json.loads(line) for line in row[0].splitlines()] == (
+            excluded.to_serializable()[later.to_json_key()]
+        )
+        assert conn.execute(
+            f'SELECT "{KTP_FIRST_NAME_COL}", "{KTP_LAST_NAME_COL}" '
+            f'FROM {OUTERDICT_MASK_EXCLUDED_NAME_VIEW} '
+            f'ORDER BY "{KTP_LAST_NAME_COL}"'
+        ).fetchall() == [("Ada", "Empty"), ("Ada", "Later")]
+    finally:
+        conn.close()
 
 
 def _create_relation(

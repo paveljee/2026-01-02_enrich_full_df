@@ -18,6 +18,8 @@ OUTERDICT_STUB_TABLE = "outerdict_stub"
 OUTERDICT_NAME_VIEW = "outerdict_namekeys"
 OUTERDICT_EXCLUDED_STUB_TABLE = "outerdict_stub_excluded"
 OUTERDICT_EXCLUDED_NAME_VIEW = "outerdict_namekeys_excluded"
+OUTERDICT_MASK_EXCLUDED_TABLE = "outerdict_mask_excluded"
+OUTERDICT_MASK_EXCLUDED_NAME_VIEW = "outerdict_mask_namekeys_excluded"
 REGISTERED_RESOURCES_TABLE = "registered_resources"
 
 XLSX_MATCH_VIEW = "xlsx_matches"
