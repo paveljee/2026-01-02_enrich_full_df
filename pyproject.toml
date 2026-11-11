@@ -314,52 +314,126 @@ print(f"Produced diff and rendered with diff2html-cli to {str(out)!r}")
 cwd = "."
 
 [tool.pixi.tasks.publish]
-description = "Republish native Step 10 cards from completed pipeline state."
+description = "Republish Step 10 cards from the completed DB without changing pipeline state."
 cmd = """
 python -c '
 import argparse
 from pathlib import Path
 
+import duckdb
+
 from src.helpers.config import PipelineConfig
-from src.helpers.init_pipeline import init_pipeline
-from src.helpers.repl_runtime import dump_artifacts
-from src.helpers.vars import STEP_ORDER, STEP_BUILD_CARDS
-from src.steps import STEP_REGISTRY
+from src.helpers.data_models import FragmentType, ResourceGroup
+from src.helpers.duckdb_utils import (
+    append_innerdicts_from_jsonlines_table,
+    duckdb_quote_identifier,
+)
+from src.helpers.init_pipeline import _load_outerdict_stub
+from src.helpers.procedures import DocxMatchProcedure, ParquetMatchProcedure, XlsxMatchProcedure
+from src.helpers.schema import (
+    CARD_PARTITION_REVIEW_ROWS_TABLE,
+    CARD_PARTITION_TABLE,
+    DOCX_INNERDICT_TABLE,
+    OUTERDICT_STUB_TABLE,
+    PARQUET_INNERDICT_TABLE,
+    XLSX_INNERDICT_TABLE,
+)
+from src.helpers.vars import CARD_PARTITION_ARTIFACT_MODES, KTP_NAMEKEY_COL
+from src.steps.step_10_build_cards import (
+    _card_publication_messages,
+    _launcher_build_cards,
+    _launcher_subset_items_and_states,
+    _launcher_write_cards_zip,
+    _make_card_progress_callbacks,
+    _resolve_subset_mode,
+)
 
 parser = argparse.ArgumentParser(prog="pixi run publish")
 parser.add_argument("target", choices=["all"])
 parser.add_argument("--config", required=True, type=Path)
 config_path = parser.parse_args().config
 config = PipelineConfig.from_json(config_path)
-for path in (config.db_file, config.state_file):
-    if not path.is_file():
-        raise FileNotFoundError(f"Completed pipeline input not found: {path}")
+if not config.db_file.is_file():
+    raise FileNotFoundError(f"Completed pipeline DB not found: {config.db_file}")
+mode, mode_desc = _resolve_subset_mode(config)
 
-initialized = init_pipeline(
-    argparse.Namespace(config=config_path, new=False),
-    interactive=False,
-    reset_confirmed=False,
-)
-context = initialized.context
+
+def log(message: str) -> None:
+    print(message, flush=True)
+
+
+on_build_progress, on_conversion_progress = _make_card_progress_callbacks(config, log)
+
+
+conn = duckdb.connect(str(config.db_file), read_only=True)
 try:
-    missing = [step for step in STEP_ORDER if not context.manager.is_done(step)]
-    if missing:
-        raise ValueError(f"Pipeline steps not completed: {missing}")
-    context.log = lambda message, _style: print(message, flush=True)
-    context.conn.execute("BEGIN")
-    try:
-        result = STEP_REGISTRY[STEP_BUILD_CARDS](context)
-        context.conn.execute("COMMIT")
-    except Exception:
-        context.conn.execute("ROLLBACK")
-        raise
-    context.diagnostics.add_section(STEP_BUILD_CARDS, result.diagnostics)
-    dump_artifacts(context, STEP_BUILD_CARDS, result.artifacts)
-    for message in result.messages:
-        print(message, flush=True)
+    # Step 10 run() persists partitions; reuse its pure selection and card helpers here.
+    outer_dict = _load_outerdict_stub(conn, table_name=OUTERDICT_STUB_TABLE)
+    for table_name, procedure in (
+        (XLSX_INNERDICT_TABLE, XlsxMatchProcedure()),
+        (DOCX_INNERDICT_TABLE, DocxMatchProcedure()),
+        (PARQUET_INNERDICT_TABLE, ParquetMatchProcedure()),
+    ):
+        append_innerdicts_from_jsonlines_table(
+            conn, table_name=table_name, outer_dict=outer_dict, procedure=procedure
+        )
+
+    registry = conn.execute(
+        "SELECT resource_name, resource_group, fragment_type FROM registered_resources"
+    ).fetchall()
+    sciscinet_filenames = {
+        name for name, group, _fragment in registry
+        if group == ResourceGroup.SCISCINET_HF.value
+    }
+    docx_filenames = {
+        name for name, group, fragment in registry
+        if group == ResourceGroup.KTP_MANUAL_EXTRACTIONS.value
+        and fragment == FragmentType.DOCX_ROW.value
+    }
+    selected_items, _state_by_source_key = _launcher_subset_items_and_states(
+        outer_dict,
+        subset_mode=mode,
+        subset_mode_desc=mode_desc,
+        sciscinet_filenames=sciscinet_filenames,
+        docx_filenames=docx_filenames,
+        log=log,
+    )
+    if mode in CARD_PARTITION_ARTIFACT_MODES:
+        stored = conn.execute(
+            f"SELECT {duckdb_quote_identifier(KTP_NAMEKEY_COL)}, "
+            f"card_subset_mode FROM {CARD_PARTITION_TABLE}"
+        ).fetchall()
+        selected_keys = {name_key.to_json_key() for name_key, _inner in selected_items}
+        if (
+            any(stored_mode != mode for _key, stored_mode in stored)
+            or len(stored) != len(selected_keys)
+            or {key for key, _stored_mode in stored} != selected_keys
+        ):
+            raise ValueError("Stored card partitions do not match the configured subset mode")
+        log(f"Card partition rows: {len(stored)}")
+        review_count = conn.execute(
+            f"SELECT COUNT(*) FROM {CARD_PARTITION_REVIEW_ROWS_TABLE}"
+        ).fetchone()
+        assert review_count is not None
+        log(f"Card partition review rows: {review_count[0]}")
 finally:
-    initialized.monitor.stop()
-    context.manager.close()
+    conn.close()
+
+cards = _launcher_build_cards(
+    config,
+    selected_items,
+    subset_mode=mode,
+    subset_mode_desc=mode_desc,
+    log=log,
+    on_build_progress=on_build_progress,
+)
+zip_path = _launcher_write_cards_zip(
+    config,
+    cards,
+    on_conversion_progress=on_conversion_progress,
+)
+for message in _card_publication_messages(cards, zip_path):
+    log(message)
 '
 """
 cwd = "."

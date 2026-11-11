@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Callable, cast
 
 import duckdb
 import pandas as pd
+from pytest import MonkeyPatch
 
-from src.helpers.data_models import InnerDict, NameKey
+from src.helpers.context import PipelineContext
+from src.helpers.data_models import FragmentType, InnerDict, NameKey, OuterDict, ResourceGroup
 from src.helpers.duckdb_utils import register_frame
 from src.helpers.schema import (
     CARD_PARTITION_REVIEW_ROWS_TABLE,
@@ -334,6 +339,97 @@ def test_mode0_partition_rows_include_manual_review_and_subset1_entries() -> Non
 
 def test_partition_artifact_modes_include_all_and_subset_complements() -> None:
     assert CARD_PARTITION_ARTIFACT_MODES == {0, 1, 2}
+
+
+def test_run_mode4_selects_and_publishes_without_partition_db_writes(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    selected_name = _name("Ada", "Review")
+    excluded_name = _name("Ada", "Complete")
+    outer_dict = OuterDict.from_name_keys([selected_name, excluded_name])
+    outer_dict.add_inner(selected_name, _xlsx_inner(exact=False))
+    outer_dict.add_inner(excluded_name, _xlsx_inner())
+    outer_dict.add_inner(excluded_name, _sciscinet_inner())
+
+    sciscinet_resource = SimpleNamespace(
+        name="author_details.parquet",
+        group=ResourceGroup.SCISCINET_HF,
+        fragment_type=FragmentType.AUTHOR_ID,
+    )
+    other_resource = SimpleNamespace(
+        name="openalex_author_search_log.jsonl",
+        group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
+        fragment_type=FragmentType.CSV_ROW,
+    )
+    resources = SimpleNamespace(
+        parquet_resources={sciscinet_resource.name: sciscinet_resource},
+        xlsx_resources={},
+        world_bank_resource=other_resource,
+        docx_resources={},
+        openalex_author_search_log_resource=other_resource,
+        openalex_paper_title_log_resource=other_resource,
+    )
+    config = SimpleNamespace(
+        card_subset_mode=4,
+        timezone="UTC",
+        total_draws=1,
+        files_config={"hcr_xlsx_2024": {"path": "/fake/HCR/HCR.xlsx"}},
+        output_dir=Path("/no-write"),
+        output_format="txt",
+        pandoc_reference_docx=Path("/fake/reference.docx"),
+    )
+    log_messages: list[str] = []
+    zip_names: list[str] = []
+
+    def fake_write_cards_zip(
+        cards: dict[str, str],
+        output_dir: Path,
+        zip_name: str,
+        *,
+        output_format: str,
+        reference_docx: Path,
+        docx_workers: int,
+        progress_callback: Callable[[int, int, str], None] | None,
+    ) -> Path:
+        assert len(cards) == 1
+        assert output_dir == config.output_dir
+        assert output_format == "txt"
+        assert reference_docx == config.pandoc_reference_docx
+        assert docx_workers >= 1
+        assert progress_callback is not None
+        progress_callback(1, 1, next(iter(cards)))
+        zip_names.append(zip_name)
+        return output_dir / zip_name
+
+    monkeypatch.setattr(step10, "write_cards_zip", fake_write_cards_zip)
+    context = cast(
+        PipelineContext,
+        SimpleNamespace(
+            outer_dict=outer_dict,
+            config=config,
+            conn=None,
+            resources=resources,
+            log=lambda message, _style: log_messages.append(message),
+        ),
+    )
+
+    result = step10.run(context)
+
+    cards = result.artifacts["cards"]
+    assert len(cards) == 1
+    assert "Review, Ada" in next(iter(cards.values()))
+    assert "Subset applied: mode 4" in next(iter(cards.values()))
+    assert zip_names == ["HCR_combined_cards.zip"]
+    assert result.artifacts["zip_path"] == Path("/no-write/HCR_combined_cards.zip")
+    assert result.messages[-2:] == [
+        "Cards generated: 1",
+        "Output zip: /no-write/HCR_combined_cards.zip",
+    ]
+    assert any(message.startswith("Card subset mode 4:") for message in log_messages)
+    assert any("selected for current mode" in message for message in log_messages)
+    assert "Building cards from selected subset" in log_messages
+    assert any("Card build progress" in message for message in log_messages)
+    assert any("Output write progress" in message for message in log_messages)
 
 
 def _create_relation(

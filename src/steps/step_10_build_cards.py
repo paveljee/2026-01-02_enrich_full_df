@@ -5,13 +5,14 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import duckdb
 import pandas as pd
 
 from ..helpers.cards import build_cards, write_cards_zip
+from ..helpers.config import PipelineConfig
 from ..helpers.context import PipelineContext, StepResult
 from ..helpers.data_models import FragmentType, InnerDict, NameKey, OuterDict, ResourceGroup
 from ..helpers.duckdb_utils import (
@@ -1155,59 +1156,29 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
     return columns
 
 
-def _build_selected_outer_dict(
-    selected_items: list[tuple[NameKey, tuple[InnerDict, ...]]]
-) -> OuterDict:
-    subset_outer = OuterDict.from_name_keys([name_key for name_key, _ in selected_items])
-    for name_key, inner_dicts in selected_items:
-        for inner in inner_dicts:
-            subset_outer.add_inner(name_key, inner)
-    return subset_outer
-
-
-def run(context: PipelineContext) -> StepResult:
-    if context.outer_dict is None:
-        raise ValueError("OuterDict not initialized. Run build_outerdict first.")
-    outer_dict = context.outer_dict
-    subset_mode = int(getattr(context.config, "card_subset_mode", 0))
+def _resolve_subset_mode(config: PipelineConfig) -> tuple[int, str]:
+    subset_mode = int(getattr(config, "card_subset_mode", 0))
     if subset_mode not in CARD_BUILD_SUBSET_DESCRIPTIONS:
         raise ValueError(
             f"Unsupported card_subset_mode={subset_mode}. Supported: "
             f"{sorted(CARD_BUILD_SUBSET_DESCRIPTIONS.keys())}"
         )
     subset_mode_desc = CARD_BUILD_SUBSET_DESCRIPTIONS[subset_mode]
+    return subset_mode, subset_mode_desc
 
-    def log(msg: str) -> None:
-        if context.log:
-            context.log(msg, "cyan")
 
-    def progress_bar(done: int, total: int, width: int = 24) -> str:
-        if total <= 0:
-            return "[" + ("-" * width) + "]"
-        filled = min(width, int(width * done / total))
-        return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
-
-    def hcr_bundle_name() -> str:
-        hcr_paths = [
-            Path(meta["path"])
-            for key, meta in context.config.files_config.items()
-            if key.startswith(HCR_XLSX_KEY_PREFIX) and "path" in meta
-        ]
-        if not hcr_paths:
-            return "hcr_xlsx_inputs"
-        parent_names = {path.parent.name for path in hcr_paths}
-        if len(parent_names) == 1:
-            return next(iter(parent_names))
-        return "hcr_xlsx_inputs"
-
-    def on_build_progress(done: int, total: int, _card_id: str) -> None:
-        log(f"Card build progress {progress_bar(done, total)} {done}/{total}")
-
-    def on_conversion_progress(done: int, total: int, _card_id: str) -> None:
-        phase = "DOCX conversion" if context.config.output_format == "docx" else "Output write"
-        log(f"{phase} progress {progress_bar(done, total)} {done}/{total}")
-
-    sciscinet_filenames, docx_filenames = _resource_filename_sets(context)
+def _launcher_subset_items_and_states(
+    outer_dict: OuterDict,
+    *,
+    subset_mode: int,
+    subset_mode_desc: str,
+    sciscinet_filenames: set[str],
+    docx_filenames: set[str],
+    log: Callable[[str], None],
+) -> tuple[
+    list[tuple[NameKey, tuple[InnerDict, ...]]],
+    dict[str, CardPartitionRuleState],
+]:
     subset_mode_items, state_by_source_key, stats = _subset_items_and_states(
         outer_dict,
         sciscinet_filenames=sciscinet_filenames,
@@ -1253,26 +1224,18 @@ def run(context: PipelineContext) -> StepResult:
         f"mode_4 description: {CARD_BUILD_SUBSET_DESCRIPTIONS[4]}",
     ]
     log("\n".join(table_lines))
+    return subset_items, state_by_source_key
 
-    artifacts: dict[str, Any] = {}
-    messages: list[str] = []
-    diagnostics: list[str] = []
-    if subset_mode in CARD_PARTITION_ARTIFACT_MODES:
-        partition_df = _partition_rows_df(
-            subset_items,
-            state_by_source_key=state_by_source_key,
-            subset_mode=subset_mode,
-        )
-        _materialize_partition_table(context.conn, partition_df)
-        _create_partition_review_view(context.conn)
-        review_df = context.conn.execute(f"SELECT * FROM {CARD_PARTITION_REVIEW_VIEW}").df()
-        artifacts["card_partitions_df"] = partition_df
-        artifacts["card_partition_review_df"] = review_df
-        messages.append(f"Card partition rows: {len(partition_df)}")
-        messages.append(f"Card partition review rows: {len(review_df)}")
-        diagnostics.append(f"Card partition rows: {len(partition_df)}")
-        diagnostics.append(f"Card partition review rows: {len(review_df)}")
 
+def _launcher_build_cards(
+    config: PipelineConfig,
+    subset_items: list[tuple[NameKey, tuple[InnerDict, ...]]],
+    *,
+    subset_mode: int,
+    subset_mode_desc: str,
+    log: Callable[[str], None],
+    on_build_progress: Callable[[int, int, str], None] | None = None,
+) -> dict[str, str]:
     excluded_cols = {
         KTP_FILENAME_COL,
         KTP_NAMEKEY_COL,
@@ -1283,29 +1246,150 @@ def run(context: PipelineContext) -> StepResult:
     }
 
     selected_outer_dict = _build_selected_outer_dict(subset_items)
-    intro_date = datetime.now(ZoneInfo(context.config.timezone)).strftime("%B %d, %Y")
+    intro_date = datetime.now(ZoneInfo(config.timezone)).strftime("%B %d, %Y")
     subset_intro_note = f"Subset applied: mode {subset_mode} ({subset_mode_desc})."
     intro = f"{CARD_INTRODUCTION.format(intro_date)}\n{subset_intro_note}"
     log("Building cards from selected subset")
     cards = build_cards(
         selected_outer_dict,
-        total_draws=context.config.total_draws,
+        total_draws=config.total_draws,
         intro=intro,
         excluded_cols=excluded_cols,
         progress_callback=on_build_progress,
     )
+    return cards
+
+
+def _launcher_write_cards_zip(
+    config: PipelineConfig,
+    cards: dict[str, str],
+    *,
+    on_conversion_progress: Callable[[int, int, str], None] | None = None,
+) -> Path:
+    def hcr_bundle_name() -> str:
+        hcr_paths = [
+            Path(meta["path"])
+            for key, meta in config.files_config.items()
+            if key.startswith(HCR_XLSX_KEY_PREFIX) and "path" in meta
+        ]
+        if not hcr_paths:
+            return "hcr_xlsx_inputs"
+        parent_names = {path.parent.name for path in hcr_paths}
+        if len(parent_names) == 1:
+            return next(iter(parent_names))
+        return "hcr_xlsx_inputs"
+
     zip_path = write_cards_zip(
         cards,
-        context.config.output_dir,
+        config.output_dir,
         f"{hcr_bundle_name()}_combined_cards.zip",
-        output_format=context.config.output_format,
-        reference_docx=context.config.pandoc_reference_docx,
+        output_format=config.output_format,
+        reference_docx=config.pandoc_reference_docx,
         docx_workers=max(1, min(8, os.cpu_count() or 1)),
         progress_callback=on_conversion_progress,
     )
+    return zip_path
+
+
+def _card_publication_messages(cards: dict[str, str], zip_path: Path) -> list[str]:
+    return [f"Cards generated: {len(cards)}", f"Output zip: {zip_path}"]
+
+
+def _make_card_progress_callbacks(
+    config: PipelineConfig,
+    log: Callable[[str], None],
+) -> tuple[
+    Callable[[int, int, str], None],
+    Callable[[int, int, str], None],
+]:
+    def progress_bar(done: int, total: int, width: int = 24) -> str:
+        if total <= 0:
+            return "[" + ("-" * width) + "]"
+        filled = min(width, int(width * done / total))
+        return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
+
+    def on_build_progress(done: int, total: int, _card_id: str) -> None:
+        log(f"Card build progress {progress_bar(done, total)} {done}/{total}")
+
+    def on_conversion_progress(done: int, total: int, _card_id: str) -> None:
+        phase = "DOCX conversion" if config.output_format == "docx" else "Output write"
+        log(f"{phase} progress {progress_bar(done, total)} {done}/{total}")
+
+    return on_build_progress, on_conversion_progress
+
+
+def _build_selected_outer_dict(
+    selected_items: list[tuple[NameKey, tuple[InnerDict, ...]]]
+) -> OuterDict:
+    subset_outer = OuterDict.from_name_keys([name_key for name_key, _ in selected_items])
+    for name_key, inner_dicts in selected_items:
+        for inner in inner_dicts:
+            subset_outer.add_inner(name_key, inner)
+    return subset_outer
+
+
+def run(context: PipelineContext) -> StepResult:
+    if context.outer_dict is None:
+        raise ValueError("OuterDict not initialized. Run build_outerdict first.")
+    outer_dict = context.outer_dict
+    config = context.config
+    subset_mode, subset_mode_desc = _resolve_subset_mode(config)
+
+    conn = context.conn
+    context_log = context.log
+    sciscinet_filenames, docx_filenames = _resource_filename_sets(context)
+
+    def log(msg: str) -> None:
+        if context_log:
+            context_log(msg, "cyan")
+
+    on_build_progress, on_conversion_progress = _make_card_progress_callbacks(config, log)
+
+    subset_items, state_by_source_key = _launcher_subset_items_and_states(
+        outer_dict,
+        subset_mode=subset_mode,
+        subset_mode_desc=subset_mode_desc,
+        sciscinet_filenames=sciscinet_filenames,
+        docx_filenames=docx_filenames,
+        log=log,
+    )
+
+    artifacts: dict[str, Any] = {}
+    messages: list[str] = []
+    diagnostics: list[str] = []
+    if subset_mode in CARD_PARTITION_ARTIFACT_MODES:
+        partition_df = _partition_rows_df(
+            subset_items,
+            state_by_source_key=state_by_source_key,
+            subset_mode=subset_mode,
+        )
+        _materialize_partition_table(conn, partition_df)
+        _create_partition_review_view(conn)
+        review_df = conn.execute(f"SELECT * FROM {CARD_PARTITION_REVIEW_VIEW}").df()
+        artifacts["card_partitions_df"] = partition_df
+        artifacts["card_partition_review_df"] = review_df
+        messages.append(f"Card partition rows: {len(partition_df)}")
+        messages.append(f"Card partition review rows: {len(review_df)}")
+        diagnostics.append(f"Card partition rows: {len(partition_df)}")
+        diagnostics.append(f"Card partition review rows: {len(review_df)}")
+
+    cards = _launcher_build_cards(
+        config,
+        subset_items,
+        subset_mode=subset_mode,
+        subset_mode_desc=subset_mode_desc,
+        log=log,
+        on_build_progress=on_build_progress,
+    )
+
+    zip_path = _launcher_write_cards_zip(
+        config,
+        cards,
+        on_conversion_progress=on_conversion_progress,
+    )
 
     artifacts.update({"cards": cards, "zip_path": zip_path})
-    messages.extend([f"Cards generated: {len(cards)}", f"Output zip: {zip_path}"])
+    messages.extend(_card_publication_messages(cards, zip_path))
     diagnostics.extend([f"Cards: {len(cards)}", f"Output: {zip_path}"])
     return StepResult(
         step_id=STEP_BUILD_CARDS,
