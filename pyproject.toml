@@ -362,6 +362,25 @@ finally:
     context.manager.close()
 '
 """
+cwd = "."
+
+[tool.pixi.tasks.ramwatch]
+description = "Print host occupied RAM plus swap once per second."
+cmd = '''
+python -u -c '
+from time import sleep
+from src.helpers.resource_monitor import occupied_ram_plus_swap_bytes
+
+try:
+    while True:
+        print(f"{occupied_ram_plus_swap_bytes() / 1024**3:.2f} GiB", flush=True)
+        sleep(1)
+except KeyboardInterrupt:
+    pass
+'
+'''
+cwd = "."
+
 
 [tool.pixi.tasks.openalex-relay]
 description = "Serve file-backed GET requests to api.openalex.org."

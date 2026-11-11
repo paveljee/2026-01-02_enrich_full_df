@@ -139,12 +139,12 @@ def run_reproduction(args: argparse.Namespace) -> Path | None:
     m_table = Table(title="Execution Metrics", box=box.SIMPLE)
     m_table.add_column("Metric", style="cyan")
     m_table.add_column("Value", style="magenta")
-    m_table.add_row("Peak RAM Usage", f"{peak_ram:.2f} GB")
+    m_table.add_row("Peak host occupied RAM + swap", f"{peak_ram:.2f} GiB")
     if card_count is not None:
         m_table.add_row("Cards", str(card_count))
     console.print(m_table)
     log("Execution Metrics", style="cyan")
-    log(f"Peak RAM Usage: {peak_ram:.2f} GB", style="magenta")
+    log(f"Peak host occupied RAM + swap: {peak_ram:.2f} GiB", style="magenta")
     if card_count is not None:
         log(f"Cards: {card_count}", style="magenta")
     if context is not None:
