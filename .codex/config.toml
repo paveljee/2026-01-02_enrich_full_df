@@ -18,6 +18,7 @@
 
 # OpenAI Codex (v 0.163.0)
 model = "gpt-6-sol"
+model_context_window = 1050000
 model_reasoning_effort = "xhigh"
 model_reasoning_summary = "detailed"
 personality = "none"

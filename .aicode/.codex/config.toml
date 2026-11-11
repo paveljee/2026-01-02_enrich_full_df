@@ -13,6 +13,7 @@
 # OpenAI Codex (v0.163.0)
 model = "gpt-6-sol"
 service_tier = "default"
+model_context_window = 1050000
 model_reasoning_effort = "xhigh"
 personality = "none"
 web_search = "disabled"
