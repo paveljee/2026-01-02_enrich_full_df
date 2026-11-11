@@ -313,6 +313,57 @@ print(f"Produced diff and rendered with diff2html-cli to {str(out)!r}")
 """
 cwd = "."
 
+[tool.pixi.tasks.publish]
+description = "Republish native Step 10 cards from completed pipeline state."
+cmd = """
+python -c '
+import argparse
+from pathlib import Path
+
+from src.helpers.config import PipelineConfig
+from src.helpers.init_pipeline import init_pipeline
+from src.helpers.repl_runtime import dump_artifacts
+from src.helpers.vars import STEP_ORDER, STEP_BUILD_CARDS
+from src.steps import STEP_REGISTRY
+
+parser = argparse.ArgumentParser(prog="pixi run publish")
+parser.add_argument("target", choices=["all"])
+parser.add_argument("--config", required=True, type=Path)
+config_path = parser.parse_args().config
+config = PipelineConfig.from_json(config_path)
+for path in (config.db_file, config.state_file):
+    if not path.is_file():
+        raise FileNotFoundError(f"Completed pipeline input not found: {path}")
+
+initialized = init_pipeline(
+    argparse.Namespace(config=config_path, new=False),
+    interactive=False,
+    reset_confirmed=False,
+)
+context = initialized.context
+try:
+    missing = [step for step in STEP_ORDER if not context.manager.is_done(step)]
+    if missing:
+        raise ValueError(f"Pipeline steps not completed: {missing}")
+    context.log = lambda message, _style: print(message, flush=True)
+    context.conn.execute("BEGIN")
+    try:
+        result = STEP_REGISTRY[STEP_BUILD_CARDS](context)
+        context.conn.execute("COMMIT")
+    except Exception:
+        context.conn.execute("ROLLBACK")
+        raise
+    context.diagnostics.add_section(STEP_BUILD_CARDS, result.diagnostics)
+    dump_artifacts(context, STEP_BUILD_CARDS, result.artifacts)
+    for message in result.messages:
+        print(message, flush=True)
+finally:
+    initialized.monitor.stop()
+    context.manager.close()
+'
+"""
+cwd = "."
+
 # ===============================
 # Default: Tasks for actual tests
 # ===============================
