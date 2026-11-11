@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
@@ -15,7 +16,7 @@ from zipfile import ZipFile
 import pandas as pd
 from lxml import etree
 
-from .data_models import InnerDict, OuterDict
+from .data_models import InnerDict, NameKey, OuterDict
 from .vars import (
     DRAW_LABEL,
     IS_A_KTP_FILENAME_COLUMN,
@@ -97,25 +98,56 @@ def build_cards(
     progress_callback: Callable[[int, int, str], None] | None = None,
     field_renderer: Callable[[InnerDict, str], str | None] | None = None,
 ) -> dict[str, str]:
-    cards: dict[str, str] = {}
-    intro_prefix = intro if intro.endswith("\n\n") else f"{intro}\n\n"
-    items = list(outer_dict.items())
-    total_cards = len(items)
-    for card_idx, (name_key, inner_dicts) in enumerate(items, start=1):
+    planned_cards: list[tuple[int, NameKey, tuple[InnerDict, ...], str, str]] = []
+    for card_idx, (name_key, inner_dicts) in enumerate(outer_dict.items(), start=1):
         draw_numbers = []
         for inner in inner_dicts:
             draw_number = inner.data.get(DRAW_LABEL)
             if draw_number is not None and not pd.isna(draw_number):
                 draw_numbers.append(str(draw_number))
         draw_numbers = sorted(set(draw_numbers))
-        if draw_numbers:
-            draw_label = ", ".join(draw_numbers)
+        draw_label = ", ".join(draw_numbers)
+        planned_cards.append((
+            card_idx,
+            name_key,
+            inner_dicts,
+            draw_label,
+            card_filename(
+                draw_label=draw_label,
+                first_name=name_key.first_name,
+                last_name=name_key.last_name,
+            ),
+        ))
+
+    cards_by_base: dict[str, list[tuple[int, NameKey, str]]] = {}
+    for card_idx, name_key, _, draw_label, base_name in planned_cards:
+        cards_by_base.setdefault(base_name, []).append((card_idx, name_key, draw_label))
+    seen_names: set[str] = set()
+    for card_idx, _, _, _, base_name in planned_cards:
+        if base_name in seen_names:
+            conflicting_cards = "; ".join(
+                f"card {other_idx} NameKey {other_key.to_json_key()} "
+                f"draw_label={other_draw_label!r}"
+                for other_idx, other_key, other_draw_label in cards_by_base[base_name]
+            )
+            message = (
+                f"Duplicate card filename {base_name!r} first detected at card {card_idx}: "
+                f"{conflicting_cards}."
+            )
+            print(message, file=sys.stderr, flush=True)
+            raise ValueError(message)
+        seen_names.add(base_name)
+
+    cards: dict[str, str] = {}
+    intro_prefix = intro if intro.endswith("\n\n") else f"{intro}\n\n"
+    total_cards = len(planned_cards)
+    for card_idx, name_key, inner_dicts, draw_label, docx_filename in planned_cards:
+        if draw_label:
             header = (
                 f"### Draw #{draw_label} of {total_draws}: "
                 f"{name_key.last_name}, {name_key.first_name}\n"
             )
         else:
-            draw_label = ""
             header = f"### {name_key.last_name}, {name_key.first_name}\n"
 
         fun_fact = ""
@@ -129,12 +161,6 @@ def build_cards(
                 )
                 break
         card = header + (fun_fact + "\n" if fun_fact else "")
-
-        docx_filename = card_filename(
-            draw_label=draw_label,
-            first_name=name_key.first_name,
-            last_name=name_key.last_name,
-        )
 
         for inner in inner_dicts:
             filename = inner.data.get(KTP_FILENAME_COL, "unknown")

@@ -146,13 +146,15 @@ def test_build_cards_field_renderer_can_replace_missing_values_and_omit_fields()
             return ""
         return None
 
-    card = next(iter(build_cards(
+    cards = build_cards(
         outer,
         total_draws=1,
         intro="Introduction",
         excluded_cols={"excluded"},
         field_renderer=render_field,
-    ).values()))
+    )
+    assert list(cards) == ["1_Ada_Lovelace"]
+    card = cards["1_Ada_Lovelace"]
 
     assert "| row | replacement |" in card
     assert "standalone_value" not in card
@@ -161,6 +163,95 @@ def test_build_cards_field_renderer_can_replace_missing_values_and_omit_fields()
     assert "excluded" not in card
     assert "excluded" not in seen
     assert "table_position" in seen
+
+
+def test_build_cards_without_draw_number_uses_name_only_filename() -> None:
+    name = NameKey(first_name="Ada", last_name="Lovelace")
+    outer = OuterDict.from_name_keys([name])
+
+    cards = build_cards(outer, total_draws=1, intro="Introduction", excluded_cols=set())
+
+    assert list(cards) == ["Ada_Lovelace"]
+    assert "### Lovelace, Ada\n" in cards["Ada_Lovelace"]
+
+
+def test_build_cards_progress_uses_planned_card_indices() -> None:
+    names = [
+        NameKey(first_name="Ada", last_name="Lovelace"),
+        NameKey(first_name="Grace", last_name="Hopper"),
+    ]
+    outer = OuterDict.from_name_keys(names)
+    outer.add_inner(
+        names[0],
+        InnerDict.from_mapping({DRAW_LABEL: 2}, DummyProcedure()),
+    )
+    progress: list[tuple[int, int, str]] = []
+
+    cards = build_cards(
+        outer,
+        total_draws=2,
+        intro="Introduction",
+        excluded_cols=set(),
+        progress_callback=lambda done, total, filename: progress.append(
+            (done, total, filename)
+        ),
+    )
+
+    assert list(cards) == ["2_Ada_Lovelace", "Grace_Hopper"]
+    assert progress == [(1, 2, "2_Ada_Lovelace"), (2, 2, "Grace_Hopper")]
+
+
+def test_build_cards_reports_first_filename_collision_before_rendering(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    names = [
+        NameKey(first_name="Ada", last_name="Lovelace-Smith"),
+        NameKey(first_name="Grace", last_name="Hopper-Smith"),
+        NameKey(first_name="Grace", last_name="HopperSmith"),
+        NameKey(first_name="Ada", last_name="LovelaceSmith"),
+        NameKey(first_name="Grace", last_name="Hopper-Smith!"),
+    ]
+    outer = OuterDict.from_name_keys(names)
+    for name in names:
+        outer.add_inner(
+            name,
+            InnerDict.from_mapping(
+                {DRAW_LABEL: 1, KTP_FILENAME_COL: "input.xlsx", "note": "render me"},
+                DummyProcedure(),
+            ),
+        )
+    rendered_fields: list[str] = []
+    progress: list[tuple[int, int, str]] = []
+
+    def render_field(_inner: InnerDict, column: str) -> str | None:
+        rendered_fields.append(column)
+        return None
+
+    with pytest.raises(ValueError) as error:
+        build_cards(
+            outer,
+            total_draws=5,
+            intro="Introduction",
+            excluded_cols=set(),
+            field_renderer=render_field,
+            progress_callback=lambda done, total, filename: progress.append(
+                (done, total, filename)
+            ),
+        )
+
+    message = str(error.value)
+    assert "Duplicate card filename '1_Grace_HopperSmith'" in message
+    assert "first detected at card 3" in message
+    for card_index in (2, 3, 5):
+        assert f"card {card_index} NameKey {names[card_index - 1].to_json_key()}" in message
+    assert "card 1 NameKey" not in message
+    assert "card 4 NameKey" not in message
+    assert "draw_label='1'" in message
+    captured = capsys.readouterr()
+    assert captured.err == message + "\n"
+    assert captured.out == ""
+    assert rendered_fields == []
+    assert progress == []
 
 
 def test_render_docx_bytes_preserves_table_linebreaks_and_adds_plain_borders(
