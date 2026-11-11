@@ -1,17 +1,57 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import duckdb
+import pandas as pd
 import pytest
 
+from src.helpers.config import MatchRuleVersion, PipelineConfig
+from src.helpers.context import PipelineContext
+from src.helpers.data_models import FragmentType, InnerDict, NameKey, OuterDict, ResourceGroup
+from src.helpers.diagnostics import DiagnosticsReport
 from src.helpers.duckdb_extensions import load_duckdb_extension_from_config_path
 from src.helpers.name_matching import xlsx_match_sql
+from src.helpers.pipeline_manager import PipelineManager
+from src.helpers.procedures import ParquetMatchProcedure
+from src.helpers.resources import PipelineResources, register_resource
+from src.helpers.schema import (
+    OUTERDICT_NAME_VIEW,
+    POPULATION_ECON_TABLE,
+    POPULATION_NAMES_TABLE,
+    POPULATION_TABLE,
+    REGISTERED_RESOURCES_TABLE,
+    SAMPLES_TABLE,
+    XLSX_MATCH_VIEW,
+)
 from src.helpers.vars import (
+    DRAW_LABEL,
+    HCR_FIRST_NAME_COL,
+    HCR_LAST_NAME_COL,
+    KTP_ECONOMIES_COL,
+    KTP_ECONOMIES_INCOME_GROUP_COL,
+    KTP_ECONOMY_MATCH_COL,
+    KTP_FILENAME_COL,
+    KTP_FIRST_NAME_COL,
+    KTP_FRAGMENT_COL,
+    KTP_HCR_FILENAME_COL,
+    KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+    KTP_HCR_ROW_NUMBER_COL,
+    KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+    KTP_LAST_NAME_COL,
+    KTP_NAMEKEY_COL,
+    KTP_POPULATION_INDEX_COL,
+    KTP_PRIORITY_COL,
+    KTP_PRIORITY_GROUP_COL,
+    KTP_SSNAD_FILENAME_COL,
     KTP_XLSX_MATCH_RULE_KEY,
     KTP_XLSX_MATCH_RULE_V1,
     KTP_XLSX_MATCH_RULE_V2,
+    REQUIRED_FILES_CONFIG_KEYS,
 )
+from src.steps import step_07_match_xlsx, step_10_build_cards
+from src.steps.step_02_load_xlsx import _build_population_table
 
 
 def _connect() -> duckdb.DuckDBPyConnection:
@@ -386,3 +426,192 @@ def test_v2_fallback_rules_apply_to_last_names() -> None:
         target_first="John",
         target_last="Smith R B",
     )
+
+
+@pytest.mark.parametrize(
+    ("first_names", "expected_match_count", "expected_filenames"),
+    [
+        (("A.B", "AB"), 4, {"7_8_AB_Lee_1", "7_8_AB_Lee_2"}),
+        (("JinRong", "JinRong "), 4, {"7_8_JinRong_Lee_1", "7_8_JinRong_Lee_2"}),
+        (("Anne-Marie", "AnneMarie"), 2, {"7_AnneMarie_Lee", "8_AnneMarie_Lee"}),
+    ],
+)
+def test_xlsx_matches_keep_distinct_namekeys_when_filenames_collide(
+    tmp_path: Path,
+    first_names: tuple[str, str],
+    expected_match_count: int,
+    expected_filenames: set[str],
+) -> None:
+    xlsx_path = tmp_path / "names.xlsx"
+    pd.DataFrame(
+        {"First Name": list(first_names), "Last Name": ["Lee", "Lee"]}
+    ).to_excel(xlsx_path, index=False)
+    author_path = tmp_path / "author_details.parquet"
+    author_path.write_bytes(b"synthetic author resource")
+    xlsx_resource = register_resource(
+        xlsx_path,
+        group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
+        fragment_type=FragmentType.EXCEL_ROW,
+    )
+    author_resource = register_resource(
+        author_path,
+        group=ResourceGroup.SCISCINET_HF,
+        fragment_type=FragmentType.AUTHOR_ID,
+    )
+    config = PipelineConfig(
+        files_config={
+            **{
+                key: {"path": str(xlsx_path), "sha256": "synthetic", "desc": "synthetic"}
+                for key in REQUIRED_FILES_CONFIG_KEYS
+            },
+            "hcr_xlsx_names": {
+                "path": str(xlsx_path),
+                "sha256": "synthetic",
+                "desc": "synthetic",
+            },
+        },
+        db_file=tmp_path / "unused.duckdb",
+        state_file=tmp_path / "state.json",
+        output_dir=tmp_path,
+        output_format="txt",
+        pandoc_reference_docx=tmp_path / "unused.docx",
+        timezone="UTC",
+        sample_seed=1,
+        sample_draw_sizes=[{"size": 2, "replace": False}],
+        pilot_xlsx_name=xlsx_path.name,
+        total_draws=8,
+        card_subset_mode=3,
+        match_rule_version=MatchRuleVersion(xlsx_name=2),
+    )
+    conn = _connect()
+    conn.execute("SET threads=1")
+    conn.execute("SET memory_limit='128MB'")
+    names = [NameKey(first_name=first, last_name="Lee") for first in first_names]
+    outer_dict = OuterDict.from_name_keys(names)
+    log_lines: list[str] = []
+    context = PipelineContext(
+        config=config,
+        manager=PipelineManager(config.state_file, config.db_file),
+        conn=conn,
+        diagnostics=DiagnosticsReport(tmp_path / "diagnostics"),
+        interactive=False,
+        artifacts_dir=tmp_path,
+        resources=PipelineResources(
+            parquet_resources={author_resource.name: author_resource},
+            xlsx_resources={xlsx_resource.name: xlsx_resource},
+            world_bank_resource=xlsx_resource,
+            docx_resources={},
+            openalex_author_search_log_resource=xlsx_resource,
+            openalex_paper_title_log_resource=xlsx_resource,
+            openalex_paper_title_parquet_resource=xlsx_resource,
+        ),
+        outer_dict=outer_dict,
+        log=lambda message, _style: log_lines.append(message),
+    )
+    try:
+        _build_population_table(
+            conn, {xlsx_resource.name: xlsx_resource}, table_name=POPULATION_TABLE
+        )
+        conn.execute(
+            f'''
+            CREATE TABLE {POPULATION_NAMES_TABLE} AS
+            SELECT "{KTP_POPULATION_INDEX_COL}",
+                   "{HCR_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
+                   "{HCR_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}"
+            FROM {POPULATION_TABLE}
+            '''
+        )
+        economy_columns = (
+            KTP_ECONOMIES_COL,
+            KTP_ECONOMIES_INCOME_GROUP_COL,
+            KTP_ECONOMY_MATCH_COL,
+            KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+            KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+            KTP_PRIORITY_COL,
+            KTP_PRIORITY_GROUP_COL,
+        )
+        conn.execute(
+            f'''
+            CREATE TABLE {POPULATION_ECON_TABLE} AS
+            SELECT "{KTP_POPULATION_INDEX_COL}",
+                   {", ".join(f'NULL::VARCHAR AS "{col}"' for col in economy_columns)}
+            FROM {POPULATION_TABLE}
+            '''
+        )
+        conn.execute(
+            f'''
+            CREATE TABLE {SAMPLES_TABLE} AS
+            SELECT "{KTP_HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
+                   "{KTP_HCR_ROW_NUMBER_COL}" AS "{KTP_FRAGMENT_COL}",
+                   CAST("{KTP_POPULATION_INDEX_COL}" + 7 AS VARCHAR) AS "{DRAW_LABEL}"
+            FROM {POPULATION_TABLE}
+            '''
+        )
+        conn.execute(
+            f'CREATE TABLE {OUTERDICT_NAME_VIEW} '
+            f'("{KTP_NAMEKEY_COL}" VARCHAR, "{KTP_FIRST_NAME_COL}" VARCHAR, '
+            f'"{KTP_LAST_NAME_COL}" VARCHAR)'
+        )
+        conn.executemany(
+            f'INSERT INTO {OUTERDICT_NAME_VIEW} VALUES (?, ?, ?)',
+            [(name.to_json_key(), name.first_name, name.last_name) for name in names],
+        )
+        conn.execute(
+            f'CREATE TABLE {REGISTERED_RESOURCES_TABLE} '
+            '(resource_name VARCHAR, fragment_type VARCHAR)'
+        )
+        conn.execute(
+            f'INSERT INTO {REGISTERED_RESOURCES_TABLE} VALUES (?, ?)',
+            [xlsx_path.name, FragmentType.EXCEL_ROW.value],
+        )
+
+        step_07_match_xlsx.run(context)
+        matched_rows = conn.execute(
+            f'SELECT "{KTP_NAMEKEY_COL}", "{DRAW_LABEL}" FROM {XLSX_MATCH_VIEW}'
+        ).fetchall()
+        assert len(matched_rows) == expected_match_count
+        assert {draw for _, draw in matched_rows} == {"7", "8"}
+        draws_by_name = {
+            name.first_name: {
+                draw for source_key, draw in matched_rows if source_key == name.to_json_key()
+            }
+            for name in names
+        }
+        if expected_match_count == 4:
+            assert list(draws_by_name.values()) == [{"7", "8"}, {"7", "8"}]
+        else:
+            assert list(draws_by_name.values()) == [{"7"}, {"8"}]
+
+        for name, marker in zip(names, ("dotted author", "compact author"), strict=True):
+            outer_dict.add_inner(
+                name,
+                InnerDict.from_mapping(
+                    {KTP_SSNAD_FILENAME_COL: author_path.name, "author_marker": marker},
+                    ParquetMatchProcedure(),
+                ),
+            )
+        result = step_10_build_cards.run(context)
+        cards = result.artifacts["cards"]
+        assert set(cards) == expected_filenames
+        collision_logs = [
+            line for line in log_lines if line.startswith("Duplicate card filename")
+        ]
+        if expected_match_count == 4:
+            assert len(collision_logs) == 2
+            for name, filename, line in zip(
+                names, sorted(expected_filenames), collision_logs, strict=True
+            ):
+                assert name.to_json_key() in line
+                assert all(other.to_json_key() in line for other in names)
+                assert filename in line
+            first, second = sorted(expected_filenames)
+            assert "dotted author" in cards[first]
+            assert "compact author" not in cards[first]
+            assert "compact author" in cards[second]
+            assert "dotted author" not in cards[second]
+        else:
+            assert collision_logs == []
+            assert "dotted author" in cards["7_AnneMarie_Lee"]
+            assert "compact author" in cards["8_AnneMarie_Lee"]
+    finally:
+        conn.close()

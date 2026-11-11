@@ -211,7 +211,7 @@ BROWSER_CHANNEL = "chrome"
 GRID_ROW_SELECTOR = ".ag-center-cols-container .ag-row"
 RUN_OUTCOME_HISTORY_ROW_SELECTOR = "tbody tr"
 OPERATOR_TARGET_DRAW_NUMBER = "146"
-GAOQUAN_SHI_NAMEKEY = NameKey(first_name="Gaoquan ", last_name="Shi")
+GAOQUAN_SHI_NAMEKEY = NameKey(first_name="Gaoquan", last_name="Shi")
 DARWIN_AF_UNIX_PATH_CAPACITY_BYTES = 104
 PYTEST_CURRENT_TEST_ENV_NAME = "PYTEST_CURRENT_TEST"
 OPERATOR_LIVE_OUTPUT = sys.__stdout__ or sys.stdout

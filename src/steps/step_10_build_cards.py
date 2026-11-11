@@ -1293,6 +1293,7 @@ def run(context: PipelineContext) -> StepResult:
         intro=intro,
         excluded_cols=excluded_cols,
         progress_callback=on_build_progress,
+        collision_callback=log,
     )
     zip_path = write_cards_zip(
         cards,

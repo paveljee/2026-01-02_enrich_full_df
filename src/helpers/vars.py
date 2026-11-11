@@ -60,6 +60,7 @@ REQUIRED_FILE_ENTRY_KEYS: Final[set[str]] = {"path", "sha256", "desc"}
 
 KTP_FIRST_NAME_COL: Final = "ktp.first_name"
 KTP_LAST_NAME_COL: Final = "ktp.last_name"
+NAME_EDGE_WHITESPACE_REGEX: Final = r"^[\s\p{Z}]+|[\s\p{Z}]+$"
 KTP_FIRST_NAME_ORIG_COLNAME_COL: Final = "ktp.first_name_original_column_name"
 KTP_LAST_NAME_ORIG_COLNAME_COL: Final = "ktp.last_name_original_column_name"
 KTP_FILENAME_COL: Final = "ktp.filename"
@@ -631,6 +632,7 @@ __all__ = [
     "KTP_FILENAME_COL",
     "KTP_FRAGMENT_TYPE_COL",
     "KTP_FIRST_NAME_COL",
+    "NAME_EDGE_WHITESPACE_REGEX",
     "KTP_FRAGMENT_COL",
     "KTP_ALT_NAME_COL",
     "KTP_LAST_NAME_COL",

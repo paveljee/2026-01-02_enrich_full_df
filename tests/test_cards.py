@@ -53,6 +53,116 @@ def test_card_filename_matches_card_archive_member_stem() -> None:
     )
 
 
+def test_build_cards_numbers_duplicate_archive_member_names() -> None:
+    names = [
+        NameKey(first_name="A.B", last_name="Lee"),
+        NameKey(first_name="AB", last_name="Lee"),
+        NameKey(first_name="A-B", last_name="Lee"),
+    ]
+    outer = OuterDict.from_name_keys(names)
+    for name in names:
+        outer.add_inner(
+            name,
+            InnerDict.from_mapping(
+                {DRAW_LABEL: 7, "name_marker": name.first_name}, DummyProcedure()
+            ),
+        )
+
+    messages: list[str] = []
+    progress: list[str] = []
+    cards = build_cards(
+        outer,
+        total_draws=7,
+        intro="Intro",
+        excluded_cols=set(),
+        collision_callback=messages.append,
+        progress_callback=lambda _done, _total, filename: progress.append(filename),
+    )
+
+    expected = ["7_AB_Lee_1", "7_AB_Lee_2", "7_AB_Lee_3"]
+    assert list(cards) == expected
+    assert progress == expected
+    for index, (name, filename, message) in enumerate(
+        zip(names, expected, messages, strict=True), start=1
+    ):
+        assert f"**`name_marker`**: {name.first_name}" in cards[filename]
+        assert f"Duplicate card filename '7_AB_Lee': card {index}" in message
+        assert name.to_json_key() in message
+        assert filename in message
+        for other in names:
+            if other != name:
+                assert other.to_json_key() in message
+
+
+def test_build_cards_same_namekey_deduplicates_without_suffix() -> None:
+    name = NameKey(first_name="Michael", last_name="Maes")
+    duplicate_name = NameKey(first_name="Michael", last_name="Maes")
+    outer = OuterDict.from_name_keys([name, duplicate_name])
+    outer.add_inner(
+        duplicate_name, InnerDict.from_mapping({DRAW_LABEL: 7}, DummyProcedure())
+    )
+    messages: list[str] = []
+
+    cards = build_cards(
+        outer,
+        total_draws=7,
+        intro="Intro",
+        excluded_cols=set(),
+        collision_callback=messages.append,
+    )
+
+    assert list(cards) == ["7_Michael_Maes"]
+    assert messages == []
+
+
+def test_build_cards_log_shows_both_trailing_space_namekeys() -> None:
+    names = [
+        NameKey(first_name="Michael", last_name="Maes"),
+        NameKey(first_name="Michael", last_name="Maes "),
+    ]
+    outer = OuterDict.from_name_keys(names)
+    for name in names:
+        outer.add_inner(
+            name, InnerDict.from_mapping({DRAW_LABEL: 7}, DummyProcedure())
+        )
+    messages: list[str] = []
+
+    cards = build_cards(
+        outer,
+        total_draws=7,
+        intro="Intro",
+        excluded_cols=set(),
+        collision_callback=messages.append,
+    )
+
+    assert list(cards) == ["7_Michael_Maes_1", "7_Michael_Maes_2"]
+    assert len(messages) == 2
+    for message in messages:
+        assert all(name.to_json_key() in message for name in names)
+
+
+def test_build_cards_does_not_overwrite_naturally_suffixed_name() -> None:
+    names = [
+        NameKey(first_name="A.B", last_name="Lee"),
+        NameKey(first_name="AB", last_name="Lee"),
+        NameKey(first_name="AB", last_name="Lee 1"),
+    ]
+    outer = OuterDict.from_name_keys(names)
+    for name in names:
+        outer.add_inner(
+            name,
+            InnerDict.from_mapping(
+                {DRAW_LABEL: 7, "name_marker": name.to_json_key()}, DummyProcedure()
+            ),
+        )
+
+    cards = build_cards(outer, total_draws=7, intro="Intro", excluded_cols=set())
+
+    assert list(cards) == ["7_AB_Lee_2", "7_AB_Lee_3", "7_AB_Lee_1"]
+    for name, card in zip(names, cards.values(), strict=True):
+        assert name.to_json_key() in card
+
+
 def test_render_docx_bytes_uses_exact_markdown_and_cleans_temporary_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

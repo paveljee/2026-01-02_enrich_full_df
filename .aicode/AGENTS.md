@@ -26,6 +26,8 @@ Before presenting an architectural proposal as satisfying the operator's aims, t
 
 Read the active TASK and WORK in full after compaction. Never edit a human-authored TASK. Keep agent-maintained WORK current, concise, and self-contained without altering the operator's verbatim text or accumulating stale notes. Follow the active restrictions. These include read-only Git operations, Pixi execution, preservation of human-signed-off comments, and upstream regression coverage for failures found in operator-run E2E tests.
 
+Multiple agents may share the same TASK and WORK while doing unrelated work. Do not infer this conversation's assignment from another agent's WORK entry. Re-read shared WORK immediately before editing it, preserve concurrent entries, and do not overwrite another agent's task state.
+
 # Codex working guidance for this repository
 
 The user explicitly assigned Codex ownership of this file. Every Codex instance
@@ -74,6 +76,7 @@ a substitute for current user instructions.
 - Make surgical edits within the requested scope. Reuse existing production
   helpers and local step logic rather than inventing abstractions or making
   unrelated refactors. Preserve established data flow and serialization.
+  Never delete a generated script or artifact without the operator's direct instruction.
   When centralizing literals in an inline task, group meaningful input patterns
   and report templates; keep routine API arguments and punctuation inline rather
   than inventing enums, dictionaries, or constants for them.
@@ -93,6 +96,14 @@ a substitute for current user instructions.
   The synthetic 307-person fixture cannot validate real ranked NameKeys; arrange
   a human-operated read-only candidate check before paying for an AIVM E2E run.
   This does not expand the agent's data-access permissions above.
+- In identity audits, a raw NameKey is a spelling group, not proof of one person.
+  Check its constituent rows for mixed identities (including Jr/Sr distinctions)
+  before applying a case-wide truth label; preserve unknown when rows cannot be
+  adjudicated without inventing an identity bridge.
+- For long-running audits that retain cumulative snapshots, budget disk before
+  each batch. Archive older immutable snapshots losslessly only after checking
+  their raw and decompressed hashes against pinned manifests, and keep the
+  verifier able to read the archived form.
 
 ## Detour architecture (review only, not execution permission)
 

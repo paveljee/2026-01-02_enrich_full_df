@@ -362,6 +362,86 @@ finally:
     context.manager.close()
 '
 """
+
+[tool.pixi.tasks.openalex-relay]
+description = "Serve file-backed GET requests to api.openalex.org."
+cmd = '''
+python -u -c '
+import json
+import subprocess
+import time
+from pathlib import Path
+from urllib.parse import parse_qsl
+
+def openalex_url(request):
+    if not isinstance(request, dict) or set(request) != {"path", "query"}:
+        raise ValueError("Request must contain only path and query")
+    path, query = request["path"], request["query"]
+    if (
+        not isinstance(path, str)
+        or not path.startswith("/")
+        or path.startswith("//")
+        or any(char in path for char in "?#")
+    ):
+        raise ValueError("path must be an OpenAlex path without query or fragment")
+    if not isinstance(query, str) or query.startswith("?") or "#" in query:
+        raise ValueError("query must be a query string without ? or fragment")
+    if any(ord(char) <= 32 or ord(char) == 127 or char == "\\" for char in path + query):
+        raise ValueError("path and query must not contain whitespace, controls, or backslashes")
+    if any(key.casefold() == "api_key" for key, _ in parse_qsl(query, keep_blank_values=True)):
+        raise ValueError("API keys are not accepted")
+    return "https://api.openalex.org" + path + ("?" + query if query else "")
+
+root = Path("tmp/openalex-relay")
+requests = root / "requests"
+working = root / "working"
+responses = root / "responses"
+for directory in (requests, working, responses):
+    directory.mkdir(parents=True, exist_ok=True)
+print(f"Relay ready: {root.resolve()}", flush=True)
+
+while True:
+    for request_path in sorted(requests.glob("*.json")):
+        working_path = working / request_path.name
+        try:
+            request_path.replace(working_path)
+        except FileNotFoundError:
+            continue
+        request_id = working_path.stem
+        headers_tmp = responses / f"{request_id}.headers.tmp"
+        body_tmp = responses / f"{request_id}.body.tmp"
+        report_path = responses / f"{request_id}.json"
+        try:
+            request = json.loads(working_path.read_text(encoding="utf-8"))
+            url = openalex_url(request)
+            command = [
+                "curl", "-q", "-sS", "--max-time", "60",
+                "-D", str(headers_tmp), "-o", str(body_tmp),
+                "-w", "%{http_code}", "--", url,
+            ]
+            result = subprocess.run(command, capture_output=True)
+            if headers_tmp.exists():
+                headers_tmp.replace(responses / f"{request_id}.headers")
+            if body_tmp.exists():
+                body_tmp.replace(responses / f"{request_id}.body")
+            report = {
+                "returncode": result.returncode,
+                "http_code": result.stdout.decode("ascii", errors="replace"),
+                "error": result.stderr.decode("utf-8", errors="replace"),
+            }
+        except Exception as exc:
+            report = {"error": str(exc)}
+        report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        working_path.unlink()
+        print(f"Completed {request_id}: {report}", flush=True)
+    time.sleep(0.25)
+'
+'''
+cwd = "."
+
+[tool.pixi.tasks.xlsx-ground-truth-replay]
+description = "Replay manual XLSX ground-truth proofs in draw order."
+cmd = "python tasks/tasks-20261104-post-prod/home/Nacre/xlsx-ground-truth-20261109/src/replay.py"
 cwd = "."
 
 # ===============================

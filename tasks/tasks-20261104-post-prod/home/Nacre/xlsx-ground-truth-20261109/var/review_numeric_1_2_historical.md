@@ -1,0 +1,47 @@
+# Manual ground-truth review: draws 1 and 2
+
+## Source and mask contract
+
+- Read-only source: `data/scisci_process.duckdb` SHA-256 `adb37937571b8f43280d148b8b5921b31e2d2603a8694104478c71dae548ffd2`.
+- Sampling instructions: `config.repl.all_mode3.json` SHA-256 `74ad287b3c2b46aa078d54056ca616c1dd45fa607480589b2f32b41df52bd309`. Replay uses its seed 42, eight draw specs, pilot exclusions, and the DB's `SELECT ktp.population_index FROM population` order, following `src/steps/step_05_sampling.py`. Numeric draws precede the ten appended pilots.
+- Copied Step 3 source: `03_infer_names_population_with_names_df.csv`, SHA-256 `ff647d6c3579c16ecc5dd115f59396cdf68301a2d1e2fdfb81794c38ac2a8389`, byte-identical to `tmp/03_infer_names_population_with_names_df.csv`. It has 59,665 HCR rows but **no draw labels**. The preserved `master.seed.jsonl` (SHA-256 `e5e52db43f24c9f5ed081f3f2a8f33d0f1f22ab5f280cf9b16a18405d416bac5`) is therefore the draw-ordered replay starting point; all 18,468 seeds were checked against this CSV for matching HCR row reference and trimmed NameKey.
+- `master.jsonl` SHA-256 `d1d38ea9118f114493aae63fac67588c911b36340d14bdeb447db799e96d81c0`: one JSON object per line, mapping a serialized NameKey to an innerdict list. **NameKey lines** are ordered by first draw. Each card script keeps its own first-draw seed first, then emits other matches in source-CSV order; the HCR rows within a list are no longer claimed to be in draw order. A later spelling NameKey whose seed moves to an earlier authoritative NameKey remains present with `[]`.
+- The per-person scripts `1_Andrew_P_Morris.py` and `2_Tobin_J_Marks.py` read as HCR review statements: first-draw NameKey and seed, candidate name scopes, accepted/excluded HCR spellings, and executable checks of award years, fields, and available affiliations. Field checks require all selected awards to be in the stated field(s), without encoding the observed row counts as field rules. Andrew's script also checks that the separately excluded Andrew D awards overlap in 2017–18. Neither script lists matched HCR row references; each fixes only its own seed reference. Local `shared.py` (Python standard library only) holds the common HCR-source scan, exact `card_filename` serialization check, CSV hash guard, rejection of unreviewed candidates, and earliest-draw mask transfer with exclusive ownership. These checks corroborate manual identity judgments but cannot rule out undisclosed aliases or same-name people. The earlier `build_master.py` (which used DuckDB/NumPy) was removed from this workdir; seed-mask provenance is retained above.
+- Replay from the preserved seed mask:
+
+  ```bash
+  pixi run -e default python tmp/xlsx-ground-truth-20261109/replay.py
+  ```
+
+  `replay.py` copies `master.seed.jsonl` to `master.jsonl`, then visits NameKeys in that file's first-draw order. It runs `1_Andrew_P_Morris.py` and `2_Tobin_J_Marks.py`, then raises `FileNotFoundError` for missing `3_Ye_Wang.py`; this expected failure leaves the pinned two-key master hash above. This sequence was executed. An empty later NameKey is skipped because an earlier review already claimed its seed. **Limit:** the seed mask stores first-draw order but not original draw-label values. The runner uses the 1-based line position as the filename prefix, which is correct for the current first two but diverges after repeated or excluded-name draws (for example, line 1,575 first appeared at draw 1,685). Exact full-population replay will require preserving original draw labels; this runner must not be treated as a correct filename resolver beyond that point. The seed snapshot is necessary because the Step 3 CSV alone cannot recover all-mode3 draw order.
+- Replayed 59,665 draws yielded **18,468** complete NameKeys. Four null/empty-name draws were excluded as in Step 6. The stored `population_names` table predates current Step 3 edge-whitespace trimming (2,695 source rows have edge spaces); the seed builder applies the exact current `NAME_EDGE_WHITESPACE_REGEX` to those stored names before constructing NameKeys. The initial untrimmed 19,786-key draft was invalid for current Step 3 and was discarded after regenerating the master; its first-two manual decisions were carried over unchanged. This is a mask of drawn NameKeys, not a claim that all 59,665 possible HCR rows were drawn. The configured all-mode3 DB is a different path; the designated read-only DB above was used exclusively, so equivalence to a separate all-mode3 DB has **not** been checked.
+
+## Draw 1: `{"ktp.first_name": "Andrew P", "ktp.last_name": "Morris"}`
+
+The CSV predicate (edge-trimmed given name with optional final period = `Andrew P`, family name = `Morris`) derives four HCR rows. The original draw ranks are shown for evidence; only the NameKey lines, not the innerdict list, follow draw order:
+
+| Draw | HCR row | HCR name | Category | Affiliation |
+|---:|---|---|---|---|
+| 1 | `2015_HCR.xlsx#2112` | Andrew P Morris | Molecular Biology & Genetics | Univ Dundee, UK |
+| 4400 | `2016_HCR.xlsx#2163` | Andrew P Morris | Molecular Biology & Genetics | Univ Dundee, UK |
+| 14941 | `2017_HCR.xlsx#2309` | Andrew P Morris | Molecular Biology & Genetics | Univ Liverpool, United Kingdom |
+| 34923 | `2018_HCR.xlsx#4696` | Andrew P. Morris | Molecular Biology & Genetics | not recorded |
+
+**Excluded, not a spelling variant of Andrew P:** Andrew **D** Morris appears independently at `2014_HCR.xlsx#2165` (Dundee), `2017_HCR.xlsx#2308` (Edinburgh), and `2018_HCR.xlsx#4695`. The P and D rows are adjacent in both 2017 and 2018, making it especially clear the HCR source distinguishes them. The 2017 Andrew P affiliation differs from 2015–16; the common full name/middle initial, field, and sequence support the manual same-person judgment, but the source provides no stable researcher identifier for these rows.
+
+## Draw 2: `{"ktp.first_name": "Tobin J.", "ktp.last_name": "Marks"}`
+
+The CSV predicate (edge-trimmed given name with optional final period = `Tobin J`, family name = `Marks`) derives 17 rows. For evidence, their original first-draw ranks, including the seed, are:
+
+`2023#528` (2), `2017#487` (1685), `2019#495` (10964), `2014#1774` (13767), `2024#465` (18557), `2015#1737` (21789), `2016#454` (24020), `2018#559` (30099), `2016#1781` (30282), `2017#1917` (33444), `2014#416` (39727), `2022#561` (40029), `2021#462` (41346), `2015#476` (44574), `2020#491` (45141), `2018#4213` (47713), `2019#4497` (57208). Every `YEAR#ROW` above refers to `YEAR_HCR.xlsx#ROW`.
+
+The 2014–17 Chemistry and Materials Science entries have the same name and Northwestern University affiliation in overlapping years. Later entries retain the same name/initial; affiliation is not recorded. The dual categories are awards, not evidence of two people. No other Tobin Marks spelling occurs in the DB. The later rows also lack a stable researcher identifier, so this is a manual identity judgment based on the HCR sequence.
+
+## Candidate review and validation
+
+- **Exclusive ownership after review:** The `Tobin J` Marks key at line 1,575 (first draw 1,685) retains its place but now has `[]`; its seed `2017_HCR.xlsx#487` belongs only to the earlier `Tobin J.` Marks key at line 2 (draw 2). The `Andrew P.` Morris key at line 15,021 (first draw 34,923) likewise has `[]`; its seed `2018_HCR.xlsx#4696` belongs only to the earlier `Andrew P` Morris key at line 1 (draw 1). These later NameKeys were **not deleted or merged**; they simply own no innerdicts. This is the operator's earliest-draw authoritative-owner rule.
+- Searched all 59,665 `population_names` rows. Surname Levenshtein distance ≤2 from `morris` or `marks`, plus any given name containing `tobin`, produced 128 distinct name pairs / 419 rows; inspected the complete grouped name list. Exact `Morris`/`Marks` surnames comprise 15 name pairs / 48 rows. Broad `Andrew P`/`Tobin J`/initial-prefix search across **all surnames** found 13 name pairs / 52 rows. Within those sets, the 24 row-level cases needing Andrew/Tobin adjudication were the 21 inclusions above and the three Andrew D exclusions. These are candidate searches, not automatic identity labels.
+- All 21 derived `(filename, excel_row)` references are unique and present in the copied CSV and designated DB. Their sorted-membership hashes match the prior manual review (`bdb9b773f0cf474cb17e14586825ee9b8a5271c096b1fcbb3eb733c316cc0a4d` and `e37da1016f0aeec15c1c962ce880ce1c3d8b7b86153219c809bbdf9dca57c9b6`). The corrected JSONL parses as 18,468 unique, edge-trimmed NameKeys; lines 1–2 contain 4 and 17 innerdicts, the two later keys above are empty, and every other line contains one seed. Across the 18,485 currently assigned HCR references, each has **exactly one** owner; zero references appear twice. No v1/v2 matching result was used to choose these rows.
+- Search-by-name cannot establish that an HCR row with an entirely unrelated name is not an undisclosed alias. No such identity bridge is present in these HCR rows. The annotations are the reviewed positive HCR identities, not a claim of omniscient proof about undisclosed aliases.
+
+**Stop point:** only the first two NameKeys have been manually reviewed. The other 18,466 lines are either unchanged seeds or the two emptied later keys, not completed ground-truth groups. The eventual one-owner-per-HCR-row requirement across the full population is **not yet established**; many rows remain unreviewed. No v1/v2 loss or rule optimization has been measured.

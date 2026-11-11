@@ -14,6 +14,7 @@ from ..helpers.vars import (
     KTP_HCR_FILENAME_COL,
     KTP_LAST_NAME_COL,
     KTP_POPULATION_INDEX_COL,
+    NAME_EDGE_WHITESPACE_REGEX,
     STEP_INFER_NAMES,
 )
 
@@ -28,7 +29,8 @@ def _build_name_expr(mapping: dict[str, tuple[str, str]], column_index: int) -> 
         )
     if not cases:
         raise ValueError("No inferred name columns available.")
-    return "CASE " + " ".join(cases) + " END"
+    case_expr = "CASE " + " ".join(cases) + " END"
+    return f"regexp_replace({case_expr}, '{NAME_EDGE_WHITESPACE_REGEX}', '', 'g')"
 
 
 def _normalize_hcr_header(name: str) -> str:
