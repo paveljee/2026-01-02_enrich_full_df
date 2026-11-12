@@ -19,7 +19,9 @@ How the main pipeline currently does this is as follows:
 
 * Loads the Excel files and normalizes column name spellings across years to concatenate the spreadsheets into one dataframe, which leads to the `59,665` total rows figure (`step_03`).
 * Shuffles these HCR rows randomly, assigning each random draw a `draw_number` (`step_05`).
-  See more under `./sampling_bootstrap/`.
+  In reality, the actual sampling strategy differed from an ideal one because 10 rows were hand-picked for piloting, then by mistake random sampling was implemented with replacement.
+  For the impact of these changes see `./sampling_bootstrap/`, but my interpretation is that the impact of the sampling misimplementation was minimal while the observed biases align with the hand-picked pilots – particularly: an increased number of 2024 rows (2024 was a convenience selection), an increase in HCRs from non-English-speaking countries (it was desirable to select less common rows for pilots), and an increase in health-research-leaning HCR categories (because we are health researchers and for pilots it made sense to select what we understand best).
+  After all, the above reflection primarily refers to the sample of `310` HCR rows drawn for qualitative analyses, and since the differences are apparently minimal even within this scope, I expect these to be substantially more diluted when it comes to the full population, used for quantitative analyses: beyond the 310 draws, shuffling was implemented properly.
 * **Drops rows** where the tuple of first and last name are exact string duplicates and **excludes** rows where the first or last name is empty (`step_06`).
   The number of remaining rows is `19,786` at this point, so the row count drops by 67%.
   Note that out of a duplicate pair, the row _drawn first_ is kept.

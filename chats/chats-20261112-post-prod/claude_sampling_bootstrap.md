@@ -1,6 +1,6 @@
 *URL:* https://claude.ai/chat/8d980fd6-74a5-454a-8590-80bb8c8207e3  
 *Created:* 11/12/2026, 3:01:14 PM  
-*Updated:* 11/12/2026, 3:17:00 PM  
+*Updated:* 11/12/2026, 4:01:31 PM  
 *Model:* `claude-sonnet-5-5`
 
 # Statistical review request
@@ -169,3 +169,54 @@ The contrasts then separate hand-picking, replacement, and their interaction. I 
 - **Memory limit:** the docstring says 128 MiB but the code sets `'128MB'`, which DuckDB reads as decimal.
 
 I can sketch the revised version with the 2×2 arms, analytic bias checks, SD-unit bias, and coverage, and it should come out shorter than the current script.
+
+__________
+
+## 6 - Human  
+*Branch:* 1 | Main  
+*Created:* 11/12/2026, 3:59:11 PM
+
+how about now?
+
+**File:**   
+*ID:* `1464d66f-1b8f-5af6-9d83-620109c3293e`
+
+__________
+
+## 7 - Claude  
+*Branch:* 1 | Main  
+*Created:* 11/12/2026, 4:01:31 PM
+
+
+<details>
+<summary>*[Code Execution Claude thinking...]* Checking how the coverage measure would behave.</summary>
+
+
+</details>
+
+This is much better, and I read the prose as well as the code this time. I haven't run it, since I don't have the DuckDB file, so this is from reading.
+
+Almost everything from my last round is addressed:
+- The significance layer is gone, replaced by exact expectations, Δ in SD units and 95% ranges.
+- The simulation now checks the formulas.
+- RNG streams are spawned separately.
+- The tautological completion block and the hardcoded "no duplicates" claim are removed.
+- Nulls get a `<missing>` bucket with sum-to-one asserts.
+- The blank tests agree, and the wording is now "draw occurrences".
+- The memory-limit note is fixed, and the report states that it conditions on these pilots.
+
+I also checked the exact formulas: the product-form inclusion probability, the hypergeometric versus binomial SDs, the pilot-key handling, and the distinct-awards expectation. They're right.
+
+What remains, in priority order:
+
+1. **The report still can't say which departure does what.** For indicators, the Measures paragraph's own formulas show that replacement doesn't enter the expected count at all (actual = H + 300·K/N, so Δ = H − 10·K/N). Every indicator Δ is the pilots. The intro leads with "unintentionally… with replacement," so I'd add one sentence saying this. For the distinct counts both departures matter, and by my arithmetic the distinct-awards Δ of about −0.8 is entirely replacement. A third arm (10 pilots plus 300 draws without replacement from the other N−10 rows) would separate them. Your `inclusion_probability` helper already handles it, using `population_size - len(pilots)` and `replacement=False` for the non-pilot keys.
+
+2. **The exact SDs are never validated.** `fair_sd[2:]` and `actual_sd[2:]` overwrite the simulated values, and the assertion block only checks means. Yet `Δ / fair SD`, the report's headline column, rests on those formulas. I'd add an assert comparing simulated and exact SD, with a looser tolerance, or only for indicators with expected count ≥ 5, since rare indicators are skewed.
+
+3. **The RMSE-ratio column is redundant for indicators.** The variance ratio is (300/310)·(N−1)/(N−310) ≈ 0.973 for every indicator, so the RMSE ratio is just √(0.973 + (Δ/SD)²). It adds no information beyond Δ/SD. If you want a column that translates bias into consequence, use closed-form coverage of a nominal 95% interval: Φ((1.96−z)/ρ) − Φ((−1.96−z)/ρ), with z = Δ/fair SD and ρ ≈ 0.986. That's computable with `erf`, though the normal approximation is poor for rare indicators.
+
+4. **Top-ten ranking.** It ranks by absolute count, which favors prevalent categories. A rare category that a pilot happens to hit has a tiny count Δ but a large Δ/SD. The two rankings answer different questions. Either is fine as long as the title says which, and the title currently does.
+
+5. **The lineage prose is hardcoded** and describes code outside this file (hash checks, header normalization, World Bank matching). I can't verify it from here, and nothing in the script would flag it going stale.
+
+I'd fix 1 and 2 before sharing; the rest is polish.

@@ -13,146 +13,120 @@ Source: read-only DuckDB post-normalization view `population_with_names_economy`
 3. Step 3 maps year-specific name headers to `ktp.first_name` and `ktp.last_name`.
 4. Step 4 maps year-specific affiliation headers to canonical primary/secondary affiliations, matches World Bank economies and income groups, and computes priority labels. This report selects those post-normalization columns from `population_with_names_economy`; category values remain exact source labels.
 
-Simulations: **20,000 per design**; bootstrap: **1,000 resamples**.
+## Measures
 
-**Rounding:** observed, population, and simulation counts are integers with thousands separators; count means, differences, and interval bounds use 2 decimals, or 4 when nonzero magnitude is below 0.01; p-values use 4 decimals, with values below 0.0001 shown as `<0.0001`. Calculations use unrounded values.
+All indicator counts are **draw occurrences**: repeated selection of an award row counts again. `Distinct award rows` and `Distinct canonical name pairs` instead count distinct values; a name-pair key is the exact canonical first-name/last-name pair when both are nonblank, not a verified person ID.
+Both designs sample award rows, so a researcher with multiple award rows can appear more than once in the population.
+For an indicator with 59,665 population rows, K matching rows, and H matching pilots, exact expected draw counts are fair = 310 × K / N and actual = H + 300 × K / N. Distinct-count expectations use exact inclusion probabilities.
+At a fixed random-draw count, replacement changes indicator dispersion but not expected counts, so indicator mean shifts here are set by these pilots; distinct-award repeats can arise within the random draws or when a draw reselects a pilot.
+SD is sample-to-sample variation: exact for indicator counts and estimated from 20,000 simulated samples per design for the distinct counts. Independent streams come from seed 20261112. Bracketed ranges are the central 95% of simulated individual-sample counts (nearest simulated quantiles), not confidence intervals for design means.
+Δ is actual minus fair expected count. `Δ / fair SD` expresses that shift relative to fair samples' typical variation. RMSE measures each design's root-mean-square distance from the fair design's exact expectation; the last column is actual RMSE divided by fair RMSE. A ratio of 1.00 means equal RMSE; above 1.00 means larger actual RMSE and below 1.00 means smaller actual RMSE. Its percentage difference is 100 × (ratio − 1). A zero fair SD makes those ratios undefined (`—`).
 
-- **Actual protocol:** 10 hand-picked pilots plus 300 draws from the original replacement sampler's full award-row pool.
-- **Fair:** 310 distinct award rows uniformly sampled without replacement from the full population.
+**Rounding:** population and pilot counts and sample-range bounds are integers with thousands separators. Means, SDs, differences, and ratios use 2 decimals, 4 when nonzero magnitude is below 0.01, and 6 when nonzero magnitude is below 0.0001. Calculations use unrounded values.
 
-## First 310 draws
+## Distinct counts
 
-| Metric | Observed | Actual-protocol mean | Fair mean | Δ protocol−fair, rows [95% CI] | Two-sided p | Holm p |
-| --- | --- | --- | --- | --- | --- | --- |
-| Distinct award rows | 310 | 309.19 | 310.00 | -0.81 [-0.83, -0.80] | <0.0001 | <0.0001 |
-| Distinct NameKeys | 307 | 305.94 | 306.80 | -0.86 [-0.90, -0.83] | <0.0001 | <0.0001 |
-| 2024 award rows | 36 | 44.57 | 35.75 | +8.82 [+8.70, +8.92] | <0.0001 | <0.0001 |
-| Pilot-row occurrences | 10 | 10.05 | 0.05 | +10.00 [+9.99, +10.00] | <0.0001 | <0.0001 |
+| Metric | Population rows | Pilot rows | Fair E ± SD [95% range] | Actual E ± SD [95% range] | Δ expected count | Δ / fair SD | RMSE ratio (actual/fair) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Distinct award rows | — | — | 310.00 ± 0.00 [310, 310] | 309.20 ± 0.90 [307, 310] | -0.80 | — | — |
+| Distinct canonical name pairs | — | — | 306.80 ± 1.78 [303, 310] | 305.96 ± 1.99 [302, 309] | -0.84 | -0.47 | 1.21 |
 
-Pilot-row occurrences counts selections of the 10 hand-picked award rows; replacement can select one again.
+## Ten largest absolute expected-count differences
 
-## Protocol-versus-fair inference
-
-Each nonconstant first-310-draw metric tests whether the actual-protocol and fair **mean values differ**. The 2024 core count duplicates the year:2024 count and is tested once. Two-sided normal p-values use the Monte Carlo standard error of the simulated mean difference; Holm adjustment covers all tested metrics. The 95% bootstrap CIs describe precision of the estimated design-mean difference, not variation of one sample. Differences and intervals are reported in rows per first-310-draw sample.
-
-| Statistic | Computed value |
-| --- | --- |
-| Nonconstant metrics tested | 59 |
-| Constant metrics excluded | 0 |
-| Nominal false positives if all nulls hold (5% per metric) | 2.95 |
-| Observed 95% bootstrap CIs excluding zero | 54 |
-| Metrics with Holm-adjusted p < 0.05 | 54 |
-
-### Ten largest absolute mean differences in rows
-
-| Metric | Δ mean rows [95% bootstrap CI] | Two-sided p | Holm p |
-| --- | --- | --- | --- |
-| `pilot_row_occurrences` | +10.00 [+9.99, +10.00] | <0.0001 | <0.0001 |
-| `year:2024` | +8.82 [+8.70, +8.92] | <0.0001 | <0.0001 |
-| `category:Chemistry` | +2.55 [+2.48, +2.62] | <0.0001 | <0.0001 |
-| `category:Clinical Medicine` | +2.20 [+2.10, +2.29] | <0.0001 | <0.0001 |
-| `priority:ENGLISH_HICS` | -1.44 [-1.61, -1.27] | <0.0001 | <0.0001 |
-| `year:2022` | -1.22 [-1.32, -1.10] | <0.0001 | <0.0001 |
-| `year:2020` | -1.15 [-1.26, -1.04] | <0.0001 | <0.0001 |
-| `year:2019` | -1.15 [-1.24, -1.04] | <0.0001 | <0.0001 |
-| `year:2023` | -1.13 [-1.25, -1.02] | <0.0001 | <0.0001 |
-| `priority:EU_COUNTRIES` | +1.08 [+0.94, +1.20] | <0.0001 | <0.0001 |
-
-## Completion checks
-
-| Metric | Computed value |
-| --- | --- |
-| Completed actual-protocol runs | 100 |
-| Distinct award rows per completed run | 59,665 |
-| Completed sequence length, mean | 59,665.85 |
-| Completed sequence length, minimum | 59,665 |
-| Completed sequence length, maximum | 59,669 |
+| Metric | Δ expected count | Fair SD | Δ / fair SD | RMSE ratio (actual/fair) |
+| --- | --- | --- | --- | --- |
+| `year:2024` | +8.85 | 5.61 | +1.58 | 1.86 |
+| `category:Chemistry` | +2.57 | 3.56 | +0.72 | 1.22 |
+| `category:Clinical Medicine` | +2.20 | 4.78 | +0.46 | 1.09 |
+| `priority:ENGLISH_HICS` | -1.62 | 8.71 | -0.19 | 1.00 |
+| `year:2022` | -1.21 | 5.73 | -0.21 | 1.01 |
+| `year:2023` | -1.19 | 5.70 | -0.21 | 1.01 |
+| `priority:EU_COUNTRIES` | +1.13 | 6.85 | +0.16 | 1.00 |
+| `year:2021` | -1.11 | 5.51 | -0.20 | 1.01 |
+| `priority:NON_ENGLISH_NON_EU_HICS_NO_GREATER_CHINA` | +1.10 | 5.02 | +0.22 | 1.01 |
+| `year:2020` | -1.07 | 5.43 | -0.20 | 1.01 |
 
 ## Award year
 
-Year is taken from each award row's stored HCR filename. Values are **row counts**.
+Year is parsed from `ktp.hcr_filename`.
 
-| Year | Population rows | Observed rows | Actual-protocol mean | Fair mean | Δ protocol−fair, rows [95% CI] | Two-sided p | Holm p |
+| Metric | Population rows | Pilot rows | Fair E ± SD [95% range] | Actual E ± SD [95% range] | Δ expected count | Δ / fair SD | RMSE ratio (actual/fair) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2014 | 3,215 | 10 | 16.16 | 16.62 | -0.46 [-0.54, -0.38] | <0.0001 | <0.0001 |
-| 2015 | 3,126 | 21 | 15.73 | 16.28 | -0.55 [-0.63, -0.47] | <0.0001 | <0.0001 |
-| 2016 | 3,266 | 14 | 16.41 | 16.97 | -0.57 [-0.65, -0.50] | <0.0001 | <0.0001 |
-| 2017 | 3,538 | 17 | 17.83 | 18.37 | -0.54 [-0.62, -0.46] | <0.0001 | <0.0001 |
-| 2018 | 6,079 | 27 | 30.60 | 31.62 | -1.02 [-1.13, -0.92] | <0.0001 | <0.0001 |
-| 2019 | 6,216 | 27 | 31.21 | 32.36 | -1.15 [-1.24, -1.04] | <0.0001 | <0.0001 |
-| 2020 | 6,389 | 47 | 32.11 | 33.26 | -1.15 [-1.26, -1.04] | <0.0001 | <0.0001 |
-| 2021 | 6,602 | 32 | 33.20 | 34.23 | -1.03 [-1.14, -0.93] | <0.0001 | <0.0001 |
-| 2022 | 7,221 | 41 | 36.30 | 37.52 | -1.22 [-1.32, -1.10] | <0.0001 | <0.0001 |
-| 2023 | 7,127 | 38 | 35.88 | 37.02 | -1.13 [-1.25, -1.02] | <0.0001 | <0.0001 |
-| 2024 | 6,886 | 36 | 44.57 | 35.75 | +8.82 [+8.70, +8.92] | <0.0001 | <0.0001 |
+| `2014` | 3,215 | 0 | 16.70 ± 3.97 [9, 25] | 16.17 ± 3.91 [9, 24] | -0.54 | -0.14 | 1.00 |
+| `2015` | 3,126 | 0 | 16.24 ± 3.91 [9, 24] | 15.72 ± 3.86 [9, 24] | -0.52 | -0.13 | 1.00 |
+| `2016` | 3,266 | 0 | 16.97 ± 3.99 [10, 25] | 16.42 ± 3.94 [9, 24] | -0.55 | -0.14 | 1.00 |
+| `2017` | 3,538 | 0 | 18.38 ± 4.15 [11, 27] | 17.79 ± 4.09 [10, 26] | -0.59 | -0.14 | 1.00 |
+| `2018` | 6,079 | 0 | 31.58 ± 5.31 [22, 42] | 30.57 ± 5.24 [21, 41] | -1.02 | -0.19 | 1.00 |
+| `2019` | 6,216 | 0 | 32.30 ± 5.36 [22, 43] | 31.25 ± 5.29 [21, 42] | -1.04 | -0.19 | 1.01 |
+| `2020` | 6,389 | 0 | 33.20 ± 5.43 [23, 44] | 32.12 ± 5.36 [22, 43] | -1.07 | -0.20 | 1.01 |
+| `2021` | 6,602 | 0 | 34.30 ± 5.51 [24, 45] | 33.20 ± 5.43 [23, 44] | -1.11 | -0.20 | 1.01 |
+| `2022` | 7,221 | 0 | 37.52 ± 5.73 [27, 49] | 36.31 ± 5.65 [26, 48] | -1.21 | -0.21 | 1.01 |
+| `2023` | 7,127 | 0 | 37.03 ± 5.70 [26, 48] | 35.84 ± 5.62 [25, 47] | -1.19 | -0.21 | 1.01 |
+| `2024` | 6,886 | 10 | 35.78 ± 5.61 [25, 47] | 44.62 ± 5.53 [34, 56] | +8.85 | +1.58 | 1.86 |
 
-## Canonical post-normalization fields: nonblank row counts
+## Canonical post-normalization fields: nonblank draw occurrences
 
-Counts include rows with a nonblank canonical field value.
+| Metric | Population rows | Pilot rows | Fair E ± SD [95% range] | Actual E ± SD [95% range] | Δ expected count | Δ / fair SD | RMSE ratio (actual/fair) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `ktp.first_name` | 59,662 | 10 | 309.98 ± 0.12 [310, 310] | 309.98 ± 0.12 [310, 310] | +0.0005 | +0.0040 | 0.99 |
+| `ktp.last_name` | 59,664 | 10 | 309.99 ± 0.07 [310, 310] | 309.99 ± 0.07 [310, 310] | +0.0002 | +0.0023 | 0.99 |
+| `ktp.hcr_primary_affiliations` | 59,652 | 10 | 309.93 ± 0.26 [309, 310] | 309.93 ± 0.26 [309, 310] | +0.0022 | +0.0084 | 0.99 |
+| `ktp.hcr_secondary_affiliations` | 13,383 | 3 | 69.53 ± 7.33 [55, 84] | 70.29 ± 7.22 [56, 85] | +0.76 | +0.10 | 0.99 |
 
-| Value | Observed rows | Actual-protocol mean | Fair mean | Δ protocol−fair, rows [95% CI] | Two-sided p | Holm p |
-| --- | --- | --- | --- | --- | --- | --- |
-| `ktp.first_name` | 310 | 309.99 | 309.98 | +0.0021 [-0.0003, +0.0046] | 0.0882 | 0.4410 |
-| `ktp.last_name` | 310 | 310.00 | 309.99 | +0.0004 [-0.0009, +0.0018] | 0.5726 | 0.9606 |
-| `ktp.hcr_primary_affiliations` | 310 | 309.93 | 309.93 | +0.0023 [-0.0030, +0.0074] | 0.3909 | 0.9606 |
-| `ktp.hcr_secondary_affiliations` | 66 | 70.35 | 69.55 | +0.79 [+0.64, +0.93] | <0.0001 | <0.0001 |
+## HCR category: exact-value draw occurrences
 
-## HCR category: exact-value row counts
+| Metric | Population rows | Pilot rows | Fair E ± SD [95% range] | Actual E ± SD [95% range] | Δ expected count | Δ / fair SD | RMSE ratio (actual/fair) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `Agricultural Sciences` | 1,407 | 0 | 7.31 ± 2.66 [3, 13] | 7.07 ± 2.63 [2, 13] | -0.24 | -0.09 | 0.99 |
+| `Biology & Biochemistry` | 1,089 | 0 | 5.66 ± 2.35 [2, 11] | 5.48 ± 2.32 [1, 10] | -0.18 | -0.08 | 0.99 |
+| `Biology and Biochemistry` | 1,493 | 0 | 7.76 ± 2.74 [3, 13] | 7.51 ± 2.71 [3, 13] | -0.25 | -0.09 | 0.99 |
+| `Chemistry` | 2,564 | 3 | 13.32 ± 3.56 [7, 21] | 15.89 ± 3.51 [10, 23] | +2.57 | +0.72 | 1.22 |
+| `Clinical Medicine` | 4,797 | 3 | 24.92 ± 4.78 [16, 35] | 27.12 ± 4.71 [18, 37] | +2.20 | +0.46 | 1.09 |
+| `Computer Science` | 1,240 | 0 | 6.44 ± 2.51 [2, 12] | 6.23 ± 2.47 [2, 12] | -0.21 | -0.08 | 0.99 |
+| `Cross-Field` | 19,727 | 3 | 102.50 ± 8.26 [86, 119] | 102.19 ± 8.15 [86, 118] | -0.31 | -0.04 | 0.99 |
+| `Economics & Business` | 425 | 0 | 2.21 ± 1.48 [0, 5] | 2.14 ± 1.46 [0, 5] | -0.07 | -0.05 | 0.99 |
+| `Economics and Business` | 515 | 0 | 2.68 ± 1.62 [0, 6] | 2.59 ± 1.60 [0, 6] | -0.09 | -0.05 | 0.99 |
+| `Engineering` | 1,797 | 0 | 9.34 ± 3.00 [4, 16] | 9.04 ± 2.96 [4, 15] | -0.30 | -0.10 | 0.99 |
+| `Environment and Ecology` | 1,053 | 0 | 5.47 ± 2.31 [1, 10] | 5.29 ± 2.28 [1, 10] | -0.18 | -0.08 | 0.99 |
+| `Environment/Ecology` | 761 | 0 | 3.95 ± 1.97 [1, 8] | 3.83 ± 1.94 [1, 8] | -0.13 | -0.06 | 0.99 |
+| `Geosciences` | 1,725 | 0 | 8.96 ± 2.94 [4, 15] | 8.67 ± 2.90 [3, 15] | -0.29 | -0.10 | 0.99 |
+| `Immunology` | 1,711 | 0 | 8.89 ± 2.93 [4, 15] | 8.60 ± 2.89 [3, 15] | -0.29 | -0.10 | 0.99 |
+| `Materials Science` | 2,090 | 0 | 10.86 ± 3.23 [5, 18] | 10.51 ± 3.18 [5, 17] | -0.35 | -0.11 | 0.99 |
+| `Mathematics` | 775 | 0 | 4.03 ± 1.99 [1, 8] | 3.90 ± 1.96 [1, 8] | -0.13 | -0.07 | 0.99 |
+| `Microbiology` | 1,466 | 0 | 7.62 ± 2.72 [3, 13] | 7.37 ± 2.68 [3, 13] | -0.25 | -0.09 | 0.99 |
+| `Molecular Biology & Genetics` | 1,038 | 0 | 5.39 ± 2.30 [1, 10] | 5.22 ± 2.26 [1, 10] | -0.17 | -0.08 | 0.99 |
+| `Molecular Biology and Genetics` | 1,211 | 0 | 6.29 ± 2.48 [2, 12] | 6.09 ± 2.44 [2, 11] | -0.20 | -0.08 | 0.99 |
+| `Neuroscience & Behavior` | 828 | 0 | 4.30 ± 2.05 [1, 9] | 4.16 ± 2.03 [1, 9] | -0.14 | -0.07 | 0.99 |
+| `Neuroscience and Behavior` | 1,271 | 0 | 6.60 ± 2.54 [2, 12] | 6.39 ± 2.50 [2, 12] | -0.21 | -0.08 | 0.99 |
+| `Pharmacology & Toxicology` | 694 | 0 | 3.61 ± 1.88 [0, 8] | 3.49 ± 1.86 [0, 8] | -0.12 | -0.06 | 0.99 |
+| `Pharmacology and Toxicology` | 905 | 0 | 4.70 ± 2.15 [1, 9] | 4.55 ± 2.12 [1, 9] | -0.15 | -0.07 | 0.99 |
+| `Physics` | 1,841 | 1 | 9.57 ± 3.04 [4, 16] | 10.26 ± 3.00 [5, 17] | +0.69 | +0.23 | 1.01 |
+| `Plant & Animal Science` | 986 | 0 | 5.12 ± 2.24 [1, 10] | 4.96 ± 2.21 [1, 10] | -0.17 | -0.07 | 0.99 |
+| `Plant and Animal Science` | 1,187 | 0 | 6.17 ± 2.45 [2, 11] | 5.97 ± 2.42 [2, 11] | -0.20 | -0.08 | 0.99 |
+| `Psychiatry and Psychology` | 1,048 | 0 | 5.45 ± 2.31 [1, 10] | 5.27 ± 2.28 [1, 10] | -0.18 | -0.08 | 0.99 |
+| `Psychiatry/Psychology` | 639 | 0 | 3.32 ± 1.81 [0, 7] | 3.21 ± 1.78 [0, 7] | -0.11 | -0.06 | 0.99 |
+| `Social Sciences` | 1,371 | 0 | 7.12 ± 2.63 [2, 13] | 6.89 ± 2.60 [2, 12] | -0.23 | -0.09 | 0.99 |
+| `Social Sciences, general` | 911 | 0 | 4.73 ± 2.15 [1, 9] | 4.58 ± 2.12 [1, 9] | -0.15 | -0.07 | 0.99 |
+| `Space Science` | 1,100 | 0 | 5.72 ± 2.36 [2, 11] | 5.53 ± 2.33 [2, 10] | -0.18 | -0.08 | 0.99 |
 
-| Value | Observed rows | Actual-protocol mean | Fair mean | Δ protocol−fair, rows [95% CI] | Two-sided p | Holm p |
-| --- | --- | --- | --- | --- | --- | --- |
-| `Agricultural Sciences` | 2 | 7.07 | 7.28 | -0.21 [-0.26, -0.16] | <0.0001 | <0.0001 |
-| `Biology & Biochemistry` | 5 | 5.48 | 5.65 | -0.17 [-0.21, -0.13] | <0.0001 | <0.0001 |
-| `Biology and Biochemistry` | 6 | 7.52 | 7.76 | -0.24 [-0.29, -0.18] | <0.0001 | <0.0001 |
-| `Chemistry` | 18 | 15.91 | 13.36 | +2.55 [+2.48, +2.62] | <0.0001 | <0.0001 |
-| `Clinical Medicine` | 37 | 27.12 | 24.92 | +2.20 [+2.10, +2.29] | <0.0001 | <0.0001 |
-| `Computer Science` | 6 | 6.21 | 6.43 | -0.22 [-0.27, -0.17] | <0.0001 | <0.0001 |
-| `Cross-Field` | 108 | 102.23 | 102.48 | -0.25 [-0.41, -0.09] | 0.0023 | 0.0140 |
-| `Economics & Business` | 3 | 2.14 | 2.21 | -0.07 [-0.10, -0.04] | <0.0001 | <0.0001 |
-| `Economics and Business` | 1 | 2.59 | 2.68 | -0.10 [-0.13, -0.07] | <0.0001 | <0.0001 |
-| `Engineering` | 10 | 9.02 | 9.35 | -0.33 [-0.39, -0.27] | <0.0001 | <0.0001 |
-| `Environment and Ecology` | 7 | 5.29 | 5.49 | -0.20 [-0.25, -0.16] | <0.0001 | <0.0001 |
-| `Environment/Ecology` | 7 | 3.82 | 3.95 | -0.13 [-0.17, -0.09] | <0.0001 | <0.0001 |
-| `Geosciences` | 7 | 8.65 | 8.94 | -0.29 [-0.34, -0.23] | <0.0001 | <0.0001 |
-| `Immunology` | 8 | 8.62 | 8.89 | -0.27 [-0.33, -0.21] | <0.0001 | <0.0001 |
-| `Materials Science` | 8 | 10.49 | 10.82 | -0.33 [-0.39, -0.27] | <0.0001 | <0.0001 |
-| `Mathematics` | 4 | 3.90 | 4.03 | -0.13 [-0.17, -0.09] | <0.0001 | <0.0001 |
-| `Microbiology` | 10 | 7.39 | 7.63 | -0.25 [-0.30, -0.20] | <0.0001 | <0.0001 |
-| `Molecular Biology & Genetics` | 7 | 5.21 | 5.41 | -0.19 [-0.24, -0.15] | <0.0001 | <0.0001 |
-| `Molecular Biology and Genetics` | 2 | 6.09 | 6.31 | -0.22 [-0.27, -0.18] | <0.0001 | <0.0001 |
-| `Neuroscience & Behavior` | 7 | 4.16 | 4.29 | -0.13 [-0.17, -0.09] | <0.0001 | <0.0001 |
-| `Neuroscience and Behavior` | 5 | 6.40 | 6.61 | -0.21 [-0.27, -0.16] | <0.0001 | <0.0001 |
-| `Pharmacology & Toxicology` | 4 | 3.50 | 3.59 | -0.09 [-0.13, -0.06] | <0.0001 | <0.0001 |
-| `Pharmacology and Toxicology` | 2 | 4.57 | 4.70 | -0.13 [-0.17, -0.09] | <0.0001 | <0.0001 |
-| `Physics` | 8 | 10.26 | 9.58 | +0.68 [+0.63, +0.74] | <0.0001 | <0.0001 |
-| `Plant & Animal Science` | 4 | 4.95 | 5.11 | -0.16 [-0.21, -0.12] | <0.0001 | <0.0001 |
-| `Plant and Animal Science` | 6 | 5.97 | 6.16 | -0.19 [-0.24, -0.14] | <0.0001 | <0.0001 |
-| `Psychiatry and Psychology` | 6 | 5.24 | 5.43 | -0.18 [-0.23, -0.14] | <0.0001 | <0.0001 |
-| `Psychiatry/Psychology` | 2 | 3.22 | 3.32 | -0.11 [-0.14, -0.07] | <0.0001 | <0.0001 |
-| `Social Sciences` | 4 | 6.88 | 7.16 | -0.28 [-0.33, -0.23] | <0.0001 | <0.0001 |
-| `Social Sciences, general` | 1 | 4.57 | 4.75 | -0.18 [-0.22, -0.14] | <0.0001 | <0.0001 |
-| `Space Science` | 5 | 5.54 | 5.69 | -0.15 [-0.20, -0.11] | <0.0001 | <0.0001 |
+## Derived priority label: draw occurrences
 
-## Derived priority labels: row counts
+| Metric | Population rows | Pilot rows | Fair E ± SD [95% range] | Actual E ± SD [95% range] | Δ expected count | Δ / fair SD | RMSE ratio (actual/fair) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `ENGLISH_HICS` | 33,535 | 4 | 174.24 ± 8.71 [157, 191] | 172.62 ± 8.59 [156, 189] | -1.62 | -0.19 | 1.00 |
+| `EU_COUNTRIES` | 11,182 | 3 | 58.10 ± 6.85 [45, 72] | 59.22 ± 6.76 [46, 73] | +1.13 | +0.16 | 1.00 |
+| `GREATER_CHINA` | 8,795 | 1 | 45.70 ± 6.23 [34, 58] | 45.22 ± 6.14 [33, 58] | -0.47 | -0.08 | 0.99 |
+| `LMICS_NO_GREATER_CHINA_OR_UNKNOWN` | 803 | 0 | 4.17 ± 2.02 [1, 8] | 4.04 ± 2.00 [1, 8] | -0.13 | -0.07 | 0.99 |
+| `NON_ENGLISH_NON_EU_HICS_NO_GREATER_CHINA` | 5,350 | 2 | 27.80 ± 5.02 [18, 38] | 28.90 ± 4.95 [20, 39] | +1.10 | +0.22 | 1.01 |
 
-| Value | Observed rows | Actual-protocol mean | Fair mean | Δ protocol−fair, rows [95% CI] | Two-sided p | Holm p |
-| --- | --- | --- | --- | --- | --- | --- |
-| `ENGLISH_HICS` | 166 | 172.61 | 174.05 | -1.44 [-1.61, -1.27] | <0.0001 | <0.0001 |
-| `EU_COUNTRIES` | 70 | 59.32 | 58.24 | +1.08 [+0.94, +1.20] | <0.0001 | <0.0001 |
-| `GREATER_CHINA` | 42 | 45.16 | 45.67 | -0.51 [-0.63, -0.40] | <0.0001 | <0.0001 |
-| `LMICS_NO_GREATER_CHINA_OR_UNKNOWN` | 5 | 4.05 | 4.17 | -0.11 [-0.16, -0.08] | <0.0001 | <0.0001 |
-| `NON_ENGLISH_NON_EU_HICS_NO_GREATER_CHINA` | 27 | 28.87 | 27.87 | +0.99 [+0.90, +1.09] | <0.0001 | <0.0001 |
+## Derived World Bank income group: draw occurrences
 
-## Derived World Bank income groups: row counts
+`<missing>` denotes a null source value in any categorical group.
 
-`<missing>` represents a null income-group value.
-
-| Value | Observed rows | Actual-protocol mean | Fair mean | Δ protocol−fair, rows [95% CI] | Two-sided p | Holm p |
-| --- | --- | --- | --- | --- | --- | --- |
-| `<missing>` | 0 | 0.13 | 0.14 | -0.0060 [-0.01, +0.0007] | 0.0991 | 0.4410 |
-| `High income countries` | 276 | 270.43 | 270.15 | +0.29 [+0.17, +0.40] | <0.0001 | <0.0001 |
-| `Low income LMICs` | 0 | 0.0053 | 0.0061 | -0.0008 [-0.0022, +0.0008] | 0.3202 | 0.9606 |
-| `Lower middle income LMICs` | 1 | 0.90 | 0.94 | -0.04 [-0.06, -0.02] | <0.0001 | 0.0002 |
-| `Upper middle income LMICs` | 33 | 38.53 | 38.77 | -0.24 [-0.35, -0.13] | <0.0001 | 0.0002 |
-
-**Method note:** Δ is actual-protocol mean minus fair mean. The bootstrap intervals and p-values quantify Monte Carlo precision of the estimated design-mean contrast, not variation across individual samples.
+| Metric | Population rows | Pilot rows | Fair E ± SD [95% range] | Actual E ± SD [95% range] | Δ expected count | Δ / fair SD | RMSE ratio (actual/fair) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `<missing>` | 26 | 0 | 0.14 ± 0.37 [0, 1] | 0.13 ± 0.36 [0, 1] | -0.0044 | -0.01 | 0.99 |
+| `High income countries` | 51,986 | 9 | 270.10 ± 5.88 [259, 281] | 270.39 ± 5.80 [259, 281] | +0.29 | +0.05 | 0.99 |
+| `Low income LMICs` | 1 | 0 | 0.0052 ± 0.07 [0, 0] | 0.0050 ± 0.07 [0, 0] | -0.0002 | -0.0023 | 0.99 |
+| `Lower middle income LMICs` | 181 | 0 | 0.94 ± 0.97 [0, 3] | 0.91 ± 0.95 [0, 3] | -0.03 | -0.03 | 0.99 |
+| `Upper middle income LMICs` | 7,471 | 1 | 38.82 ± 5.81 [28, 50] | 38.56 ± 5.73 [28, 50] | -0.25 | -0.04 | 0.99 |

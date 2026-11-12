@@ -1,17 +1,16 @@
-"""Bootstrap sampling contrasts using the post-normalization DuckDB population.
+"""Compare actual and fair HCR award-row sampling designs on the stored population.
 
-Only the designated DuckDB file is read, with one thread and a 128 MiB limit.
-The completed remainder is a permutation of award rows absent from the prefix;
-it does not alter the first-310-draw statistics compared across designs.
-Canonical string fields are represented by nonblank indicators. Category,
-priority label, and income group values are represented by one-hot indicators.
+The designated DuckDB file is read only, with one thread and a 128 MB limit
+(reported by DuckDB as 122 MiB). The later permutation of undrawn rows cannot
+change the first-310-draw outcomes compared here.
 """
 
 import argparse
 from collections.abc import Sequence
 from contextlib import redirect_stdout
+from functools import cache
 from io import StringIO
-from math import erfc, sqrt
+from math import expm1, log1p, sqrt
 from pathlib import Path
 from typing import Literal
 
@@ -35,27 +34,53 @@ from src.helpers.vars import (
     KTP_PRIORITY_GROUP_COL,
 )
 
-REPS, BOOT, BATCH = 20_000, 1_000, 1_000
-ALPHA = 0.05
-MISSING_INCOME_GROUP = "<missing>"
+REPS, BATCH, SEED = 20_000, 1_000, 20261112
+SD_CHECK_MIN_RANDOM_COUNT, SD_CHECK_RTOL = 5, 0.05
+MISSING_VALUE = "<missing>"
+PILOT_DRAW_PREFIX = "pilot."
 
 
 def format_number(
     value: float,
-    kind: Literal["integer", "count", "p"],
+    kind: Literal["integer", "decimal"],
     *,
     signed: bool = False,
 ) -> str:
-    """Format all reported numbers by type; calculations retain full precision."""
+    """Centralize report rounding; all calculations use unrounded values."""
     number = float(value)
     if kind == "integer":
         return f"{int(round(number)):,}"
-    if kind == "count":
-        places = 4 if 0 < abs(number) < 0.01 else 2
+    if kind == "decimal":
+        magnitude = abs(number)
+        places = 2 if magnitude == 0 or magnitude >= 0.01 else 4 if magnitude >= 0.0001 else 6
         return f"{number:+,.{places}f}" if signed else f"{number:,.{places}f}"
-    if kind == "p":
-        return "<0.0001" if number < 0.0001 else f"{number:.4f}"
     raise ValueError(f"Unknown number kind: {kind}")
+
+
+@cache
+def inclusion_probability(
+    population_size: int, draws: int, group_size: int, *, replacement: bool
+) -> float:
+    """Probability that at least one row from a group occurs among the draws."""
+    if draws == 0 or group_size == 0:
+        return 0.0
+    if group_size == population_size:
+        return 1.0
+    if replacement:
+        return -expm1(draws * log1p(-group_size / population_size))
+    if group_size > population_size - draws:
+        return 1.0
+    return -expm1(
+        sum(log1p(-group_size / (population_size - draw)) for draw in range(draws))
+    )
+
+
+def markdown_table(headers: tuple[str, ...], rows: Sequence[tuple[str, ...]]) -> None:
+    print("| " + " | ".join(headers) + " |")
+    print("| " + " | ".join("---" for _ in headers) + " |")
+    for cells in rows:
+        print("| " + " | ".join(cells) + " |")
+    print()
 
 
 def main() -> None:
@@ -63,10 +88,6 @@ def main() -> None:
     try:
         con.execute("SET threads = 1")
         con.execute("SET memory_limit = '128MB'")
-        canonical_fields = (
-            KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL,
-            KTP_HCR_PRIMARY_AFFILIATIONS_COL, KTP_HCR_SECONDARY_AFFILIATIONS_COL,
-        )
         rows = con.execute(f'''
             SELECT "{KTP_POPULATION_INDEX_COL}", "{KTP_HCR_FILENAME_COL}",
                    "{KTP_FIRST_NAME_COL}", "{KTP_LAST_NAME_COL}",
@@ -86,35 +107,54 @@ def main() -> None:
         con.close()
 
     population_size = len(rows)
-    assert [row[0] for row in rows] == list(range(population_size))
-    observed = np.array([index for index, _ in sampled], dtype=np.int32)
+    stored_indices = np.array([index for index, _ in sampled], dtype=np.int32)
     pilots = np.array(
-        [index for index, draw in sampled if str(draw).startswith("pilot.")],
+        [index for index, draw in sampled if str(draw).startswith(PILOT_DRAW_PREFIX)],
         dtype=np.int32,
     )
-    assert population_size == 59_665 and len(observed) == 310 and len(pilots) == 10
+    assert population_size == 59_665 and [row[0] for row in rows] == list(range(population_size))
+    assert len(stored_indices) == 310 and len(pilots) == 10 and len(np.unique(pilots)) == 10
+    draws_per_sample = len(stored_indices)
+    random_draws = draws_per_sample - len(pilots)
+
     award_year = np.array([int(row[1][:4]) for row in rows], dtype=np.int16)
     years = sorted(set(award_year.tolist()))
     assert years == list(range(2014, 2025))
-    is_2024 = award_year == 2024
-    assert is_2024[pilots].all()
+    assert np.all(award_year[pilots] == award_year[pilots[0]])
+    pilot_year = int(award_year[pilots[0]])
 
     name_map: dict[tuple[str, str], int] = {}
     name_id = np.full(population_size, -1, dtype=np.int32)
     for index, (_, _, first, last, *_) in enumerate(rows):
-        if first is not None and last is not None and first != "" and last != "":
+        if first is not None and last is not None and first.strip() and last.strip():
             name_id[index] = name_map.setdefault((first, last), len(name_map))
-    categories = sorted({row[4] for row in rows if row[4] is not None})
-    category_values = np.array([row[4] for row in rows], dtype=object)
-    priorities = sorted({row[7] for row in rows if row[7] is not None})
-    priority_values = np.array([row[7] for row in rows], dtype=object)
-    income_groups = sorted(
-        {row[8] if row[8] is not None else MISSING_INCOME_GROUP for row in rows}
+
+    canonical_fields = (
+        KTP_FIRST_NAME_COL,
+        KTP_LAST_NAME_COL,
+        KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+        KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+    )
+    source_category = [row[4] for row in rows]
+    source_priority = [row[7] for row in rows]
+    source_income = [row[8] for row in rows]
+    assert all(
+        MISSING_VALUE not in values
+        for values in (source_category, source_priority, source_income)
+    )
+    category_values = np.array(
+        [value if value is not None else MISSING_VALUE for value in source_category], dtype=object
+    )
+    priority_values = np.array(
+        [value if value is not None else MISSING_VALUE for value in source_priority], dtype=object
     )
     income_values = np.array(
-        [row[8] if row[8] is not None else MISSING_INCOME_GROUP for row in rows],
-        dtype=object,
+        [value if value is not None else MISSING_VALUE for value in source_income], dtype=object
     )
+    categories = sorted(set(category_values.tolist()))
+    priorities = sorted(set(priority_values.tolist()))
+    income_groups = sorted(set(income_values.tolist()))
+    field_offset = 0
     category_offset = len(canonical_fields)
     priority_offset = category_offset + len(categories)
     income_offset = priority_offset + len(priorities)
@@ -144,149 +184,168 @@ def main() -> None:
         features[:, offset] = income_values == group
     for offset, year in enumerate(years, start=year_offset):
         features[:, offset] = award_year == year
+    for start, end in (
+        (category_offset, priority_offset),
+        (priority_offset, income_offset),
+        (income_offset, year_offset),
+        (year_offset, len(feature_labels)),
+    ):
+        assert np.all(features[:, start:end].sum(axis=1) == 1)
 
     def metrics(draws: np.ndarray) -> np.ndarray:
-        source = np.sort(draws, axis=1)
+        sources = np.sort(draws, axis=1)
         keys = np.sort(name_id[draws], axis=1)
-        unique_sources = 1 + (source[:, 1:] != source[:, :-1]).sum(axis=1)
-        unique_keys = 1 + (keys[:, 1:] != keys[:, :-1]).sum(axis=1) - (keys[:, 0] == -1)
+        distinct_awards = 1 + (sources[:, 1:] != sources[:, :-1]).sum(axis=1)
+        distinct_keys = 1 + (keys[:, 1:] != keys[:, :-1]).sum(axis=1) - (keys[:, 0] == -1)
         return np.column_stack(
-            (
-                unique_sources,
-                unique_keys,
-                is_2024[draws].sum(axis=1),
-                np.isin(draws, pilots).sum(axis=1),
-                features[draws].mean(axis=1, dtype=np.float64),
-            )
+            (distinct_awards, distinct_keys, features[draws].sum(axis=1, dtype=np.int32))
         )
 
-    rng = np.random.default_rng(20261112)
-    protocol = np.empty((REPS, 4 + len(feature_labels)), dtype=np.float64)
-    fair = np.empty_like(protocol)
-    completed_lengths: list[int] = []
+    fair_rng, actual_rng = (
+        np.random.default_rng(seed) for seed in np.random.SeedSequence(SEED).spawn(2)
+    )
+    metric_count = 2 + len(feature_labels)
+    fair = np.empty((REPS, metric_count), dtype=np.float64)
+    actual = np.empty_like(fair)
     for start in range(0, REPS, BATCH):
         batch_size = min(BATCH, REPS - start)
         fixed = np.broadcast_to(pilots, (batch_size, len(pilots)))
-        # Actual protocol: hand-picked pilots plus original replacement sampler.
-        protocol_draws = np.concatenate(
-            (fixed, rng.integers(population_size, size=(batch_size, 300))),
+        # Actual protocol: hand-picked pilots plus original full-pool replacement draws.
+        actual_draws = np.concatenate(
+            (fixed, actual_rng.integers(population_size, size=(batch_size, random_draws))),
             axis=1,
         )
-        # Fair comparator: 310 distinct award rows, uniformly without replacement.
+        # Fair design: uniform award rows without replacement.
         fair_draws = np.stack(
             [
-                rng.choice(
-                    population_size,
-                    size=len(observed),
-                    replace=False,
-                    shuffle=False,
-                )
+                fair_rng.choice(population_size, size=draws_per_sample, replace=False)
                 for _ in range(batch_size)
             ]
         )
         end = start + batch_size
-        protocol[start:end] = metrics(protocol_draws)
+        actual[start:end] = metrics(actual_draws)
         fair[start:end] = metrics(fair_draws)
 
-        if start == 0:
-            for prefix in protocol_draws[:100]:
-                seen = np.zeros(population_size, dtype=bool)
-                seen[prefix] = True
-                remainder = rng.permutation(np.flatnonzero(~seen))
-                completed = np.concatenate((prefix, remainder))
-                assert len(np.unique(completed)) == population_size
-                completed_lengths.append(len(completed))
+    population_counts = features.sum(axis=0, dtype=np.int64)
+    pilot_counts = features[pilots].sum(axis=0, dtype=np.int64)
+    prevalence = population_counts / population_size
+    fair_mean = np.empty(metric_count)
+    actual_mean = np.empty(metric_count)
+    fair_mean[2:] = draws_per_sample * prevalence
+    actual_mean[2:] = pilot_counts + random_draws * prevalence
+    fair_mean[0] = draws_per_sample
+    actual_mean[0] = len(pilots) + (population_size - len(pilots)) * inclusion_probability(
+        population_size, random_draws, 1, replacement=True
+    )
 
-    assert np.all(fair[:, 0] == len(observed))
+    name_frequencies = np.bincount(name_id[name_id >= 0])
+    pilot_keys = {int(key) for key in name_id[pilots] if key >= 0}
+    fair_mean[1] = sum(
+        inclusion_probability(population_size, draws_per_sample, int(frequency), replacement=False)
+        for frequency in name_frequencies
+    )
+    actual_mean[1] = len(pilot_keys) + sum(
+        inclusion_probability(population_size, random_draws, int(frequency), replacement=True)
+        for key, frequency in enumerate(name_frequencies)
+        if key not in pilot_keys
+    )
+    difference = actual_mean - fair_mean
 
-    boot_rng = np.random.default_rng(20261113)
-    protocol_diff = np.empty((BOOT, protocol.shape[1]))
-    for index in range(BOOT):
-        fair_boot_mean = fair[boot_rng.integers(REPS, size=REPS)].mean(axis=0)
-        protocol_diff[index] = (
-            protocol[boot_rng.integers(REPS, size=REPS)].mean(axis=0)
-            - fair_boot_mean
+    simulated_fair_sd = fair.std(axis=0, ddof=1)
+    simulated_actual_sd = actual.std(axis=0, ddof=1)
+    fair_sd = simulated_fair_sd.copy()
+    actual_sd = simulated_actual_sd.copy()
+    fair_sd[2:] = np.sqrt(
+        draws_per_sample * prevalence * (1 - prevalence)
+        * (population_size - draws_per_sample) / (population_size - 1)
+    )
+    actual_sd[2:] = np.sqrt(random_draws * prevalence * (1 - prevalence))
+    # Rare indicators have noisy simulated SDs; compare where both outcomes recur.
+    sd_check = random_draws * np.minimum(prevalence, 1 - prevalence) >= SD_CHECK_MIN_RANDOM_COUNT
+    assert sd_check.any()
+    for simulated_sd, exact_sd in (
+        (simulated_fair_sd, fair_sd),
+        (simulated_actual_sd, actual_sd),
+    ):
+        assert np.all(
+            np.abs(simulated_sd[2:][sd_check] - exact_sd[2:][sd_check])
+            <= SD_CHECK_RTOL * exact_sd[2:][sd_check]
         )
-    protocol_ci = np.quantile(protocol_diff, [0.025, 0.975], axis=0)
-    actual = metrics(observed.reshape(1, -1))[0]
+    fair_range = np.quantile(fair, [0.025, 0.975], axis=0, method="nearest")
+    actual_range = np.quantile(actual, [0.025, 0.975], axis=0, method="nearest")
+    rmse_actual = np.sqrt(actual_sd**2 + difference**2)
+    sd_ratio = np.divide(
+        difference,
+        fair_sd,
+        out=np.full(metric_count, np.nan),
+        where=fair_sd > 0,
+    )
+    rmse_ratio = np.divide(
+        rmse_actual,
+        fair_sd,
+        out=np.full(metric_count, np.nan),
+        where=fair_sd > 0,
+    )
 
-    # Infer on the protocol-minus-fair mean contrast, testing each metric once.
-    test_columns = np.array([0, 1, 3, *range(4, protocol.shape[1])])
-    test_labels = [
-        "distinct_awards", "distinct_NameKeys", "pilot_row_occurrences", *feature_labels
-    ]
-    mean_difference = protocol.mean(axis=0) - fair.mean(axis=0)
-    standard_error = np.sqrt(
-        protocol.var(axis=0, ddof=1) / REPS + fair.var(axis=0, ddof=1) / REPS
-    )
-    varying = standard_error[test_columns] > 0
-    test_columns = test_columns[varying]
-    test_labels = [label for label, include in zip(test_labels, varying, strict=True) if include]
-    test_count = len(test_labels)
-    test_by_column = {int(column): position for position, column in enumerate(test_columns)}
+    # Independent formulas check the simulated design means, not their significance.
+    for simulated, expected, simulated_sd in (
+        (fair, fair_mean, simulated_fair_sd),
+        (actual, actual_mean, simulated_actual_sd),
+    ):
+        simulation_se = simulated_sd / sqrt(REPS)
+        assert np.all(np.abs(simulated.mean(axis=0) - expected) <= 6 * simulation_se + 1e-7)
+    assert np.all(fair[:, 0] == draws_per_sample)
 
-    p_values = np.array(
-        [
-            erfc(abs(mean_difference[column]) / (sqrt(2) * standard_error[column]))
-            for column in test_columns
-        ]
-    )
-    p_order = np.argsort(p_values, kind="stable")
-    holm_sorted = np.maximum.accumulate(
-        np.minimum(1.0, (test_count - np.arange(test_count)) * p_values[p_order])
-    )
-    holm_p = np.empty_like(p_values)
-    holm_p[p_order] = holm_sorted
-    unadjusted_discoveries = int(
-        ((protocol_ci[0, test_columns] > 0) | (protocol_ci[1, test_columns] < 0)).sum()
-    )
-    holm_discoveries = int((holm_p < ALPHA).sum())
-
-    def comparison_cells(column: int, scale: float) -> tuple[str, ...]:
-        protocol_mean = scale * protocol[:, column].mean()
-        fair_mean = scale * fair[:, column].mean()
+    def design_cell(column: int, *, fair_design: bool) -> str:
+        mean = fair_mean if fair_design else actual_mean
+        sd = fair_sd if fair_design else actual_sd
+        interval = fair_range if fair_design else actual_range
         return (
-            format_number(protocol_mean, "count"),
-            format_number(fair_mean, "count"),
-            f"{format_number(protocol_mean - fair_mean, 'count', signed=True)} "
-            f"[{format_number(scale * protocol_ci[0, column], 'count', signed=True)}, "
-            f"{format_number(scale * protocol_ci[1, column], 'count', signed=True)}]",
+            f"{format_number(mean[column], 'decimal')} ± "
+            f"{format_number(sd[column], 'decimal')} "
+            f"[{format_number(interval[0, column], 'integer')}, "
+            f"{format_number(interval[1, column], 'integer')}]"
         )
 
-    year_2024_column = 4 + year_offset + years.index(2024)
+    def ratio_cell(value: float, *, signed: bool = False) -> str:
+        return "—" if np.isnan(value) else format_number(value, "decimal", signed=signed)
 
-    def p_cells(column: int) -> tuple[str, str]:
-        position = test_by_column.get(year_2024_column if column == 2 else column)
-        if position is None:
-            return "—", "—"
-        return format_number(p_values[position], "p"), format_number(holm_p[position], "p")
+    def comparison_row(
+        label: str, column: int, population_rows: int | None, pilot_rows: int | None
+    ) -> tuple[str, ...]:
+        return (
+            label,
+            "—" if population_rows is None else format_number(population_rows, "integer"),
+            "—" if pilot_rows is None else format_number(pilot_rows, "integer"),
+            design_cell(column, fair_design=True),
+            design_cell(column, fair_design=False),
+            format_number(difference[column], "decimal", signed=True),
+            ratio_cell(sd_ratio[column], signed=True),
+            ratio_cell(rmse_ratio[column]),
+        )
 
-    def markdown_table(
-        headers: tuple[str, ...], table_rows: Sequence[tuple[str, ...]]
-    ) -> None:
-        print("| " + " | ".join(headers) + " |")
-        print("| " + " | ".join("---" for _ in headers) + " |")
-        for cells in table_rows:
-            print("| " + " | ".join(cells) + " |")
-        print()
-
+    headers = (
+        "Metric", "Population rows", "Pilot rows", "Fair E ± SD [95% range]",
+        "Actual E ± SD [95% range]", "Δ expected count", "Δ / fair SD",
+        "RMSE ratio (actual/fair)",
+    )
     print("# HCR award-row sampling comparison\n")
     print(f"Generated by `{Path(__file__).name}`.\n")
     print(
         f"{format_number(len(pilots), 'integer')} pilots were picked by hand before "
         "the original sampler, which then unintentionally used replacement for "
-        f"{format_number(len(observed) - len(pilots), 'integer')} draws and could "
-        "redraw those pilots. Although neither duplication nor pilot redraw occurred "
-        "in the stored run, this report compares that actual procedure with "
-        f"{format_number(len(observed), 'integer')} uniform draws without replacement.\n"
+        f"{format_number(random_draws, 'integer')} draws and could redraw those "
+        "pilots. Although neither duplication nor pilot redraw occurred in the "
+        "stored run, this report compares that actual procedure with "
+        f"{format_number(draws_per_sample, 'integer')} uniform draws without "
+        "replacement.\n"
     )
     print(
-        f"Source: read-only DuckDB post-normalization view "
-        f"`{POPULATION_ECON_VIEW}` with **{format_number(population_size, 'integer')} "
-        f"award rows**; observed `{SAMPLES_TABLE}` contain "
-        f"**{format_number(len(observed), 'integer')} "
-        f"draws**, including **{format_number(len(pilots), 'integer')} "
-        "fixed pilots** from 2024.\n"
+        f"Source: read-only DuckDB post-normalization view `{POPULATION_ECON_VIEW}` "
+        f"with **{format_number(population_size, 'integer')} award rows**; "
+        f"observed `{SAMPLES_TABLE}` contain "
+        f"**{format_number(draws_per_sample, 'integer')} draws**, including "
+        f"**{format_number(len(pilots), 'integer')} fixed pilots** from {pilot_year}.\n"
     )
     print("## Data lineage\n")
     print(
@@ -306,192 +365,114 @@ def main() -> None:
         "4. Step 4 maps year-specific affiliation headers to canonical primary/"
         "secondary affiliations, matches World Bank economies and income groups, "
         "and computes priority labels. This report selects those post-normalization "
-        f"columns from `{POPULATION_ECON_VIEW}`; category values remain "
-        "exact source labels.\n"
+        "columns from "
+        f"`{POPULATION_ECON_VIEW}`; category values remain exact source labels.\n"
+    )
+    print("## Measures\n")
+    print(
+        "All indicator counts are **draw occurrences**: repeated selection of an "
+        "award row counts again. `Distinct award rows` and `Distinct canonical "
+        "name pairs` instead count distinct values; a name-pair key is the exact "
+        "canonical first-name/last-name pair when both are nonblank, not a "
+        "verified person ID."
     )
     print(
-        f"Simulations: **{format_number(REPS, 'integer')} per design**; "
-        f"bootstrap: **{format_number(BOOT, 'integer')} resamples**.\n"
+        "Both designs sample award rows, so a researcher with multiple award "
+        "rows can appear more than once in the population."
     )
     print(
-        "**Rounding:** observed, population, and simulation counts are integers "
-        "with thousands separators; count means, differences, and interval bounds "
-        "use 2 decimals, or 4 when nonzero magnitude is below 0.01; p-values use 4 "
-        "decimals, with values below 0.0001 shown as `<0.0001`. Calculations "
-        "use unrounded values.\n"
+        f"For an indicator with {format_number(population_size, 'integer')} population "
+        "rows, K matching rows, and H matching pilots, exact expected draw counts "
+        f"are fair = {format_number(draws_per_sample, 'integer')} × K / N and "
+        f"actual = H + {format_number(random_draws, 'integer')} × K / N. "
+        "Distinct-count expectations use exact inclusion probabilities."
     )
     print(
-        f"- **Actual protocol:** {format_number(len(pilots), 'integer')} hand-picked "
-        f"pilots plus {format_number(len(observed) - len(pilots), 'integer')} draws "
-        "from the original replacement sampler's full award-row pool."
+        "At a fixed random-draw count, replacement changes indicator dispersion "
+        "but not expected counts, so indicator mean shifts here are set by these "
+        "pilots; distinct-award repeats can arise within the random draws or when "
+        "a draw reselects a pilot."
     )
     print(
-        f"- **Fair:** {format_number(len(observed), 'integer')} distinct award rows "
-        "uniformly sampled without "
-        "replacement from the full population.\n"
+        "SD is sample-to-sample variation: exact for indicator counts and estimated "
+        f"from {format_number(REPS, 'integer')} simulated samples per design for "
+        f"the distinct counts. Independent streams come from seed {SEED}. "
+        "Bracketed ranges are the central 95% of simulated "
+        "individual-sample counts (nearest simulated quantiles), not confidence "
+        "intervals for design means."
     )
-    print(f"## First {format_number(len(observed), 'integer')} draws\n")
-    core_headers = (
-        "Metric", "Observed", "Actual-protocol mean", "Fair mean",
-        "Δ protocol−fair, rows [95% CI]", "Two-sided p", "Holm p",
-    )
-    core_labels = (
-        "Distinct award rows", "Distinct NameKeys", "2024 award rows",
-        "Pilot-row occurrences",
-    )
-    core_rows = [
-        (
-            label, format_number(actual[column], "integer"),
-            *comparison_cells(column, 1.0), *p_cells(column),
-        )
-        for column, label in enumerate(core_labels)
-    ]
-    markdown_table(core_headers, core_rows)
     print(
-        "Pilot-row occurrences counts selections of the "
-        f"{format_number(len(pilots), 'integer')} hand-picked award rows; "
-        "replacement can select one again.\n"
+        "Δ is actual minus fair expected count. `Δ / fair SD` expresses that shift "
+        "relative to fair samples' typical variation. RMSE measures each design's "
+        "root-mean-square distance from the fair design's exact expectation; the "
+        "last column is actual RMSE divided by fair RMSE. A ratio of 1.00 means "
+        "equal RMSE; above 1.00 means larger actual RMSE and below 1.00 means "
+        "smaller actual RMSE. Its percentage difference is 100 × (ratio − 1). "
+        "A zero fair SD makes those ratios undefined (`—`).\n"
     )
-
-    print("## Protocol-versus-fair inference\n")
     print(
-        "Each nonconstant first-310-draw metric tests whether the actual-protocol "
-        "and fair **mean values differ**. The 2024 core count duplicates the "
-        "year:2024 count and is tested once. Two-sided normal p-values use the "
-        "Monte Carlo standard error of the simulated mean difference; Holm "
-        "adjustment covers all tested metrics. The 95% bootstrap CIs describe "
-        "precision of the estimated design-mean difference, not variation of "
-        "one sample. Differences and intervals are reported in rows per "
-        "first-310-draw sample.\n"
+        "**Rounding:** population and pilot counts and sample-range bounds are "
+        "integers with thousands separators. Means, SDs, differences, and ratios "
+        "use 2 decimals, 4 when nonzero magnitude is below 0.01, and 6 when "
+        "nonzero magnitude is below 0.0001. Calculations use unrounded values.\n"
     )
+    print("## Distinct counts\n")
     markdown_table(
-        ("Statistic", "Computed value"),
+        headers,
         [
-            ("Nonconstant metrics tested", format_number(test_count, "integer")),
-            ("Constant metrics excluded", format_number((~varying).sum(), "integer")),
-            (
-                "Nominal false positives if all nulls hold (5% per metric)",
-                format_number(ALPHA * test_count, "count"),
-            ),
-            (
-                "Observed 95% bootstrap CIs excluding zero",
-                format_number(unadjusted_discoveries, "integer"),
-            ),
-            (
-                "Metrics with Holm-adjusted p < 0.05",
-                format_number(holm_discoveries, "integer"),
-            ),
+            comparison_row("Distinct award rows", 0, None, None),
+            comparison_row("Distinct canonical name pairs", 1, None, None),
         ],
     )
 
-    print("### Ten largest absolute mean differences in rows\n")
-    top_rows = []
-    difference_rows = mean_difference[test_columns] * np.where(
-        test_columns < 4, 1, len(observed)
-    )
-    size_order = np.argsort(-np.abs(difference_rows), kind="stable")
-    for position in size_order[:10]:
-        column = int(test_columns[position])
-        scale = 1.0 if column < 4 else float(len(observed))
-        top_rows.append(
-            (
-                f"`{test_labels[position]}`",
-                comparison_cells(column, scale)[2],
-                format_number(p_values[position], "p"),
-                format_number(holm_p[position], "p"),
-            )
-        )
+    rank_columns = [0, 1, *range(2, metric_count)]
+    ranked = sorted(rank_columns, key=lambda column: -abs(difference[column]))[:10]
+    print("## Ten largest absolute expected-count differences\n")
     markdown_table(
-        ("Metric", "Δ mean rows [95% bootstrap CI]", "Two-sided p", "Holm p"),
-        top_rows,
-    )
-
-    print("## Completion checks\n")
-    markdown_table(
-        ("Metric", "Computed value"),
+        ("Metric", "Δ expected count", "Fair SD", "Δ / fair SD", "RMSE ratio (actual/fair)"),
         [
             (
-                "Completed actual-protocol runs",
-                format_number(len(completed_lengths), "integer"),
-            ),
-            (
-                "Distinct award rows per completed run",
-                format_number(population_size, "integer"),
-            ),
-            (
-                "Completed sequence length, mean",
-                format_number(np.mean(completed_lengths), "count"),
-            ),
-            (
-                "Completed sequence length, minimum",
-                format_number(min(completed_lengths), "integer"),
-            ),
-            (
-                "Completed sequence length, maximum",
-                format_number(max(completed_lengths), "integer"),
-            ),
-        ],
-    )
-
-    print("## Award year\n")
-    print("Year is taken from each award row's stored HCR filename. Values are **row counts**.\n")
-    year_headers = (
-        "Year", "Population rows", "Observed rows", "Actual-protocol mean",
-        "Fair mean", "Δ protocol−fair, rows [95% CI]", "Two-sided p", "Holm p",
-    )
-    year_rows = []
-    for offset, year in enumerate(years, start=4 + year_offset):
-        year_rows.append(
-            (
-                str(year), format_number((award_year == year).sum(), "integer"),
-                format_number(len(observed) * actual[offset], "integer"),
-                *comparison_cells(offset, float(len(observed))),
-                *p_cells(offset),
+                f"`{['distinct_awards', 'distinct_name_pairs', *feature_labels][column]}`",
+                format_number(difference[column], "decimal", signed=True),
+                format_number(fair_sd[column], "decimal"),
+                ratio_cell(sd_ratio[column], signed=True),
+                ratio_cell(rmse_ratio[column]),
             )
-        )
-    markdown_table(year_headers, year_rows)
-
-    indicator_headers = (
-        "Value", "Observed rows", "Actual-protocol mean", "Fair mean",
-        "Δ protocol−fair, rows [95% CI]", "Two-sided p", "Holm p",
+            for column in ranked
+        ],
     )
 
     def indicator_rows(values: Sequence[str], feature_offset: int) -> list[tuple[str, ...]]:
-        table_rows = []
-        for offset, value in enumerate(values, start=4 + feature_offset):
-            table_rows.append(
-                (
-                    f"`{value}`",
-                    format_number(len(observed) * actual[offset], "integer"),
-                    *comparison_cells(offset, float(len(observed))),
-                    *p_cells(offset),
-                )
+        return [
+            comparison_row(
+                f"`{value}`", column,
+                int(population_counts[column - 2]),
+                int(pilot_counts[column - 2]),
             )
-        return table_rows
+            for column, value in enumerate(values, start=2 + feature_offset)
+        ]
 
-    print("## Canonical post-normalization fields: nonblank row counts\n")
-    print("Counts include rows with a nonblank canonical field value.\n")
-    markdown_table(indicator_headers, indicator_rows(canonical_fields, 0))
+    print("## Award year\n")
+    print(f"Year is parsed from `{KTP_HCR_FILENAME_COL}`.\n")
+    markdown_table(headers, indicator_rows([str(year) for year in years], year_offset))
 
-    print("## HCR category: exact-value row counts\n")
-    markdown_table(indicator_headers, indicator_rows(categories, category_offset))
+    print("## Canonical post-normalization fields: nonblank draw occurrences\n")
+    markdown_table(headers, indicator_rows(canonical_fields, field_offset))
 
-    print("## Derived priority labels: row counts\n")
-    markdown_table(indicator_headers, indicator_rows(priorities, priority_offset))
+    print("## HCR category: exact-value draw occurrences\n")
+    markdown_table(headers, indicator_rows(categories, category_offset))
 
-    print("## Derived World Bank income groups: row counts\n")
-    print(f"`{MISSING_INCOME_GROUP}` represents a null income-group value.\n")
-    markdown_table(indicator_headers, indicator_rows(income_groups, income_offset))
-    print(
-        "**Method note:** Δ is actual-protocol mean minus fair mean. The bootstrap "
-        "intervals and p-values quantify Monte Carlo precision of the estimated "
-        "design-mean contrast, not variation across individual samples."
-    )
+    print("## Derived priority label: draw occurrences\n")
+    markdown_table(headers, indicator_rows(priorities, priority_offset))
+
+    print("## Derived World Bank income group: draw occurrences\n")
+    print(f"`{MISSING_VALUE}` denotes a null source value in any categorical group.\n")
+    markdown_table(headers, indicator_rows(income_groups, income_offset))
 
 
 def cli() -> None:
     parser = argparse.ArgumentParser(
-        description="Compare the historical HCR sample protocol with fair sampling.",
+        description="Compare actual-protocol and fair HCR award-row sampling designs.",
         epilog="Without --output, the Markdown report is written to stdout.",
     )
     parser.add_argument(
@@ -506,7 +487,7 @@ def cli() -> None:
     report = StringIO()
     with redirect_stdout(report):
         main()
-    args.output.write_text(report.getvalue(), encoding="utf-8")
+    args.output.write_text(report.getvalue().rstrip("\n") + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
