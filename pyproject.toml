@@ -128,6 +128,11 @@ no-default-feature = false
 features = [
   "detour-mode0-econ-stats",
 ]
+[tool.pixi.environments.detour-hcr-algebra]
+no-default-feature = false
+features = [
+  "detour-hcr-algebra",
+]
 [tool.pixi.environments.detour-ai-augment]
 no-default-feature = false
 features = [
@@ -676,6 +681,14 @@ depends-on = [
 test-detour-mode0-econ-stats = [
   { task = "test", args = ["tests/test_detours/test_detour_mode0_econ_stats.py"], environment = "detour-mode0-econ-stats" },
 ]
+
+# ===================
+# Detour: HCR Algebra
+# ===================
+
+[tool.pixi.feature.detour-hcr-algebra.tasks.sampling-bootstrap]
+cmd = "python -m src.detours.detour_hcr_algebra.sampling_bootstrap.sampling_bootstrap --output src/detours/detour_hcr_algebra/sampling_bootstrap/README.md"
+cwd = "."
 
 # ==================
 # Detour: AI Augment

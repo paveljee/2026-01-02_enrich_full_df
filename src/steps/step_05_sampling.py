@@ -1,3 +1,24 @@
+"""
+IMPORTANT! The original sampling algorithm was
+with replacement, which was not intended.
+
+Also, the original sampling algorithm could resample
+from the hand-picked 10 pilot draws, which was also
+not intended.
+
+By chance, all the 300 eventual draws were unique and
+no pilots were redrawn.
+
+In this step 5, these issues have been fixed for
+future draws while preserving compatibility and
+no regressions for the first 300 draws.
+
+Specifically, this is achieved by implementing
+a `replace=True/False` switcher in the sampling
+configuration.
+"""
+
+
 from __future__ import annotations
 
 import duckdb
@@ -6,7 +27,7 @@ import pandas as pd
 
 from ..helpers.config import SampleDrawSpec
 from ..helpers.context import PipelineContext, StepResult
-from ..helpers.duckdb_utils import register_frame
+from ..helpers.duckdb_utils import draw_order_sql, register_frame
 from ..helpers.schema import (
     POPULATION_ECON_TABLE,
     POPULATION_NAMES_TABLE,
@@ -274,6 +295,7 @@ def run(context: PipelineContext) -> StepResult:
         f'e."{KTP_PRIORITY_GROUP_COL}" AS "{KTP_PRIORITY_GROUP_COL}"',
     ]
     select_expr = ", ".join(part for part in select_parts if part)
+    draw_order = ", ".join(draw_order_sql(f's."{DRAW_LABEL}"'))
 
     conn.execute(
         f"""
@@ -287,20 +309,7 @@ def run(context: PipelineContext) -> StepResult:
           ON p."{KTP_POPULATION_INDEX_COL}" = n."{KTP_POPULATION_INDEX_COL}"
         JOIN {POPULATION_ECON_TABLE} e
           ON p."{KTP_POPULATION_INDEX_COL}" = e."{KTP_POPULATION_INDEX_COL}"
-        ORDER BY
-            CASE
-                WHEN starts_with(s."{DRAW_LABEL}", 'pilot.') THEN 0
-                WHEN TRY_CAST(s."{DRAW_LABEL}" AS BIGINT) IS NOT NULL THEN 1
-                ELSE 2
-            END,
-            CASE
-                WHEN starts_with(s."{DRAW_LABEL}", 'pilot.')
-                    THEN TRY_CAST(split_part(s."{DRAW_LABEL}", '.', 2) AS BIGINT)
-                WHEN TRY_CAST(s."{DRAW_LABEL}" AS BIGINT) IS NOT NULL
-                    THEN CAST(s."{DRAW_LABEL}" AS BIGINT)
-                ELSE NULL
-            END,
-            s."{DRAW_LABEL}"
+        ORDER BY {draw_order}
         """
     )
 

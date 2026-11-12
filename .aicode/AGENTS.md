@@ -74,6 +74,10 @@ a substitute for current user instructions.
 - Make surgical edits within the requested scope. Reuse existing production
   helpers and local step logic rather than inventing abstractions or making
   unrelated refactors. Preserve established data flow and serialization.
+  In analysis scripts, import existing table/column identifiers from
+  `src.helpers.schema` and `src.helpers.vars` instead of repeating literals;
+  audit quoted identifiers after editing. Use `python -m` for repository
+  modules so a path-launched script does not need to mutate `sys.path`.
   When centralizing literals in an inline task, group meaningful input patterns
   and report templates; keep routine API arguments and punctuation inline rather
   than inventing enums, dictionaries, or constants for them.

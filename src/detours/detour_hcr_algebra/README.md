@@ -18,7 +18,8 @@ These HCR awards rows need to be deduplicated, or rather, reduced to the populat
 How the main pipeline currently does this is as follows:
 
 * Loads the Excel files and normalizes column name spellings across years to concatenate the spreadsheets into one dataframe, which leads to the `59,665` total rows figure (`step_03`).
-* Shuffles these HCR rows randomly, assigning each random draw a `draw_number` (`step_05`)
+* Shuffles these HCR rows randomly, assigning each random draw a `draw_number` (`step_05`).
+  See more under `./sampling_bootstrap/`.
 * **Drops rows** where the tuple of first and last name are exact string duplicates and **excludes** rows where the first or last name is empty (`step_06`).
   The number of remaining rows is `19,786` at this point, so the row count drops by 67%.
   Note that out of a duplicate pair, the row _drawn first_ is kept.
