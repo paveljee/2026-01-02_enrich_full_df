@@ -269,29 +269,104 @@ input(
 cwd = "."
 
 [tool.pixi.tasks.parse-docx]
-args = [{ arg = "docx_path" }]
 cmd = """
 python -c '
+import argparse
 from pathlib import Path
-from sys import argv
-from src.helpers.data_models import FragmentType, ResourceGroup
+
+from src.helpers.cards import build_cards, render_docx_bytes
+from src.helpers.config import PipelineConfig
+from src.helpers.data_models import FragmentType, InnerDict, NameKey, OuterDict, ResourceGroup
+from src.helpers.procedures import DocxMatchProcedure
 from src.helpers.resources import register_resource
+from src.helpers.vars import (
+    CSV_ROW_INDEX_COL,
+    DOCX_FRAGMENT_COL,
+    DOCX_ROW_INDEX_COL,
+    DOCX_TABLE_INDEX_COL,
+    KTP_DOCX_ROW_NUMBER_COL,
+    KTP_FILENAME_COL,
+    KTP_FRAGMENT_COL,
+    KTP_FRAGMENT_TYPE_COL,
+    KTP_NAMEKEY_COL,
+)
 from src.steps.step_08_match_docx import load_single_table_docx
+
+parser = argparse.ArgumentParser(prog="pixi run parse-docx")
+parser.add_argument("docx_path", type=Path)
+parser.add_argument("--output", choices=("json", "docx"), default="json")
+args = parser.parse_args()
+docx = args.docx_path
 resource = register_resource(
-    docx := Path(argv[1]),
+    docx,
     group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
     fragment_type=FragmentType.DOCX_ROW,
 )
 parsed = load_single_table_docx({resource.name: resource})
-with docx.with_suffix(".json").open("x", encoding="utf-8") as output:
-    print(parsed.to_json(
-        orient="records",
-        index=False,
-        force_ascii=False,
-        indent=2
-    ), file=output)
-print(f"Parsed DOCX and saved the result to {output.name!r}")
-' "{{ docx_path }}"
+serialized = parsed.to_json(
+    orient="records",
+    index=False,
+    force_ascii=False,
+    indent=2
+)
+if args.output == "json":
+    output_path = docx.with_suffix(".json")
+    with output_path.open("x", encoding="utf-8") as output:
+        print(serialized, file=output)
+else:
+    if parsed.empty:
+        raise ValueError("Parsed DOCX contains no rows")
+
+    config = PipelineConfig.from_json(Path("config.repl.json"))
+    name_key = NameKey(
+        first_name="ktp.first_name (placeholder)",
+        last_name="ktp.last_name (placeholder)",
+    )
+    outer_dict = OuterDict.from_name_keys([name_key])
+    procedure = DocxMatchProcedure()
+    for row in parsed.to_dict("records"):
+        outer_dict.add_inner(
+            name_key,
+            InnerDict.from_mapping(
+                {
+                    KTP_FRAGMENT_COL: row[KTP_DOCX_ROW_NUMBER_COL],
+                    KTP_FRAGMENT_TYPE_COL: resource.fragment_type.value,
+                    **row,
+                },
+                procedure,
+            ),
+        )
+
+    intro = (
+        "## Parsed DOCX preview — not a production card\\n\\n"
+        "Last modified (introduction): [last_modified_introduction]\\n\\n"
+        "Date of report: [date_of_report]\\n\\n"
+        "Subset applied: mode [card_subset_mode] "
+        "([card_subset_mode_description])."
+    )
+    cards = build_cards(
+        outer_dict,
+        total_draws="[total_draws]",
+        intro=intro,
+        excluded_cols={
+            KTP_FILENAME_COL,
+            KTP_NAMEKEY_COL,
+            CSV_ROW_INDEX_COL,
+            DOCX_TABLE_INDEX_COL,
+            DOCX_ROW_INDEX_COL,
+            DOCX_FRAGMENT_COL,
+            KTP_DOCX_ROW_NUMBER_COL,
+        },
+    )
+    card_markdown = next(iter(cards.values()))
+
+    output_path = docx.with_suffix(".parsed.docx")
+    with output_path.open("xb") as output:
+        output.write(
+            render_docx_bytes(card_markdown, config.pandoc_reference_docx)
+        )
+print(f"Parsed DOCX and saved the result to {output_path.name!r}")
+'
 """
 cwd = "."
 
