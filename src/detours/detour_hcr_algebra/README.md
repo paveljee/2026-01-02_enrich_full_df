@@ -20,11 +20,11 @@ The population of HCR award rows need to be deduplicated, or rather, reduced to 
 How the main pipeline currently does this is as follows:
 
 *   Registers input files and verifies their hash sums (`step_01`).
-*   Loads Clarivate's Excel files (`step_02`), normalizes column name spellings across years to concatenate the spreadsheets into one dataframe, which leads to the `59,665` total award rows figure (`step_03`), and augments the dataframe with some derived columns (`step_04`).
+*   Loads Clarivate's Excel files and concatenates the spreadsheets into one dataframe, which leads to the `59,665` total award rows figure (`step_02`), normalizes column name spellings across years (`step_03`), and augments the dataframe with certain derived columns (`step_04`).
 *   Shuffles award rows randomly, assigning each random draw a `draw_number` (`step_05`).
 
     In reality, the actual sampling strategy differed from an ideal one because 10 rows were hand-picked for piloting, then by mistake random sampling was implemented with replacement.
-    For the impact of these changes see `./sampling_bootstrap/`, but my interpretation is that the impact of the sampling misimplementation was minimal while the observed biases align with the hand-picked pilots – particularly:
+    For the impact of these changes see a simulation in `./sampling_bootstrap/`, but my interpretation is that the impact of the sampling misimplementation was minimal while biases observed in the simulation align with the hand-picked pilots – particularly:
 
     - an increased number of 2024 rows (2024 was a convenience selection),
     - an increase in HCRs from non-English-speaking countries (it was desirable to select less common rows for pilots), and
@@ -36,7 +36,7 @@ How the main pipeline currently does this is as follows:
     The number of remaining (i.e., deduplicated) rows is `19,786`, so the total row count drops by 67%.
     <!--- Wishlist: Note that out of a duplicate pair, the row _drawn first_ is kept. --->
 *   **Pronounces** the `19,786` first/last name tuples kept to be _NameKeys,_ which are conceptualized as **the authoritative proxies** for the individual HCRs.
-    Each NameKey defines an _OuterDict_ entry or HCR profile that will then be filled in with _InnerDicts_, each innerdict representing a piece of information (i.e., one more more key-value pairs) about the HCR coming from a particular source (the source being uniquely identified by a _SourceKey_).
+    Each NameKey defines an _OuterDict_ entry or HCR profile that will then be filled in with _InnerDicts_, each innerdict representing a piece of information (i.e., one more key-value pairs) about the HCR coming from a particular source (the source being uniquely identified by a _SourceKey_).
     To be sure, each outerdict entry (corresponding one-to-one to a unique namekey) is guaranteed to receive at least one innerdict at this point – the award row from which the namekey originated.
 
     Recall that in `step_06` above, award rows were deduplicated using an exact string match of the first/last name tuple to produce namekeys. This has an evident consequence:
@@ -53,16 +53,52 @@ How the main pipeline currently does this is as follows:
     1. these rows do not get a corresponding namekey;
     2. these rows do not participate in the innerdict pool.
 
-    In effect, therefore, the excluded rows are completely excluded from any further processing, and it is thus criticial to keep them in mind when interpreting any downstream pipeline operations. These `4` rows are recorded in a pipeline artifact and in pipeline logs.
+    In effect, therefore, the excluded rows are completely excluded from any further processing, and it is thus critical to keep them in mind when interpreting any downstream pipeline operations. These `4` rows are recorded in a pipeline artifact and in pipeline logs.
 *   Reuses the Excel award row population, which namekeys were produced from, to match namekeys to award rows using a specially developed Excel-matching rule (`step_07`).
     This process treats an outerdict entry, identified uniquely by the namekey, as an empty shell that is being filled with matching Excel award rows (which now become innerdicts).
     This process is conceptually the same for the following matching steps except that the matching logic differs.
 *   Matches across Word documents containing manually augmented data using a specially developed Word-matching rule (`step_08`).
 *   Matches across SciSciNet v2 parquets and OpenAlex API data using a specially developed name- and hit-matching rule (`step_09`).
 *   Renders an HCR card, per namekey, that contains all of the innerdicts enclosed in the namekey's one-to-one corresponding outerdict entry (`step_10`).
+    
+    If two or more outerdict entries contain an identical _set_ of innerdicts, only one of these entries gets a rendered card.
+    As clarified for `step_07` above, the occurrence of several outerdict entries containing an identical set of innerdicts is perfectly possible because, while distinct namekeys are guaranteed to be exact-string unique first/last name tuples, they may only differ minimally (e.g., in whitespaces or punctuation), which can lead to multiple namekeys matching the same set of innerdicts under certain matching rules.
+    In other words, namekeys may lose their distinctiveness if subjected to additional normalization.
 
+    Also, a card is not rendered for an outerdict entry if its set of innerdicts is empty.
+
+## Limitations
+The multiple "asterisks" the current pipeline comes with, as outlined above, together, lead to the following outcome: the intent that the namekey becomes the authoritative proxy for an individual HCRs **fails** to realize. The reasons are as follows:
+
+1.  Multiple outerdict entries may contain identical innerdicts if matching allows.
+    Even further, multiple outerdict entries may contain _an identical set_ of innerdicts if matching allows.
+    Consider the John R/R. Smith case above that exemplifies how, under certain matching rules, two distinct namekeys may match the exact same set of innerdicts.
+    Obviously, this contradicts the idea of a namekey serving as the single authoritative HCR proxy.
+2.  Distinct namekeys may actually relate to the same HCR individual.
+    Consider the same John R/R. Smith case, where these two spellings most likely relate to the same person while constituting distinct namekeys.
+3.  Award rows excluded (in `step_06`) may have been matched as valid innerdicts into one or more outerdict entries – as demonstrated in an analysis in `./excluded_rows/`.
+    Therefore, certain outerdict entries may contain fewer innerdicts than they could have, leading to data loss.
+    To be fair, the analysis shows that this only affects `1` namekey across the observed `59,665`/`19,786` award row/namekey population.
+
+These limitations are partially mitigated:
+
+1.  As clarified for `step_10`, if there are multiple outerdict entries containing the exact same set of innerdicts, regardless of the outerdict entry's namekey, only one gets a rendered card.
+
+    At this point, it would perhaps have been desirable to also preserve the linkage between the kept outerdict entry, its one-to-one unique namekey, and ultimately – the originating draw number.
+    However, as clarified for `step_06` above, the connection between the originating award row (and, therefore, its draw number) and the produced namekey is lost under the current logic.
+2.  Thanks to the deduplication of outerdict entries that happens at `step_10`, some of the falsely distinct namekeys do not get a rendered card.
+
+    However, this only addresses this issue within the capacity of the matching rules.
+    If the matching rule is not powerful enough, it will fail to detect all truly matching innerdicts, and therefore the sets of innerdicts may differ for several namekeys actually relating to the same HCR.
+
+    Note also that at `step_10`, the full sets of innerdicts coming from all registered sources are compared, and a single differring match is what it takes for the set difference to become non-empty and for the outerdict entries to remain distinct.
+
+    An additional shortcoming of the status quo is that multiple matching rules are used, making the matching process sort of flaky, that is, the rules are tailored for each resource group (e.g., for Clarivate's Excel files, manual augmentation Word files, and for SciSciNet v2/OpenAlex data), and it is thus not easy to trace the matching process end to end.
+    This may be beneficial from the standpoint of each resource group if the matching rule is robust and highly appropriate for this specific resource group versus the other, but this is not necessarily the case here as I will show in the next section.
+3.  Beyond keeping a record of the excluded rows and my undertaking a targeted analysis of these (`./excluded_rows/`), the pipeline code base itself does nothing to mitigate the loss of excluded award rows.
 
 ## Desirable next state
+Let us consider each resource group in isolation:
 …
 
 [gh-paveljee]: https://github.com/paveljee
