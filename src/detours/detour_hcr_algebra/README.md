@@ -97,6 +97,12 @@ These limitations are partially mitigated:
     This may be beneficial from the standpoint of each resource group if the matching rule is robust and highly appropriate for this specific resource group versus the other, but this is not necessarily the case here as I will show in the next section.
 3.  Beyond keeping a record of the excluded rows and my undertaking a targeted analysis of these (`./excluded_rows/`), the pipeline code base itself does nothing to mitigate the loss of excluded award rows.
 
+Separately, a definite limitation is that the current pipeline is willing to automatically match only roughly `13421 of 15726 (85.3%)` namekeys (`19786 - 4060 = 15726` after removing duplicate outerdict entries with identical sets of InnerDicts at `step_10`), according to one of the most recent whole-award row population runs (under the `config.repl.all_mode3.json` configuration file).
+Consequently, the pipeline defers `2305 of 15726 (14.7%)` of all namekeys to manual review.
+Even if considering AI for this (e.g., see the experimental `aicode/xlsx-namekey-ai` branch), this will be a multi-day exercise.
+
+All in all, an alternative, straightforward strategy consistently reducing all `100%` of HCR award rows to a population of individual HCRs would be desirable, if possible.
+
 ## Desirable next state
 Let us consider each resource group in isolation:
 …
