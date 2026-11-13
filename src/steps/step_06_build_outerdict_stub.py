@@ -28,6 +28,12 @@ from ..helpers.vars import (
 )
 from .shared import archived_outerdict_message, more_excluded_message, outerdict_keys_message
 
+def excluded_name_condition_sql(first_name_expr: str, last_name_expr: str) -> str:
+    return f"""{first_name_expr} IS NULL
+    OR {last_name_expr} IS NULL
+    OR {first_name_expr} = ''
+    OR {last_name_expr} = ''"""
+
 
 def run(context: PipelineContext) -> StepResult:
     conn: duckdb.DuckDBPyConnection = context.conn
@@ -57,10 +63,10 @@ def run(context: PipelineContext) -> StepResult:
             "{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
             "{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}"
         FROM {SAMPLES_WITH_NAMES_VIEW}
-        WHERE "{KTP_FIRST_NAME_COL}" IS NULL
-           OR "{KTP_LAST_NAME_COL}" IS NULL
-           OR "{KTP_FIRST_NAME_COL}" = ''
-           OR "{KTP_LAST_NAME_COL}" = ''
+        WHERE {excluded_name_condition_sql(
+            f'"{KTP_FIRST_NAME_COL}"',
+            f'"{KTP_LAST_NAME_COL}"',
+        )}
         ORDER BY
             CASE
                 WHEN starts_with(CAST("{DRAW_LABEL}" AS VARCHAR), 'pilot.') THEN 0

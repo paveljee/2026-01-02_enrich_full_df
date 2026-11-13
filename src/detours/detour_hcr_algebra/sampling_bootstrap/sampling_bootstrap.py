@@ -17,6 +17,7 @@ from typing import Literal
 import duckdb
 import numpy as np
 
+from src.detours.detour_hcr_algebra.shared import markdown_table
 from src.helpers.schema import POPULATION_ECON_VIEW, POPULATION_TABLE, SAMPLES_TABLE
 from src.helpers.vars import (
     DRAW_LABEL,
@@ -73,14 +74,6 @@ def inclusion_probability(
     return -expm1(
         sum(log1p(-group_size / (population_size - draw)) for draw in range(draws))
     )
-
-
-def markdown_table(headers: tuple[str, ...], rows: Sequence[tuple[str, ...]]) -> None:
-    print("| " + " | ".join(headers) + " |")
-    print("| " + " | ".join("---" for _ in headers) + " |")
-    for cells in rows:
-        print("| " + " | ".join(cells) + " |")
-    print()
 
 
 def main() -> None:

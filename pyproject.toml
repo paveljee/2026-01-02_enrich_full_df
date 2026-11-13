@@ -690,6 +690,10 @@ test-detour-mode0-econ-stats = [
 cmd = "python -m src.detours.detour_hcr_algebra.sampling_bootstrap.sampling_bootstrap --output src/detours/detour_hcr_algebra/sampling_bootstrap/README.md"
 cwd = "."
 
+[tool.pixi.feature.detour-hcr-algebra.tasks.excluded-rows]
+cmd = "python -m src.detours.detour_hcr_algebra.excluded_rows.excluded_rows --output src/detours/detour_hcr_algebra/excluded_rows/README.md"
+cwd = "."
+
 # ==================
 # Detour: AI Augment
 # ==================
