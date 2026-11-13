@@ -105,7 +105,105 @@ All in all, an alternative, straightforward strategy consistently reducing all `
 
 ## Desirable next state
 Let us consider each resource group in isolation:
-…
+
+1.  **Clarivate's Excel files.**
+    Rows that match exactly are accounted for (i.e., deduplicated) when they are reduced to namekeys.
+    This amounts to `59665 - 19786 = 39879` rows.
+
+    The undesirable loss is the connection to the originating award row's draw number, as already mentioned above, and this needs to be addressed.
+
+    Another source of undesirable loss is the `4` excluded rows where the first or the last name is empty. These have effectively been matched to the corresponding individual HCRs already (manually, see `./excluded_rows/`).
+    Honestly, given the highly lossy status of the data when one of the names is missing, perhaps this should stay this way.
+    While not reflected in the `excluded_rows` analysis, I have also reviewed each of these HCRs manually, and I have attempted OpenAlex author search on these ones, and yes I confirm that these are highly error-prone and highly risky for automated matching.
+    As such, I would reinforce manual matching as the right policy for excluded award rows even under a hypothetical or future scale-up (i.e., beyond the `59,665` rows).
+
+    The remaining award rows, i.e., the `19,786` distinct namekeys corresponding one-to-one to the originating row (assuming this correspondence is preserved as desired), require fuzzy string matching.
+    This is currently being done using obscure, heuristical `xlsx_name` match rules `v1/v2`, which are not very easy to defend and overall leave more to be desired.
+    And, as mentioned above, the rule refuses to match a certain subset of namekeys, perceived to have a higher risk of false matches (both positive and negative), deferring them to manual review.
+2.  **Manually augmented Word documents.**
+    Because the source blueprints for manual augmentation were produced, one-to-one, from known HCR award row draws, and the current Word matching strategy is merely a compensation for the failure to preserve these matchings to begin with, it would be desirable to conduct this matching _once,_ manually verify it, and since then preserve the one-to-one Word sourcekey-Excel sourcekey (draw number) matches as a static artifact.
+    Assuming this is done, each of these becomes a mere proxy for its corresponding HCR award row, and this resource group therefore ceases to be part of the matching problem altogether.
+3.  **SciSciNet v2/OpenAlex API data.**
+    An obscure, complex heuristical matching rule that relies on all of the names, hits, and live OpenAlex API calls has been devised and used to establish these matches.
+    As mentioned above, the rule refuses to match a certain subset of namekeys, perceived to have a higher risk of false positive or false negative matches, deferring them to manual review.
+
+Speculatively, if there was an authoritative mechanism to match all of the `19,786` distinct namekeys, one-to-one, to a single best SciSciNet v2/OpenAlex `authorid` _to begin with_ (i.e., back at `step_06`), this would allow us to _collate_ the award keys (leveraging the one-to-one linkage to the originating row – assumed established, see above) by `authorid`, thereby solving _both_ the Excel and SciSciNet v2 matching problem at the same time (the Word matching problem assumed ceased to exist - see above).
+
+Perhaps the following could be a promising candidate for such a mechanism - citing from ChatGPT-6-Pro (as of 2026-11-10):
+
+---
+
+**One resolver after step 3: OpenAlex supplies candidate authors and metrics; your pipeline makes the final selection.** It produces the NameKey → author-ID mapping used for early merging.
+
+### 1. Retrieve candidates for each unique NameKey
+
+Request:
+
+```text
+GET /authors
+  ?search=<first name + last name>
+  &per_page=100
+  &select=id,display_name,display_name_alternatives,works_count,cited_by_count
+```
+
+Fetch all pages. Taking only the first 100 could change the candidate distribution and therefore the Tukey result. OpenAlex searches primary and alternative names. [help.openalex.org](https://help.openalex.org/api/searching/?utm_source=chatgpt.com)
+
+### 2. Apply the existing SSN name rule locally
+
+Normalize the input and every returned primary/alternative name using the existing rule. Keep authors having an exact normalized match.
+
+Deduplicate **`(NameKey, author_id)`** before calculating statistics; multiple matching aliases must not give one author extra weight.
+
+This preserves the [existing equality test](https://github.com/paveljee/2026-01-02_enrich_full_df/blob/ce57e5105595e18cd6abe596601e784367305ef4/src/helpers/name_matching.py#L335-L380). Candidate recall still depends on what OX search retrieves.
+
+### 3. Obtain hit counts for surviving authors
+
+Works and citation counts already came from step 1. Collect all surviving author IDs across NameKeys, then obtain hit counts **once per unique author**, in batches.
+
+Use the documented OQL pattern:
+
+```text
+get the count of top 1% cited works
+by author in (
+  [Jason R Priem](A5023888391),
+  [Heather Piwowar](A5048491430)
+)
+```
+
+The IDs would be your actual candidates. Restricting the **author groups** prevents unrelated coauthors from entering the results. [help.openalex.org](https://help.openalex.org/access/oql/?utm_source=chatgpt.com)
+
+After a successful, complete response, an absent candidate has zero qualifying works. Failed or incomplete requests mean unknown, not zero.
+
+### 4. Run SSN-style selection on a local candidate table
+
+The intermediate relation would be:
+
+```text
+candidate_metrics(
+    name_key, author_id, hit_count, works_count, cited_by_count
+)
+```
+
+For each NameKey separately:
+
+- Remove zero-hit candidates.
+- Calculate the existing Tukey fences for hits, works and citations.
+- Use the union of outliers when any exist; otherwise use the whole eligible pool.
+- Select the maximum-works candidate from that pool.
+
+I’d refactor the [existing selector](https://github.com/paveljee/2026-01-02_enrich_full_df/blob/ce57e5105595e18cd6abe596601e784367305ef4/src/helpers/ssn_hit_selection.py#L175-L369) to consume this relation, keeping the decision logic in one place.
+
+### What this means for your intended replacement
+
+**This preserves SSN’s selection mechanics, while replacing its data inputs.** OX top-1% work counts differ from SSN’s summed level0/level1 hit entries; current OX metrics also differ from the SSN snapshot.
+
+There is one policy decision: existing SSN sometimes retains multiple candidates. Your one-ID design requires an explicit tie-break rule and a change to the current OX-disagreement behavior. I’d make the local selection authoritative and retain OX relevance agreement as diagnostic evidence. Empty candidate sets would remain unresolved.
+
+Once selection finishes, merge by author ID, retain all original NameKeys, attach their XLSX rows, apply the existing DOCX rule across those aliases, and attach SSN by ID.
+
+**The benefit is control over eligibility and selection:** you can enforce your exact name rule and candidate-relative statistics while using OX as the upstream identity source.
+
+---
 
 [gh-paveljee]: https://github.com/paveljee
 [gh-b01f73b4]: https://github.com/paveljee/2026-01-02_enrich_full_df/commit/b01f73b487b79f1e2e4299889d81aa29b51e7ffa
