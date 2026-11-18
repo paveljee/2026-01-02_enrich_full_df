@@ -786,6 +786,227 @@ pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.contro
 
 ```
 
+
+### 2026-11-18
+
+```shell
+#!/bin/zsh
+
+# ===============================================
+# KTP RI pipeline: AI augmentation detour.
+# Production runs started on 2026-11-18 UTC-5,
+# aiming to release the outputs as batch-10 (n=20),
+# which will only include namekeys with missing
+# manually extracted data this time, in draw order.
+# General notes from 2026-11-02 runs apply.
+# Fresh repo, fresh databases, fresh replay log,
+# all fresh. Across runs, replay logs can be
+# merged into a disposable single replay log
+# and database and artifacts replayed from it.
+# ================================================
+
+PWD_20261102="$HOME/2026-01-02_enrich_full_df_20261102" # prior run for reuse
+
+# Clone the GitHub repo and make it the workdir:
+PWD_20261118="$HOME/2026-01-02_enrich_full_df_20261118"
+git clone https://github.com/paveljee/2026-01-02_enrich_full_df.git "$PWD_20261118"
+cd "$PWD_20261118"
+
+# The tag below was added after 2026-11-02 runs.
+# It is a few commits ahead of the original 
+# commit `3200cf03` that was used at the time of
+# those runs, but nothing has changed since beyond
+# configs, paths, and docs.
+git checkout tags/release-batch-9
+# M	src/detours/detour_ai_augment/README.md
+# Note: switching to 'tags/release-batch-9'.
+#
+# You are in 'detached HEAD' state. You can look around, make experimental
+# changes and commit them, and you can discard any commits you make in this
+# state without impacting any branches by switching back to a branch.
+#
+# If you want to create a new branch to retain commits you create, you may
+# do so (now or later) by using -c with the switch command. Example:
+#
+#   git switch -c <new-branch-name>
+#
+# Or undo this operation with:
+#
+#   git switch -
+#
+# Turn off this advice by setting config variable advice.detachedHead to false
+#
+# HEAD is now at 6b9b0a2f detour ai augment prod runs report: upd status line     
+
+# Prefer Linux over macOS for prod runs for reproducibility
+# where possible - although will have to switch over to
+# macOS for AI augmentation detour runs, see below.
+
+# Provision a fresh Lima instance while using some known
+# image - just reuse the config we already have; resources
+# there should be enough for everything:
+mkdir ./tmp
+# Remove prior runs' instance
+limactl remove detour-ai-augment-prod-20261102  # success
+export MOUNT_DIR_YAML="$PWD"
+export GUEST_MOUNTPOINT_YAML="$MOUNT_DIR_YAML"
+# Change instance name to match current runs
+export LIMA_INSTANCE="detour-ai-augment-prod-20261118"
+export LIMA_START_TIMEOUT="25m"  # as in deploy.sh
+# The below are read-only mounts for config:
+export SSN_V2="/Volumes/home/anonymous/sciscinet/v2/hf/xet"
+export HCR_XLSX="/Volumes/Users/Anonymous/Workshop/20250416T1600Z_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final"
+export KTP_DOCX="/Volumes/Users/Anonymous/Workshop/20250416T1600Z_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions"
+# Reuse some of heaviest artifacts from prebuilt prior:
+export PIPELINE_HEAVY="/Volumes/home/aicode/2026-01-02_enrich_full_df/data/output"
+# These lines cover the YAML template and start command:
+sed -n '293,385p' src/detours/detour_ai_augment/protected/src/agent_runtime/deploy.sh | awk '
+  /^param:/ || /^portForwards:/ || /^provision:/ { skip=1; next }
+  /^EOF$/ { skip=0; print; next }
+  skip && /^[^[:space:]#]/ { skip=0 }
+  !skip && /^mountType:/ {
+    for (i = 1; i <= 4; i++) {
+      name = (i == 1 ? "SSN_V2" : i == 2 ? "HCR_XLSX" : i == 3 ? "KTP_DOCX" : "PIPELINE_HEAVY")
+      print "  - location: \"$" name "\""
+      print "    mountPoint: \"$" name "\""
+      print "    writable: false"
+    }
+  }
+  !skip { print }
+' > ./tmp/start-lima.sh
+which bash  # /opt/homebrew/bin/bash
+bash --version  # GNU bash, version 5.3.8(1)-release (aarch64-apple-darwin24.6.0)
+which limactl  # /opt/homebrew/bin/limactl
+limactl --version  # limactl version 2.2.0
+bash ./tmp/start-lima.sh  # success
+
+# Copy via macOS (!) terminal the binary linux_arm64 duckdb extension
+# splink_udfs v1.5.1 into the working directory:
+mkdir "$PWD_20261118/.duckdb/extensions/v1.5.1/linux_arm64"
+cp /Volumes/home/aicode/.duckdb/extensions/v1.5.1/linux_arm64/splink_udfs.duckdb_extension "$PWD_20261118/.duckdb/extensions/v1.5.1/linux_arm64/splink_udfs.duckdb_extension"
+cp /Volumes/home/aicode/.duckdb/extensions/v1.5.1/linux_arm64/splink_udfs.duckdb_extension.info "$PWD_20261118/.duckdb/extensions/v1.5.1/linux_arm64/splink_udfs.duckdb_extension.info"
+# Copy via macOS (!) terminal older main pipeline artifacts -
+# they will be useful for integrity checks:
+rsync -avh "$PWD_20261102/tmp/hcr_cards_subset0_20261102T1817Z_enrich_full_df_20261102" "$PWD_20261118/tmp/"  # success
+rsync -avh "$PWD_20261102/tmp/20261102_131723_enrich_full_df_20261102" "$PWD_20261118/tmp/"  # success
+
+# Log into the provisioned Lima instance and use it moving forward,
+# remembering to pass the needed env vars from host:
+limactl shell "$LIMA_INSTANCE" -- env PWD_20261118="$PWD_20261118" bash
+which bash  # /usr/bin/bash
+bash --version  # GNU bash, version 5.2.21(1)-release (aarch64-unknown-linux-gnu)
+
+# Note about decision from 2026-11-02 runs not to redownload
+# the SciSciNet v2 and Clarivate's HCR data and not to
+# rebuild some of the heavy secondary input files applies
+# to these runs just the same.
+# Create the main pipeline output dir:
+mkdir ./data/output
+# Create and hash an empty file for the fresh 
+# AI augmentation detour's replay log:
+mkdir ./data/ai_augment
+replay_log="./data/ai_augment/replay_log.jsonl" && touch "$replay_log" && sha256sum "$replay_log"
+# e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  ./data/ai_augment/replay_log.jsonl
+
+# Copy previous runs' main pipeline and AI augmentation detour configs:
+cp "$PWD_20261118/config_repl_20261102.json" "$PWD_20261118/config_repl_20261118.json"
+cp "$PWD_20261118/config_ai_augment_prod_20261102.json" "$PWD_20261118/config_ai_augment_prod_20261118.json"
+# Edit both via GUI to rename main db and fix old host paths.
+
+# Add OpenAlex key in `.env`:
+cp ./.env.example ./.env
+# Edit manually.
+
+# Download appropriate pixi binary:
+PIXI_VERSION=$(awk '$1 == "pixi" {print $2; exit}' .tool-versions)
+PIXI_TGZ="./tmp/pixi-aarch64-unknown-linux-musl-${PIXI_VERSION}.tar.gz"
+PIXI_URL="https://github.com/prefix-dev/pixi/releases/download/v${PIXI_VERSION}/pixi-aarch64-unknown-linux-musl.tar.gz"
+curl -fL -o "$PIXI_TGZ" "$PIXI_URL"
+curl -fL -o "${PIXI_TGZ}.sha256" "${PIXI_URL}.sha256"
+read -r PIXI_SHA256 _ < "${PIXI_TGZ}.sha256"
+printf '%s *%s\n' "$PIXI_SHA256" "$PIXI_TGZ" | sha256sum -c -
+# Reminder: Inside Lima VM.
+# Install pixi:
+mkdir -p ~/.local/bin
+tar -xzf "$PIXI_TGZ" -C ~/.local/bin pixi
+chmod +x ~/.local/bin/pixi
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+pixi --version  # pixi 0.62.2
+# Install pixi deps from lockfile:
+rm -rf ./.pixi && pixi install --all --locked
+# ✔ The following environments have been installed: default, detour-mode0-econ-stats, detour-ai-augment.
+
+# Run the main pipeline using the new config:
+pixi run python -m src.repl --config ./config_repl_20261118.json --new --yes
+#
+# =============== Attempt 1 ====================
+# Quit at mid-step 10. Low RAM?
+# =============== Attempt 2 ====================
+# Resumed with:
+# `pixi run python -m src.repl --config ./config_repl_20261118.json --resume`
+# Same result - exited mid-step 10. 
+# I realized the output dir did not exist;
+# added that line above and ran that mkdir.
+# =============== Attempt 3 ====================
+# Resumed again:
+# `pixi run python -m src.repl --config ./config_repl_20261118.json --resume --yes`
+# Success - last step's log lines:
+#      Execution Metrics      
+#                            
+#   Metric           Value    
+#  ────────────────────────── 
+#   Peak RAM Usage   3.49 GB  
+#   Cards            307      
+#                            
+# Execution Metrics
+# Peak RAM Usage: 3.49 GB
+# Cards: 307
+# Diagnostics report saved to: 
+# data/diagnostics/20261118_153219/repl_diagnostics.md
+# Success! Output saved to: 
+# data/output/2024-Historical-Highly-Cited-Researchers-lists - 
+# final_combined_cards.zip
+
+# =============== Follow-up ====================
+# Change the rights for the main database file to read-only:
+db="./data/scisci_process_20261118.duckdb" && chmod 400 "$db" && ls -la "$db"
+# -r-------- 1 anonymous dialout 564408320 Nov 18 15:49 ./data/scisci_process_20261118.duckdb
+
+# Some integrity checks follow. These checks are the same
+# as the previous 2026-11-02 runs and also the same usual
+# gates that were used to establish the absence of
+# main pipeline regressions across code iterations, so
+# I interpret these as strong evidence of equivalence.
+
+# Manually unzipped the output file and put the contents into:
+# ./tmp/hcr_cards_subset0_20261118T2032Z_enrich_full_df_20261118
+rsync -avh ./tmp/hcr_cards_subset0_20261118T2032Z_enrich_full_df_20261118/ ./tmp/hcr_cards_subset0_20261118T2032Z_enrich_full_df_20261118_edit/
+# Patch today's outputs for report dates to match with prior run's:
+python3 -c 'from pathlib import Path; old=b"Date of report: November 18, 2026"; new=b"Date of report: November 02, 2026"; [(p.write_bytes(data.replace(old, new))) for p in Path("./tmp/hcr_cards_subset0_20261118T2032Z_enrich_full_df_20261118_edit").rglob("*") if p.is_file() and old in (data := p.read_bytes())]'
+diff -qr ./tmp/hcr_cards_subset0_20261102T1817Z_enrich_full_df_20261102 ./tmp/hcr_cards_subset0_20261118T2032Z_enrich_full_df_20261118_edit
+# exited 0, indicating the outputs between the runs are identical.
+# Step artifact `10_build_cards_card_partitions_df.csv` and
+# `repl_diagnostics.md` were the same across the runs:
+before_dir="./tmp/20261102_131723_enrich_full_df_20261102"
+after_dir="./tmp/20261118_153219_enrich_full_df_20261118"
+step_artifact="step_artifacts/10_build_cards_card_partitions_df.csv" &&before="$before_dir/$step_artifact" && after="$after_dir/$step_artifact" && cmp -s "$before" "$after" && echo OK || echo FAIL  # OK
+repl_dx="repl_diagnostics.md" && before="$before_dir/$repl_dx" && after="$after_dir/$repl_dx" && cmp -s "$before" "$after" && echo OK || echo FAIL  # OK
+# Diffs (through VS Code's Select for compare/Compare
+# with selected feature) of `repl_session.log` only
+# differed on timestamps, the block from resumes, and
+# RAM usage (only minimally), indicating equivalence.
+
+# =============== AI augmentation detour ====================
+
+# The next step will be running the dashboard, which
+# requires the macOS because the dashboard manages the
+# Backend and the AI Agent Runtime (via Lima).
+# Therefore, quit Lima and use macOS moving forward.
+
+
+```
+
 <!--- Markdown references --->
 
 [paveljee]: https://github.com/paveljee "paveljee (Pavel Zhelnov) | GitHub"
