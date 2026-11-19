@@ -1235,27 +1235,76 @@ sha256sum "$map_clone"
 # If some runs fail, investigate the reason
 # and requeue them if appropriate.
 
+# ============================================
+# 2:18pm started, codex usage 99%
+# ram usage 16.7GB of 24GB physical
+# open are:
+# vs code (1 window), chrome (3 tabs),
+# activity monitor, finder, terminal (2 windows)
+
+# ...mid runs, at 1 running, 10 completed:
+# % diskutil apfs list | awk '
+# /Capacity In Use By Volumes:/ {
+#   for (i=1; i<NF; i++) if ($(i+1)=="B") used += $i
+# }
+# /Capacity Not Allocated:/ {
+#   for (i=1; i<NF; i++) if ($(i+1)=="B") free += $i
+# }
+# END {
+#   printf "Total: %.2f GiB\nUsed:  %.2f GiB\nFree:  %.2f GiB\n", (used+free)/1024^3, used/1024^3, free/1024^3
+# }'
+# Total: 460.43 GiB
+# Used:  451.69 GiB
+# Free:  8.75 GiB
+# 3:31pm,queued 4 · running 1 · completed 15 · failed 0 · cancelled 0
+# 4:02pm - done recently
+# Codex usage: 96% left (sic!)
+# ============================================
+
 # After processing, status bar:
-# ...
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 254 · queued 0 · running 0 · completed 20 · failed 0 · cancelled 0
 # Press Stop queue processing.
 
 # Press Query IPC.
+#
+# Message:
+# Dashboard query snapshot replaced
+#
 # Press CTRL+C to quit to quit the dashboard.
 
 # Some artifacts:
-# - <sha256sum>  dashboard_runs_20261118.log
-# - <sha256sum>  replay.log
+# - 1354e83ce4ffe4eccca898e6ded7ac53937cf8d98768e66cb67cb3af369f9d10  /Users/anonymous/2026-01-02_enrich_full_df_20261118/logs/dashboard_runs_20261118.log
+# - 8a91a5587adf7773cacb814b0dbd5002e9b930911fe15b64f84fb94fb258fbca  /Users/anonymous/2026-01-02_enrich_full_df_20261118/data/ai_augment/replay_log.jsonl
+
+# Back up both of these securely.
+
+# Create copy of replay log so as not to edit it
+# and put its name and same hash sum in detour config.
+# This is important because it would be spoiled by
+# a new `/init` record.
 
 # Export output artifacts:
 pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui publish completed --config "$CONFIG_AI_20261118"
 pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui markdown completed --config "$CONFIG_AI_20261118"
 pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui spreadsheet completed martin --config "$CONFIG_AI_20261118"
 
-# Was replay into a throwaway database successful?
-# for this, need to create a copy of the replay log
-# (because it would be spoiled by a new `/init` record)
-# and create a backup of the detour database file, then
+# Create a backup of the detour database file, then
 # rerun the full Backend launch command above.
+#
+# Success!
+# ...
+# re:Replaying line 374/375
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Replaying line 375/375
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Run outcome 01a1f599-893b-7482-90d5-78894da6f0f3: materialized 1 accepted sections
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Replay complete; accepted hash 8a91a5587adf7773cacb814b0dbd5002e9b930911fe15b64f84fb94fb258fbca at line 375, byte 3937162
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Verifying replay log: stored hash 8a91a5587adf7773cacb814b0dbd5002e9b930911fe15b64f84fb94fb258fbca at line 375 byte 3937162; config hash 8a91a5587adf7773cacb814b0dbd5002e9b930911fe15b64f84fb94fb258fbca; 3937162 bytes
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Verifying prefix: 375 lines, 3937162 bytes
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Prefix hash matches stored anchor
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:DB/log ordinal and byte coverage verified: 375 lines, 3937162 bytes
+# INFO:__main__:Writable Backend Store ready
+# Dashboard IPC running on unix:///tmp/detour-manual-501.sock
+# INFO:     Application startup complete.
+# INFO:     Uvicorn running on http://127.0.0.1:8612 (Press CTRL+C to quit)
 
 ```
 
