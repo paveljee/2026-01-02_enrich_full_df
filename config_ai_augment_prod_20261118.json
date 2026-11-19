@@ -38,13 +38,13 @@
   "total_draws": 310,
   "files_config": {
     "detour_ai_augment_backend_api_replay_log": {
-      "path": "/Users/anonymous/2026-01-02_enrich_full_df_20261102/data/ai_augment/replay_log copy.jsonl",
-      "sha256": "8977e729fb780bad5f53fb1019ed12fff49f402e776bc81455ff6dd393a71742",
+      "path": "/Users/anonymous/2026-01-02_enrich_full_df_20261118/data/ai_augment/replay_log.jsonl",
+      "sha256": "09616a928d271c40546f459ae3a0205ec261e2d4be36b41cfc2b78ea28fdcbd0",
       "desc": "Detour AI Augment Backend API replay log"
     },
     "map_subset_0_to_batch": {
       "path": "./data/map_subset0_to_batch.csv",
-      "sha256": "3d18ce34f51b34287f4e86f73eb7e2bc5bebcae93db6af1797f51e9c259e65fe",
+      "sha256": "3e2ab20fc0f00c90809227a816eb6d01f4b995774594e870158e99cc43cd6482",
       "desc": "map subset 0 to release batches"
     },
     "world_bank_xlsx": {

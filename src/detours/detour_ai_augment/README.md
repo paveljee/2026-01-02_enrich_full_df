@@ -795,7 +795,8 @@ pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.contro
 # ===============================================
 # KTP RI pipeline: AI augmentation detour.
 # Production runs started on 2026-11-18 UTC-5,
-# aiming to release the outputs as batch-10 (n=20),
+# aiming to release the outputs as a batch (n=20)
+# `ktp.release_batch="dashboard runs 20261118"`,
 # which will only include namekeys with missing
 # manually extracted data this time, in draw order.
 # General notes from 2026-11-02 runs apply.
@@ -910,8 +911,13 @@ replay_log="./data/ai_augment/replay_log.jsonl" && touch "$replay_log" && sha256
 
 # Copy previous runs' main pipeline and AI augmentation detour configs:
 cp "$PWD_20261118/config_repl_20261102.json" "$PWD_20261118/config_repl_20261118.json"
-cp "$PWD_20261118/config_ai_augment_prod_20261102.json" "$PWD_20261118/config_ai_augment_prod_20261118.json"
-# Edit both via GUI to rename main db and fix old host paths.
+# AI augmentation detour config file path will be reused
+# multiple times downstream, so it's worth to define a var:
+CONFIG_AI_20261118="$PWD_20261118/config_ai_augment_prod_20261118.json"
+cp "$PWD_20261118/config_ai_augment_prod_20261102.json" "$CONFIG_AI_20261118"
+# Edit both via GUI to rename main db,
+# rename and update hash sum for replay log,
+# and fix old host paths.
 
 # Add OpenAlex key in `.env`:
 cp ./.env.example ./.env
@@ -1004,6 +1010,252 @@ repl_dx="repl_diagnostics.md" && before="$before_dir/$repl_dx" && after="$after_
 # Backend and the AI Agent Runtime (via Lima).
 # Therefore, quit Lima and use macOS moving forward.
 
+# Come 2026-11-19...
+
+# As run on macOS, under Terminal, `/bin/zsh`:
+rm -rf ./.pixi && pixi install --all --locked
+# ✔ The following environments have been installed: default, detour-mode0-econ-stats, detour-ai-augment in '/Users/anonymous/Library/Caches/rattler/cache/envs'.
+
+# Initialize AI Agent Runtime (on macOS):
+export OPENALEX_API_KEY="$(pixi run python -c '
+import os
+from dotenv import dotenv_values
+env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
+print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
+')"
+REPO_DIR="$PWD" bash src/detours/detour_ai_augment/protected/src/agent_runtime/deploy.sh
+# Supply Yes manually when prompted.
+# ✅ Lima instance created successfully
+# ✅ SSH access to Lima jump host works
+# Warning: Permanently added 'lima-aivm-ai' (ED25519) to the list of known hosts.
+# ✅ SSH access to 'ai' through jump host works
+# Warning: Permanently added 'lima-aivm-aivm-audit' (ED25519) to the list of known hosts.
+# ✅ SSH access to 'aivm-audit' audit protocol works
+# ✅ 'aivm-audit' rejects commands outside its read protocol
+# ✅ Connected as 'ai'
+# ✅ Home is '/home/ai'
+# ✅ 'ai' has no passwordless sudo
+# ✅ Project directory is mounted at '/Volumes/home/aicode/aivm/home/ai'
+# ✅ Mounted project is writable for the Lima jump user at '/Volumes/home/aicode/aivm/home/ai'
+# ✅ Mounted project is inaccessible to 'ai'
+# ✅ Appendwatch is active and inaccessible to 'ai'
+# ✅ Appendwatch report is readable only through 'aivm-audit' audit protocol
+# ✅ Codex config exists at '/home/ai/.codex/config.toml'
+# ✅ VS Code 1.130.0 installed
+# ✅ VS Code extension openai.chatgpt@26.721.41059 installed
+# ✅ Codex CLI 0.146.0-alpha.3.1 installed
+# ✅ OPENALEX_API_KEY round-trips into the AIVM environment
+
+# SSH into AI Agent Runtime:
+ssh lima-aivm-ai
+# Inside the VM, log into Codex:
+codex auth
+codex login status
+# Logged in using ChatGPT
+# Close the SSH connection.
+
+# Continue in macOS terminal.
+
+# Initialize Backend in IPC-only mode to hydrate Control Centre:
+# ============ Initialize full Backend ====================
+# Note that OPENALEX_API_KEY above and these env vars are
+# reused by Backend and Control Centre dashboard later.
+export FASTAPI_DETOUR_DASHBOARD_SOCKET="/tmp/detour-manual-$(id -u).sock"
+export FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519"
+export FASTAPI_DETOUR_NAMEKEY='{"ktp.first_name":"Gaoquan ","ktp.last_name":"Shi"}'  # any eligible key
+export FASTAPI_DETOUR_APPENDWATCH_REPORT='"'"'/Volumes/home/aicode/aivm/home/ai/.aivm-control/appendwatch/appendwatch-tree.txt'"'"'
+export FASTAPI_DETOUR_CODEX_SESSIONS_DIR='"'"'/home/ai/.codex/sessions'"'"'
+pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.protected.src.backend.server --config "$CONFIG_AI_20261118" --new --yes
+# INFO:__main__:Starting Backend: config=config_ai_augment_prod_20261118.json; ipc_only=False; new=True; resume=False
+# INFO:__main__:Loading Backend configuration/resources: config_ai_augment_prod_20261118.json; verify_hashes=True
+# INFO:src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context:Loading researchers from read-only source DB: data/scisci_process_20261118.duckdb
+# INFO:__main__:Backend configuration and source validated: 307 researchers
+# INFO:__main__:Starting Backend HTTP API at 127.0.0.1:8612
+# INFO:     Started server process [83281]
+# INFO:     Waiting for application startup.
+# INFO:__main__:Opening writable Backend Store: new=True
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Replaying 0 lines (0 bytes) into new detour DB
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Replay complete; accepted hash e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 at line 0, byte 0
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Verifying replay log: stored hash e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 at line 0 byte 0; config hash e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; 0 bytes
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Verifying prefix: 0 lines, 0 bytes
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Prefix hash matches stored anchor
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:DB/log ordinal and byte coverage verified: 0 lines, 0 bytes
+# INFO:__main__:Writable Backend Store ready
+# Dashboard IPC running on unix:///tmp/detour-manual-501.sock
+# INFO:     Application startup complete.
+# INFO:     Uvicorn running on http://127.0.0.1:8612 (Press CTRL+C to quit)
+#
+# Press CTRL+C to shut down the Backend
+# ============ Update hash sum for replay log in config ====================
+sha256sum ./data/ai_augment/replay_log.jsonl
+# 09616a928d271c40546f459ae3a0205ec261e2d4be36b41cfc2b78ea28fdcbd0  ./data/ai_augment/replay_log.jsonl
+# 
+# Update the hash sum manually in `config_ai_augment_prod_20261118.json`.
+# ============ Restart Backend as IPC-only ====================
+pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.protected.src.backend.server --config "$CONFIG_AI_20261118" --ipc-only
+# INFO:__main__:Starting Backend: config=config_ai_augment_prod_20261118.json; ipc_only=True; new=False; resume=False
+# INFO:__main__:Loading Backend configuration/resources: config_ai_augment_prod_20261118.json; verify_hashes=True
+# INFO:src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context:Loading researchers from read-only source DB: data/scisci_process_20261118.duckdb
+# INFO:__main__:Backend configuration and source validated: 307 researchers
+# INFO:__main__:Opening read-only Backend Store
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Verifying replay log: stored hash e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 at line 0 byte 0; config hash 09616a928d271c40546f459ae3a0205ec261e2d4be36b41cfc2b78ea28fdcbd0; 428 bytes
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Verifying prefix: 0 lines, 0 bytes
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Prefix hash matches stored anchor
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Verifying suffix line 1
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:DB/log ordinal and byte coverage verified: 1 lines, 428 bytes
+# INFO:__main__:Read-only Backend Store ready; starting query-only IPC
+# Dashboard IPC running on unix:///tmp/detour-manual-501.sock
+
+# Set up Control Centre for runs and Backend launches:
+# ============ Initialize dashboard ====================
+# In a second Terminal, on macOS, run Control Centre dashboard:
+# Re-supply these env vars in the new terminal.
+PWD_20261118="$HOME/2026-01-02_enrich_full_df_20261118"
+CONFIG_AI_20261118="$PWD_20261118/config_ai_augment_prod_20261118.json"
+export OPENALEX_API_KEY="$(pixi run python -c '
+import os
+from dotenv import dotenv_values
+env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
+print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
+')"
+export FASTAPI_DETOUR_DASHBOARD_SOCKET="/tmp/detour-manual-$(id -u).sock"
+export FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519"
+# Start a log and the dashboard:
+LOG_DIR="$PWD_20261118/logs" && mkdir "$LOG_DIR"
+dashboard_log="$LOG_DIR/dashboard_runs_20261118.log"
+script -a "$dashboard_log" pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui --config "$CONFIG_AI_20261118"
+# Script started, output file is /Users/anonymous/2026-01-02_enrich_full_df_20261118/logs/dashboard_runs_20261118.log
+# [control-centre] Starting Dashboard with config /Users/anonymous/2026-01-02_enrich_full_df_20261118/config_ai_augment_prod_20261118.json
+# [control-centre] persisted Dashboard state restored
+# [control-centre] queue worker ready
+# [control-centre] ready at http://127.0.0.1:8611
+# ============ Hydrate dashboard from IPC-only Backend ====================
+# Web browser: Chrome for macOS,
+# Version 157.0.8103.79 (Official Build) (arm64)
+# Open the dashboard UI in the browser, press Query IPC.
+# Popup: Dashboard query snapshot replaced
+# Status bar:
+# Backend API: not checked
+# IPC: available
+# Lima/SSH: not checked
+# Codex/auth: not checked
+# Probed: not checked
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 274 · queued 0 · running 0 · completed 0 · failed 0 · cancelled 0
+# ============ Shut down IPC-only Backend ====================
+# Important! In Terminal 1, press CTRL+C to shut down the Backend;
+# else Control Centre dashboard queue processing will fail.
+# Tail of the output after quitting:
+# INFO:__main__:Read-only Backend Store ready; starting query-only IPC
+# Dashboard IPC running on unix:///tmp/detour-manual-501.sock
+# INFO:werkzeug:<local> - - [19/Nov/2026 12:49:17] "OPTIONS /query HTTP/1.1" 200 -
+# INFO:__main__:Query IPC: reading wholesale Backend snapshot
+# INFO:__main__:Query IPC snapshot ready: 307 researchers
+# INFO:werkzeug:<local> - - [19/Nov/2026 12:49:17] "GET /query HTTP/1.1" 200 -
+# ^CINFO:__main__:Query-only IPC stopped; read-only Backend Store closed cleanly
+# AI_AUGMENT_BACKEND_STORE_CLOSED_CLEANLY
+# INFO:__main__:Backend process lock released
+# ============ Check Control Centre readiness ====================
+# In dashboard UI, press Probe.
+# Status bar after probing:
+# Backend API: unavailable
+# IPC: unavailable
+# Lima/SSH: available
+# Codex/auth: available
+# Probed: 2026-11-19T17:51:27+00:00
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 274 · queued 0 · running 0 · completed 0 · failed 0 · cancelled 0
+#
+# Both the Backend API and IPC must be unavailable to
+# allow the dashboard to manage Backend launches.
+# ============ Select and queue namekeys ====================
+# The sorting order by default is by ktp.draw_number,
+# ascending, which is exactly what we need.
+#
+# Queue the first 20 rows, in draw order,
+# whose Cohort=no_ground_truth (use button
+# Queue Run just below both tables).
+#
+# For this release batch (dashboard runs 20261118),
+# this spanned the draw numbers from pilot.2 through 76,
+# exclusive of those ineligible or with ground truth.
+#
+# After queueuing, status bar:
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 254 · queued 20 · running 0 · completed 0 · failed 0 · cancelled 0
+
+# ============================================
+# IMPORTANT! Conduct this action outside of the
+# production files so as not to confuse the current
+# configuration; code may need to be updated to
+# reflect updates in these files.
+# For example, create a different clone of the repo -
+# open a different terminal and run:
+CLONE_PWD_20261118="/Volumes/home/aicode/2026-01-02_enrich_full_df"
+cd "$CLONE_PWD_20261118" && git checkout aicode/staging
+git show HEAD  # commit 7d5efdaa7b1175a237358ef57aeb2a01d9717a9c
+map_clone="$CLONE_PWD_20261118/data/map_subset0_to_batch.csv"
+sha256sum "$map_clone"
+# 3d18ce34f51b34287f4e86f73eb7e2bc5bebcae93db6af1797f51e9c259e65fe  /Volumes/home/aicode/2026-01-02_enrich_full_df/data/map_subset0_to_batch.csv
+# Manually mark the selected draws in `"$map_clone"`
+# as `ktp.release_batch="dashboard runs 20261118"`.
+sha256sum "$map_clone"
+# 3e2ab20fc0f00c90809227a816eb6d01f4b995774594e870158e99cc43cd6482  /Volumes/home/aicode/2026-01-02_enrich_full_df/data/map_subset0_to_batch.csv
+# Manually update the hash of `map_subset_0_to_batch`
+# in the clone's AI augmentation detour config.
+# ============================================
+
+# If logged into Codex using a ChatGPT
+# subscription, check available usage
+# on chatgpt.com to ensure that it would
+# be sufficient to support the runs.
+#
+# As a heuristic, from what I have observed
+# so far during tests and 20261102 prod run,
+# consumption is <1% per run, so require
+# at least 25% remaining weekly usage
+# on a Pro-USD100 plan, as of 2026-11-19
+# (reserving for 5 additional runs
+# as a contingency).
+# 
+# When it comes to timing, I observed
+# <5 min per run on average, so require
+# at least 2 hours of usage left.
+#
+# Output from my chatgpt.com UI:
+#
+# Usage source: Your Pro plan
+# Weekly limit: 99%
+# Resets in 6d 4h
+#
+# Therefore, this should be plenty
+# to support this batch of 20 runs
+# or slightly more if some namekeys
+# need to be requeued and rerun.
+
+# Press Start queue processing.
+# Wait until all queued runs are completed.
+# If some runs fail, investigate the reason
+# and requeue them if appropriate.
+
+# After processing, status bar:
+# ...
+# Press Stop queue processing.
+
+# Press Query IPC.
+# Press CTRL+C to quit to quit the dashboard.
+
+# Some artifacts:
+# - <sha256sum>  dashboard_runs_20261118.log
+# - <sha256sum>  replay.log
+
+# Export output artifacts:
+pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui publish completed --config "$CONFIG_AI_20261118"
+pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui markdown completed --config "$CONFIG_AI_20261118"
+pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui spreadsheet completed martin --config "$CONFIG_AI_20261118"
+
+# Was replay into a throwaway database successful?
+# for this, need to create a copy of the replay log
+# (because it would be spoiled by a new `/init` record)
+# and create a backup of the detour database file, then
+# rerun the full Backend launch command above.
 
 ```
 
