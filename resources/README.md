@@ -3,10 +3,11 @@ Copyrights and licences:
 * `mock_RI_test.docx` - CC0
 * `OGHIST_2025_07_01.xlsx` - World Bank
 * `pandoc-custom-reference.docx` - Pandoc
-* `kalzumeus.com/2010/06/17/falsehoods-programmers-believe-about-names.html` - Patrick McKenzie (thanks to Web Archive and Alexa Crawls for capturing; captured as of 2010-06-19T02:23:50Z)
+* `kalzumeus.com/2010/06/17/falsehoods-programmers-believe-about-names.html` - Patrick McKenzie (thanks to Internet Archive and Alexa Crawls for capturing; captured as of 2010-06-19T02:23:50Z)
 * `help.openalex.org/api/author-curation.md` - OpenAlex (captured as of, "Last updated September 21, 2026")
 * `github.com/ourresearch/town-hall-notes/blob/99dbf16fa59335663c3c8cab32db2a1a819aba5d/2026-09-09-members-roundtable/transcript.md` - OpenAlex
 * `learn.chatgpt.com/docs/config-file/config-reference.md` - OpenAI, captured as of 2026-11-09T14:57:20Z
 * `deploymentsafety.openai.com/gpt-6-astra/gpt-6-astra.pdf` - OpenAI, dated 2026-09-03
 * `openai.com/index/introducing-gpt-6-sol-and-luna.{html,png}` - OpenAI, captured from Chrome web browser using `Save Page As…` and the extension [GoFullPage](https://chromewebstore.google.com/detail/gofullpage-full-page-scre/fdpohaocaechififmbbbbbknoalclacl) Version 8.11 on 2026-11-09T16:36:10Z
 * `deploymentsafety.openai.com/gpt-5-6/gpt-5-6.pdf` - OpenAI, dated 2026-07-09
+* `resources/w3.org/International/questions/qa-personal-names.html` - Richard Ishida, W3C (thanks to Internet Archive for capturing; captured as of 2011-08-30T23:00:14Z)
