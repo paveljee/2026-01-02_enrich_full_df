@@ -1632,11 +1632,38 @@ sha256sum "$map_clone"
 # Wait until all queued runs are completed.
 # If some runs fail, investigate the reason
 # and requeue them if appropriate.
-
+#
+# If queue processing needs to be stopped
+# (e.g., to turn off the computer), press
+# Stop queue processing button - this should
+# stop the dequeueing of the next run without
+# affecting the current run. The dashboard can
+# then be safely shut down with Ctrl+C and 
+# rerun when opportune using the same start log
+# and dashboard command from above. Note: the
+# hash sum of the replay log will need to be
+# updated in the AI augment detour config file.
+# On restart, the log file is continued without 
+# being rewritten. Pressing Start queue processing
+# later picks up the next queued namekey and 
+# processing resumes.
+#
+# If the current run needs to be interrupted
+# urgently, the first action is to Stop queue
+# processing still, and then pressing Cancel 
+# on the current run will forcefully exit
+# its processing. The namekey can then be 
+# requeued and will be added to the tail of
+# the queue to be processed de novo. Some 
+# incomplete artifacts from the previous run
+# will remain in the data, to varying degrees,
+# but should not break the queue processing.
 # ============================================
-# .. started, codex usage 90%
-# ram usage ..GB of 24GB physical
-# open are (apps)...
+# 3:10pm started, codex usage 90%
+# ram usage 14.76GB of 24GB physical
+# open are: terminal (2 windows),
+# chrome (2 tabs), finder, 
+# vs code (1 window), word 2016 (1 window).
 #
 # % diskutil apfs list | awk '
 # /Capacity In Use By Volumes:/ {
@@ -1648,7 +1675,65 @@ sha256sum "$map_clone"
 # END {
 #   printf "Total: %.2f GiB\nUsed:  %.2f GiB\nFree:  %.2f GiB\n", (used+free)/1024^3, used/1024^3, free/1024^3
 # }'
-# ...
+# Total: 460.43 GiB
+# Used:  435.42 GiB
+# Free:  25.01 GiB
+#
+# stopped queue processing
+# because needed to leave computer
+# at about 3:46pm. waited for
+# the current run to complete.
+# shut the dashboard safely and
+# script done was printed.
+# Codex usage: 89% left 
+# Backend API: unavailable
+# IPC: unavailable
+# Lima/SSH: not checked
+# Codex/auth: not checked
+# Probed: not checked
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 207 · queued 40 · running 0 · completed 27 · failed 0 · cancelled 0
+#
+# 4:04pm: Updated replay log hash to 
+# 4e090145e605be499072d8a146472596c425c06c2457e03b5c6b90753b3ac4cb
+# in the AI augment detour config file,
+# restarted the dashboard, pressed
+# Start queue processing.
+#
+# 4:36pm: Codex usage: 88% left 
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 207 · queued 36 · running 1 · completed 29 · failed 1 · cancelled 0
+#
+# failed one:
+# {"schema_version":"1.1","record_id":"01a21498-38e7-76fd-8b7e-e5307441bfd1","method":"POST","scheme":"http","host":"invalid","port":null,"ready_to_respond_at_unix_usec":1795641850087330,"path":"/failed","query":"","request_headers":{"Host":"invalid","Accept-Encoding":"identity","Content-Length":"0","Namekey":"ktp.first_name=\"Jian-Qiang\", ktp.last_name=\"Wang\"","Session-Id":"01a21486-698f-7ba0-905a-d6b16fbead2c"},"request_body":null,"response_code":200,"response_headers":{"SourceKey":"ktp.filename=\"rollout-2026-11-25T16-04-42-01a21486-698f-7ba0-905a-d6b16fbead2c.jsonl\", ktp.fragment;type=\"line_number\";line_number=\"691\"","Content-Type":"application/json","Content-Length":"766"},"response_body":"{\"pull_record_id\":\"01a21498-369c-7356-a7ac-277d3ce36aa2\",\"push_record_id\":null,\"commit_request_record_id\":\"01a21498-240d-7632-a22d-ef700a479783\",\"validation_record_id\":\"01a21498-24a5-71cb-a18e-dc117f76d1ac\",\"run_outcome_record_id\":\"01a21498-38e7-76fd-8b7e-e5307441bfd1\",\"codex_session_record\":{\"codex_session_id\":\"01a21486-698f-7ba0-905a-d6b16fbead2c\",\"codex_rollout_record\":{\"sha256\":\"811b9e79e8e2888ca7984c62896669bb712bb3bb5b4b3363144dc99a92dda826\",\"size\":1997669,\"line_count\":691},\"appendwatch_report_record\":{\"encoding\":\"base64\",\"data\":\"LgrilJTilIDilIAgMjAyNi8KICAgIOKUlOKUgOKUgCAxMS8KICAgICAgICDilJTilIDilIAgMjUvCiAgICAgICAgICAgIOKUlOKUgOKUgCBPSyAgICAgICAgICByb2xsb3V0LTIwMjYtMTEtMjVUMTYtMDQtNDItMDFhMjE0ODYtNjk4Zi03YmEwLTkwNWEtZDZiMTZmYmVhZDJjLmpzb25sCg==\"}}}","received_at_unix_usec":null,"duration_usec":522590}
+#
+# exploring the failed one together with codex,
+# on a different machine.
+# so far, looks like an awkward submission
+# together with a backend bug. exploring
+# further but have requeued this already
+# because it has chances of running successfully
+# next time despite the backend edge case bug.
+# the bug does not seem to affect most submissions.
+# 
+# of note, the failed one ran for ~20 mins,
+# so approx x4 the usual run time.
+#
+# 4:41pm: stopped queue processing because
+# need to leave computer again. will also
+# shut down dashboard safely once current
+# run is completed.
+#
+# Backend API: unavailable
+# IPC: unavailable
+# Lima/SSH: not checked
+# Codex/auth: not checked
+# Probed: not checked
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 207 · queued 36 · running 0 · completed 31 · failed 0 · cancelled 0
+#
+# dashboard safely stopped and script logged.
+# % sha256sum "$PWD_20261125/data/ai_augment/replay_log.jsonl"
+# 5684fefbdc618fafa6d59579920152dbb4d765ebf040d268a2e3a67a33c983c3  /Users/anonymous/2026-01-02_enrich_full_df_20261118/data/ai_augment/replay_log.jsonl
+# updated replay log hash in the config
+# so the next dashboard start is successful.
 #
 # .. - done 
 # Codex usage: ..% left 

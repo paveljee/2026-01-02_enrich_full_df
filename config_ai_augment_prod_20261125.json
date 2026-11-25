@@ -39,7 +39,7 @@
   "files_config": {
     "detour_ai_augment_backend_api_replay_log": {
       "path": "/Users/anonymous/2026-01-02_enrich_full_df_20261118/data/ai_augment/replay_log.jsonl",
-      "sha256": "543896df1665effad32d1e255fd5595c720db6e21a119b2ed45d555e41009012",
+      "sha256": "5684fefbdc618fafa6d59579920152dbb4d765ebf040d268a2e3a67a33c983c3",
       "desc": "Detour AI Augment Backend API replay log"
     },
     "map_subset_0_to_batch": {
