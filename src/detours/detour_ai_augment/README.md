@@ -1735,6 +1735,142 @@ sha256sum "$map_clone"
 # updated replay log hash in the config
 # so the next dashboard start is successful.
 #
+# come 2026-11-26, 3:37am utc-5: started dashboard
+# using same command. success.
+# started queue processing.
+# seeing in logs that replay successful, 
+# status bar:
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 207 · queued 35 · running 1 · completed 31 · failed 0 · cancelled 0
+# Codex usage: Weekly 100% left (reset in 7d 0h)
+# so reset had happened successfully as expected.
+#
+# 7:20am stopped queue processing.
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 207 · queued 27 · running 1 · completed 38 · failed 1 · cancelled 0
+# looks like queue wasn't processing 
+# because backend died, perhaps due to 
+# computer going to sleep because 
+# I did not specifically deactivate sleep,
+# but will investigate later.
+# so had to cancel the run, got a few
+# error popups:
+# run 01a21443-871d-72e4-8796-80693c87c8b1 run-outcome snapshot request failed: Backend run-outcome snapshot request failed
+# but run is marked as cancelled.
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 207 · queued 27 · running 0 · completed 38 · failed 2 · cancelled 0
+# requeued it but another one also remains failed:
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 207 · queued 28 · running 0 · completed 38 · failed 1 · cancelled 0
+# will review the failure later.
+# exited dashboard safely and log saved.
+#
+# 9:31am: 
+# % sha256sum "$PWD_20261125/data/ai_augment/replay_log.jsonl"
+# d20741c5be4b20574eaae1f7e26e88f199b628787901cb8adb62d701d38ad443  /Users/anonymous/2026-01-02_enrich_full_df_20261118/data/ai_augment/replay_log.jsonl
+# manually updated in detour config.
+# restarted dashboard using same command.
+# pressed Start queue processing.
+# Codex usage: 99% left 
+# RAM used: 19.11GB or 24GB
+# running a few more apps than at start,
+# overall just using the computer in the meantime.
+#
+# will investigate the stalling of run that
+# necessitated cancellation - codex in logs 
+# reported backend dead but dashboard did not
+# capture failed run also.
+# will also investigate the second failure:
+#
+# {"schema_version":"1.1","record_id":"01a21712-347c-7470-8c9d-1c48c223be20","method":"POST","scheme":"http","host":"invalid","port":null,"ready_to_respond_at_unix_usec":1795683398780587,"path":"/failed","query":"","request_headers":{"Host":"invalid","Accept-Encoding":"identity","Content-Length":"0","Namekey":"ktp.first_name=\"Jian\", ktp.last_name=\"Zhang\"","Session-Id":"01a2170e-f4ad-7921-8495-f794cf18e105"},"request_body":null,"response_code":200,"response_headers":{"SourceKey":"ktp.filename=\"rollout-2026-11-26T03-53-05-01a2170e-f4ad-7921-8495-f794cf18e105.jsonl\", ktp.fragment;type=\"line_number\";line_number=\"164\"","Content-Type":"application/json","Content-Length":"799"},"response_body":"{\"pull_record_id\":\"01a2170f-1e21-7587-8925-5b4c073467a4\",\"push_record_id\":\"01a21711-de7b-75fb-bf2f-6bd65454a17a\",\"commit_request_record_id\":\"01a21711-e12c-76bb-ab20-367ad2f04d9e\",\"validation_record_id\":\"01a21711-e183-71c5-9701-efff625424e0\",\"run_outcome_record_id\":\"01a21712-347c-7470-8c9d-1c48c223be20\",\"codex_session_record\":{\"codex_session_id\":\"01a2170e-f4ad-7921-8495-f794cf18e105\",\"codex_rollout_record\":{\"sha256\":\"8c6f6963a395702003bbdb05a9b768c66ebf3fa14adb94bb5f7ca327d43668d3\",\"size\":683827,\"line_count\":164},\"appendwatch_report_record\":{\"encoding\":\"base64\",\"data\":\"LgrilJTilIDilIAgMjAyNi8KICAgIOKUlOKUgOKUgCAxMS8KICAgICAgICDilJTilIDilIAgMjYvCiAgICAgICAgICAgIOKUlOKUgOKUgCBPSyAgICAgICAgICByb2xsb3V0LTIwMjYtMTEtMjZUMDMtNTMtMDUtMDFhMjE3MGUtZjRhZC03OTIxLTg0OTUtZjc5NGNmMThlMTA1Lmpzb25sCg==\"}}}","received_at_unix_usec":null,"duration_usec":578781}
+#
+# 9:44am: runs kept failing in same way.
+# i tried to access lima aivm via ssh
+# and it would not respond, so it was
+# the clear culprit. i restarted lima:
+# 
+# limactl restart aivm
+#
+# and then ssh in worked fine.
+#
+# i stopped queue processing but did not
+# leave the dashboard. here is status bar:
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 207 · queued 27 · running 0 · completed 38 · failed 2 · cancelled #
+# i requeued the recent failure, so it's now:
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 207 · queued 28 · running 0 · completed 38 · failed 1 · cancelled 0
+#
+# pressed Start queue processing -
+# but they all failed immediately due to:
+# Previous full Backend cycle failed; operator intervention required
+# so i shut down dashboard safely.
+# % sha256sum "$PWD_20261125/data/ai_augment/replay_log.jsonl"
+# 7df771e09e7fd3abd0ccf95a13f3d4e05a043e081d6d1cbfa25a094937e0b761  /Users/anonymous/2026-01-02_enrich_full_df_20261118/data/ai_augment/replay_log.jsonl
+# manually updated hash in detour config.
+#
+# still investigating the prior failure
+# ("record_id":"01a21712-347c-7470-8c9d-1c48c223be20").
+# once this is done, planning to restart dashboard
+# and requeue all the failures.
+#
+# 10:02am: while i was still investigating, i restarted
+# dashboard using same command, appending to same log, and
+# requeued all except for 01a21712-347c-7470-8c9d-1c48c223be20
+# i was investigating. these are currently running. 
+#
+# 10:09am: i observed same failure from lima again,
+# so the run was stalling again and i had to cancel it,
+# but i also stopped queue processing. and requeued this one.
+# will investigate lima issue.
+# also had to stop dashboard again because it would give
+# the same Previous full Backend cycle failed error.
+# sha256sum "$PWD_20261125/data/ai_augment/replay_log.jsonl"
+# 9cc2da7ef2417298ae3d5b7281e5cbd674f65a64d2e5abea921123cbf9780e60  /Users/anonymous/2026-01-02_enrich_full_df_20261118/data/ai_augment/replay_log.jsonl
+# updated hash manually in replay log.
+#
+# 10:33am: pinned down, using codex, the problem as
+# an issue with asyncio stdout per-line default
+# limit of 64 KB and I changed it to 8 MB.
+# codex claimed this was not due to dead backend
+# or lima, and that i was unable to ssh in simply
+# because the port was held up by a dashboard-
+# operated backend instance.
+#
+# restarted dashboard using same command and
+# pressed Start queue processing. Of note, the
+# run on which the previous hang happened
+# (Jian-Qiang Wang, which as also the first
+# failed run above at "record_id":"01a21498-38e7-76fd-8b7e-e5307441bfd1")
+# went accordingly to the tail of the queue, so
+# we shall wait until queue reaches it before
+# checking if the issue resurfaces again.
+#
+# 10:39am: queue has progressed and 
+# the status bar now is:
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 207 · queued 26 · running 1 · completed 39 · failed 1 · cancelled 0
+#
+# also, codex has progressed with investigation
+# of the ...-1c48c223be20 (second failed run),
+# and it looks like it's a separate issue, again
+# some backend inconsistency but also agent's
+# improper submission, so i have simply requeued 
+# this one and see if it completes fine in a new run.
+# 
+# in summary, we had two real failed runs so far
+# (that is, not due to dashboard/lima-side but
+# actual client/backend failures), and i have 
+# investigated both and requeued both because
+# these may as well complete fine in another run.
+#
+# also, we've applied a hotfix to ui.py in 
+# production code that increases the asyncio limit 
+# for backend supervisor start; the impact of
+# this is unclear as of yet. this is included
+# in commit that i will now make recording this.
+#
+# 10:48am: queue progressing fine, status bar:
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 207 · queued 25 · running 1 · completed 41 · failed 0 · cancelled 0
+# Codex usage (Weekly): 97% left 
+# diskutil command from above:
+# Total: 460.43 GiB
+# Used:  435.26 GiB
+# Free:  25.17 GiB
+#
 # .. - done 
 # Codex usage: ..% left 
 # ============================================

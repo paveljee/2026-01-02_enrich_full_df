@@ -1267,6 +1267,7 @@ class _BackendSupervisor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
+                limit=8 * 1024 * 1024,
             )
             closed_cleanly = asyncio.Event()
             log_task = asyncio.create_task(self.forward_output(process, closed_cleanly))
