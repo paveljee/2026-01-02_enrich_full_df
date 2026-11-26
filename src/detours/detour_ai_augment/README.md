@@ -1877,6 +1877,7 @@ sha256sum "$map_clone"
 # i have been using this consistently now when 
 # leaving the computer while keeping it running:
 # sudo pmset -a disablesleep 1 && pmset displaysleepnow
+# Note: Remember to set it back to 0 afterwards!
 #
 # 12:25pm: spotted another failed run and
 # will investigate with codex:
