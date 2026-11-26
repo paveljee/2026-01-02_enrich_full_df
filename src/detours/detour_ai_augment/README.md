@@ -1871,12 +1871,57 @@ sha256sum "$map_clone"
 # Used:  435.26 GiB
 # Free:  25.17 GiB
 #
-# .. - done 
-# Codex usage: ..% left 
+# 11:14am: queue progressing, status bar:
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 207 · queued 19 · running 1 · completed 47 · failed 0 · cancelled 0
+#
+# i have been using this consistently now when 
+# leaving the computer while keeping it running:
+# sudo pmset -a disablesleep 1 && pmset displaysleepnow
+#
+# 12:25pm: spotted another failed run and
+# will investigate with codex:
+#
+# {"schema_version":"1.1","record_id":"01a218dc-5e01-7148-9bc2-a0e4d1895205","method":"POST","scheme":"http","host":"invalid","port":null,"ready_to_respond_at_unix_usec":1795713424897795,"path":"/failed","query":"","request_headers":{"Host":"invalid","Accept-Encoding":"identity","Content-Length":"0","Namekey":"ktp.first_name=\"Brett M.\", ktp.last_name=\"Tyler\"","Session-Id":"01a218d9-0e61-7410-acd5-168dcdb53b33"},"request_body":null,"response_code":200,"response_headers":{"SourceKey":"ktp.filename=\"rollout-2026-11-26T12-13-27-01a218d9-0e61-7410-acd5-168dcdb53b33.jsonl\", ktp.fragment;type=\"line_number\";line_number=\"172\"","Content-Type":"application/json","Content-Length":"1219"},"response_body":"{\"pull_record_id\":\"01a218d9-347a-76bb-9e52-2bd2d81d1ca7\",\"push_record_id\":\"01a218db-f909-7188-a9eb-af53a8bc3377\",\"commit_request_record_id\":\"01a218db-fbe9-7506-aef9-b057e8819e0f\",\"validation_record_id\":\"01a218db-fc47-7559-9123-935f8ab88361\",\"run_outcome_record_id\":\"01a218dc-5e01-7148-9bc2-a0e4d1895205\",\"codex_session_record\":{\"codex_session_id\":\"01a218d9-0e61-7410-acd5-168dcdb53b33\",\"codex_rollout_record\":{\"sha256\":\"b21d6e2580c16b2e74457187945ca5ba4118a9a9d8cbe2563948e7c3b94b7109\",\"size\":772764,\"line_count\":172},\"appendwatch_report_record\":{\"encoding\":\"base64\",\"data\":\"LgrilJTilIDilIAgMjAyNi8KICAgIOKUlOKUgOKUgCAxMS8KICAgICAgICDilJTilIDilIAgMjYvCiAgICAgICAgICAgIOKUnOKUgOKUgCBPSyAgICAgICAgICByb2xsb3V0LTIwMjYtMTEtMjZUMDQtMTMtMTEtMDFhMjE3MjEtNWMxNy03ZmEzLWE4NDUtZjYzMGQyYjYyNDAwLmpzb25sCiAgICAgICAgICAgIOKUnOKUgOKUgCBPSyAgICAgICAgICByb2xsb3V0LTIwMjYtMTEtMjZUMDktMzMtMDMtMDFhMjE4NDYtMzNjNC03MWYzLWEyMTEtMTkxNWY5NDNlZjgyLmpzb25sCiAgICAgICAgICAgIOKUnOKUgOKUgCBPSyAgICAgICAgICByb2xsb3V0LTIwMjYtMTEtMjZUMTAtMDItNTEtMDFhMjE4NjEtN2MyMS03YWYwLTliNmItYTg0ZTk5YWQ2YzFlLmpzb25sCiAgICAgICAgICAgIOKUlOKUgOKUgCBPSyAgICAgICAgICByb2xsb3V0LTIwMjYtMTEtMjZUMTItMTMtMjctMDFhMjE4ZDktMGU2MS03NDEwLWFjZDUtMTY4ZGNkYjUzYjMzLmpzb25sCg==\"}}}","received_at_unix_usec":null,"duration_usec":569156}
+#
+# other than that, the queue is progressing;
+# also, there has already been one completed
+# run after this (third overall) failed one,
+# so i guess that failure was local to the run.
+# current status bar:
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 207 · queued 5 · running 1 · completed 60 · failed 1 · cancelled 0
+#
+# 12:33pm: after codex investigation of 3rd failed run
+# (...-a0e4d1895205), it appears to be the same
+# root cause as 2nd run (-1c48c223be20) and so
+# it's both a backend inconsistency and an
+# unanticipated kind of submission. i have 
+# requeued this one, likewise, as i can expect
+# this to complete successfully in another run.
+# current status bar (after requeueing):
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 207 · queued 4 · running 1 · completed 62 · failed 0 · cancelled 0
+#
+# 12:56pm: the queue has progress beyond the
+# first two failures successfully, so only
+# one remains:
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 207 · queued 0 · running 1 · completed 66 · failed 0 · cancelled 0
+# Codex usage (Weekly): 94% left 
+#
+# Of note: I have also been using codex
+# outside of the detour during this time
+# so the usage reported here actually 
+# overestimates the actual usage somewhat.
+#
+# 2026-11-26 at 1:01pm - done 
+# Codex usage: 93% left 
 # ============================================
 
 # After processing, status bar:
-# ...
+# Backend API: unavailable
+# IPC: unavailable
+# Lima/SSH: not checked
+# Codex/auth: not checked
+# Probed: not checked
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 207 · queued 0 · running 0 · completed 67 · failed 0 · cancelled 0
 # Press Stop queue processing.
 
 # Press Query IPC.
@@ -1884,11 +1929,11 @@ sha256sum "$map_clone"
 # Message:
 # Dashboard query snapshot replaced
 #
-# Press CTRL+C to quit to quit the dashboard.
+# Press CTRL+C to quit the dashboard.
 
 # Some artifacts:
-# - <sha256sum>  /Users/anonymous/2026-01-02_enrich_full_df_20261118/logs/dashboard_runs_20261125.log
-# - <sha256sum>  /Users/anonymous/2026-01-02_enrich_full_df_20261118/data/ai_augment/replay_log.jsonl
+# - a04714c54d30d21a86176b3a38a4649940ae33304c8d2fc1174bdb21f94c4574  /Users/anonymous/2026-01-02_enrich_full_df_20261118/logs/dashboard_runs_20261125.log
+# - 77f018b534c8185511c663f76c48e51cf5d60cdb1731baaff7558a2c84f7c6ae  /Users/anonymous/2026-01-02_enrich_full_df_20261118/data/ai_augment/replay_log.jsonl
 
 # Back up both of these securely.
 
@@ -1902,10 +1947,63 @@ pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.contro
 pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui markdown completed --config "$CONFIG_AI_20261125"
 pixi run -e detour-ai-augment python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui spreadsheet completed martin --config "$CONFIG_AI_20261125"
 
+# these would fail under:
+# [control-centre] Starting Dashboard with config /Users/anonymous/2026-01-02_enrich_full_df_20261118/config_ai_augment_prod_20261125.json
+# [control-centre] persisted Dashboard state restored
+# [control-centre] ready at http://127.0.0.1:8611
+# [control-centre] Publishing failed: RuntimeError('validated attempt database state is inconsistent')
+# Publishing completed researchers failed
+# Traceback (most recent call last):
+#   File "/Users/anonymous/2026-01-02_enrich_full_df_20261118/src/detours/detour_ai_augment/src/control_centre/dashboard/ui.py", line 3925, in publish_and_shutdown
+#     await publish_completed(
+#     ...<2 lines>...
+#     )
+#   File "/Users/anonymous/2026-01-02_enrich_full_df_20261118/src/detours/detour_ai_augment/src/control_centre/dashboard/ui.py", line 3793, in publish_completed
+#     completed_rows = controller.completed_run_rows()
+#   File "/Users/anonymous/2026-01-02_enrich_full_df_20261118/src/detours/detour_ai_augment/src/control_centre/dashboard/ui.py", line 2327, in completed_run_rows
+#     raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
+# RuntimeError: validated attempt database state is inconsistent
+# [control-centre] stopping
+# [control-centre] stopped
+#
+# so i had to proceed to the next step below first.
+
 # Create a backup of the detour database file, then
 # rerun the full Backend launch command above.
-#
+# success - tail of log:
+# ...
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Replaying line 1384/1385
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Replaying line 1385/1385
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Run outcome 01a21903-4a43-7452-915c-f93d2c746120: materialized 1 accepted sections
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Replay complete; accepted hash 77f018b534c8185511c663f76c48e51cf5d60cdb1731baaff7558a2c84f7c6ae at line 1385, byte 10830194
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Verifying replay log: stored hash 77f018b534c8185511c663f76c48e51cf5d60cdb1731baaff7558a2c84f7c6ae at line 1385 byte 10830194; config hash 77f018b534c8185511c663f76c48e51cf5d60cdb1731baaff7558a2c84f7c6ae; 10830194 bytes
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Verifying prefix: 1385 lines, 10830194 bytes
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:Prefix hash matches stored anchor
+# INFO:src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store:DB/log ordinal and byte coverage verified: 1385 lines, 10830194 bytes
+# INFO:__main__:Writable Backend Store ready
+# Dashboard IPC running on unix:///tmp/detour-manual-501.sock
+# INFO:     Application startup complete.
+# INFO:     Uvicorn running on http://127.0.0.1:8612 (Press CTRL+C to quit)
 
+# in fact, i realized that i probably only needed
+# to backup and reset nicegui storage.
+# so i restored the original db and replay log,
+# then backed up and removed .nicegui/storage-general.json
+# Then i started dashboard using non-logged command
+# above and pressed Query IPC.
+# Message:
+# Dashboard query snapshot replaced
+# status bar:
+# Backend API: not checked
+# IPC: available
+# Lima/SSH: not checked
+# Codex/auth: not checked
+# Probed: not checked
+# Total 307 · ground truth 207 · no ground truth 67 · ineligible 33 · ready 227 · queued 0 · running 0 · completed 47 · failed 0 · cancelled 0
+# which is to be expected - 47, not 67, in this batch.
+# Ctrl+C to quit dashboard, then ran the
+# Export output artifacts commands above -
+# successfully this time. Backed up artifacts.
 
 ```
 
